@@ -1,0 +1,1 @@
+ALTER TABLE `conversations` ADD `is_automated` integer DEFAULT false NOT NULL;

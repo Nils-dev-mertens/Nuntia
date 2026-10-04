@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1790985246842,
+      "tag": "0000_grey_moondragon",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790987781612,
+      "tag": "0001_smooth_speed_demon",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791053980531,
+      "tag": "0002_outgoing_gladiator",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791054333766,
+      "tag": "0003_harsh_night_nurse",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791151226773,
+      "tag": "0004_brief_caretaker",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1791153565111,
+      "tag": "0005_youthful_dreadnoughts",
+      "breakpoints": true
+    }
+  ]
+}

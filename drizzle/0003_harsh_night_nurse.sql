@@ -1,0 +1,1 @@
+ALTER TABLE `accounts` ADD `derived_version` integer DEFAULT 0 NOT NULL;

@@ -1,0 +1,4 @@
+[test]
+# Runs before any test module is loaded. Without this the test database is
+# whatever `.env.local` points at, and `bun test` deletes real mail.
+preload = ["./test/setup.ts"]

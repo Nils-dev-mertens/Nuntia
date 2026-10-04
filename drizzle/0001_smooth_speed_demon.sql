@@ -1,0 +1,1 @@
+ALTER TABLE `messages` ADD `greeting_text` text;
