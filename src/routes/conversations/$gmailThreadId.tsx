@@ -11,7 +11,8 @@ import { createFileRoute, useRouter } from '@tanstack/react-router'
 
 import { ConversationView } from '#/components/conversation'
 import { getSession } from '#/lib/auth/index.ts'
-import { loadConversation } from '#/lib/gmail/service.ts'
+import { describeActionFailure, loadConversation } from '#/lib/gmail/service.ts'
+import type { ActionFailure } from '#/lib/gmail/service.ts'
 import {
   refreshThread,
   requireConversation,
@@ -231,9 +232,10 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       attachments: ReplyAttachmentUpload[]
     }) => data,
   )
-  .handler(async ({ data }): Promise<{ error: string | null }> => {
+  .handler(async ({ data }): Promise<ActionFailure> => {
     const session = await getSession()
-    if (!session) return { error: 'You are not signed in.' }
+    if (!session)
+      return { error: 'You are not signed in.', authRequired: false }
 
     try {
       const conversation = await requireConversation(
@@ -242,7 +244,12 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       )
 
       const envelope = await getAccountEnvelope(session.accountId)
-      if (!envelope) return { error: 'No Google account is connected.' }
+      if (!envelope) {
+        return {
+          error: 'No Google account is connected.',
+          authRequired: true,
+        }
+      }
 
       const client = createGmailApiClient(
         await createGmailClient(envelope),
@@ -289,13 +296,10 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       // immediately instead of whenever the next sync happens to run.
       await refreshThread(client, session.accountId, data.gmailThreadId)
 
-      return { error: null }
+      return { error: null, authRequired: false }
     } catch (error) {
       console.error('[send] reply failed:', error)
-      return {
-        error:
-          error instanceof Error ? error.message : 'Could not send the reply.',
-      }
+      return describeActionFailure(error, 'Could not send the reply.')
     }
   })
 

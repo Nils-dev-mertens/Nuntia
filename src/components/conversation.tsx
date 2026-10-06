@@ -14,7 +14,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
-import type { ConversationDetail } from '#/lib/gmail/service.ts'
+import type { ActionFailure, ConversationDetail } from '#/lib/gmail/service.ts'
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
@@ -569,7 +569,7 @@ function Composer({
   onSend: (
     body: string,
     attachments: ReplyAttachmentUpload[],
-  ) => Promise<{ error: string | null }>
+  ) => Promise<ActionFailure>
 }) {
   const [body, setBody] = useState('')
   const [attachments, setAttachments] = useState<ReplyAttachmentUpload[]>([])
@@ -577,6 +577,9 @@ function Composer({
   const filePicker = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set when the failure was Google rejecting the stored grant. A retry cannot
+  // fix that, so the composer offers the one action that can.
+  const [authRequired, setAuthRequired] = useState(false)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
   // Grow to fit, up to a cap, so a long reply does not scroll in a tiny box.
@@ -594,12 +597,14 @@ function Composer({
 
     setBusy(true)
     setError(null)
+    setAuthRequired(false)
 
     try {
       const result = await onSend(trimmed, attachments)
 
       if (result.error) {
         setError(result.error)
+        setAuthRequired(result.authRequired)
       } else {
         // Cleared only on success, so a failed send never discards the reply.
         setBody('')
@@ -617,6 +622,9 @@ function Composer({
     if (!files || files.length === 0) return
 
     setError(null)
+    // An attachment problem is not an auth problem, so a stale Reconnect
+    // action must not linger beside this error.
+    setAuthRequired(false)
     setReadingFiles(true)
     try {
       const selected = Array.from(files)
@@ -667,12 +675,23 @@ function Composer({
   return (
     <div className="border-t border-border bg-card p-4">
       {error ? (
-        <p
+        <div
           role="alert"
           className="mb-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
-          {error}
-        </p>
+          <p>{error}</p>
+          {authRequired ? (
+            <a
+              href="/auth/google"
+              className={cn(
+                'mt-3 inline-flex h-8 items-center rounded-md bg-primary px-3',
+                'text-xs font-medium text-primary-foreground',
+              )}
+            >
+              Reconnect Google
+            </a>
+          ) : null}
+        </div>
       ) : null}
 
       <textarea
@@ -802,7 +821,7 @@ export function ConversationView({
   onSend: (
     body: string,
     attachments: ReplyAttachmentUpload[],
-  ) => Promise<{ error: string | null }>
+  ) => Promise<ActionFailure>
 }) {
   const bottom = useRef<HTMLDivElement>(null)
 

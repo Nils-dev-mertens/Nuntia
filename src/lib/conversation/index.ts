@@ -40,6 +40,7 @@ export {
   listByState,
   listConversations,
   recordDecision,
+  reparseStoredMessages,
   saveConversation,
   getParsingProfileContext,
   saveParsingProfile,

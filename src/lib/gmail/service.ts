@@ -26,6 +26,7 @@ import {
   getConversation,
   getParsingProfileContext,
   listConversations,
+  reparseStoredMessages,
 } from '#/lib/conversation/index.ts'
 import { createGmailApiClient, GmailAuthError } from './client.ts'
 import { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
@@ -84,6 +85,12 @@ export type InboxPayload =
     }
 
 type SyncOutcome = { error: string | null; authRequired: boolean }
+
+/**
+ * What an on-demand Gmail action reports back to the UI: a message to show, and
+ * whether signing in to Google again is the way out.
+ */
+export type ActionFailure = { error: string | null; authRequired: boolean }
 
 /** One message in the detail view. */
 export type ConversationMessageView = {
@@ -265,6 +272,36 @@ export function needsGoogleLogin(error: unknown): boolean {
   return false
 }
 
+/**
+ * Turn a thrown error into a failure the UI can act on.
+ *
+ * When Google has rejected or revoked the stored grant, the raw
+ * `GmailAuthError` text describes the API rather than the fix, so it is replaced
+ * with a message that names the action and a flag saying a reconnect is what
+ * unblocks it. Every other failure keeps its own message and is retryable.
+ *
+ * Shared by the actions that talk to Gmail on demand (sending a reply, re-parsing
+ * a thread) so a conversation view can offer the same reconnect path the inbox
+ * does instead of only echoing an error string.
+ */
+export function describeActionFailure(
+  error: unknown,
+  fallback: string,
+): ActionFailure {
+  if (needsGoogleLogin(error)) {
+    return {
+      error:
+        'Google no longer accepts the stored access — you may have revoked it, or it expired.',
+      authRequired: true,
+    }
+  }
+
+  return {
+    error: error instanceof Error && error.message ? error.message : fallback,
+    authRequired: false,
+  }
+}
+
 async function runSync(accountId: string): Promise<SyncOutcome> {
   const existing = inFlight.get(accountId)
   if (existing) return existing
@@ -361,10 +398,18 @@ async function ensureDerivedFields(accountId: string): Promise<void> {
   if (version >= DERIVED_VERSION) return
 
   const updated = await backfillDerivedFields(accountId)
+  // A parsing change cannot be picked up by incremental sync (Gmail only
+  // revisits changed threads) and raw MIME is not stored, but the pre-strip text
+  // is reconstructable from the row. Re-running the parser here is what makes a
+  // detection fix apply to mail that is already in the database.
+  const reparsed = await reparseStoredMessages(
+    accountId,
+    await getParsingProfileContext(accountId),
+  )
   await setDerivedVersion(accountId, DERIVED_VERSION)
 
   console.log(
-    `[derived] backfilled ${updated} conversations to v${DERIVED_VERSION}`,
+    `[derived] backfilled ${updated} conversations, reparsed ${reparsed} messages to v${DERIVED_VERSION}`,
   )
 }
 

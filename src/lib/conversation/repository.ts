@@ -25,7 +25,9 @@ import type {
   ParsingPreferences,
 } from './model.ts'
 import type { Decision } from './decision.ts'
-import { conversationId } from './model.ts'
+import { cleanMessage, conversationId } from './model.ts'
+import { stripHtmlGreeting, stripHtmlSignature } from '#/lib/mail/index.ts'
+
 import { isAutomatedThread } from './automated.ts'
 
 /**
@@ -40,8 +42,13 @@ import { isAutomatedThread } from './automated.ts'
  * v2 — `messages.body_html` is now populated for every message that has an HTML
  * part, not only HTML-only mail. This cannot be backfilled locally: the old rows
  * stored no HTML at all, so recovering it needs a re-fetch from Gmail.
+ *
+ * v3 — greeting/signature detection was rewritten. Unlike v2 this *can* be
+ * applied locally, because the text the old parser wrongly kept is still in
+ * `body_text`; `reparseStoredMessages` rebuilds the pre-strip text and runs the
+ * parser again. Only text that was wrongly *removed* still needs `rebackfill`.
  */
-export const DERIVED_VERSION = 2
+export const DERIVED_VERSION = 3
 
 /**
  * Recompute derived fields for every conversation of an account.
@@ -73,6 +80,137 @@ export async function backfillDerivedFields(
   })
 
   return rows.length
+}
+
+/**
+ * Re-apply the parser to messages already in the database.
+ *
+ * A parsing change normally needs `scripts/rebackfill.ts`, because only the
+ * *cleaned* body is stored — the raw MIME is not. But every piece the parser saw
+ * is on the row: the greeting and signature it removed (`greeting_text` /
+ * `signature_text`), the quote it removed (`stripped_quote`), and the cleaned
+ * body itself. Rejoining them in message order reproduces the pre-strip text, so
+ * detection runs again and picks up the text a previous parser wrongly kept.
+ *
+ * What it cannot do is restore text a previous parser wrongly *removed*: that
+ * text is gone from the row. For that direction `rebackfill` is still the only
+ * fix, which is why this is a complement to it rather than a replacement.
+ *
+ * Messages whose sender keeps quoted history inline are skipped. Their stored
+ * body still contains the quote, so rejoining the signature next to it would put
+ * the signature on the wrong side of the quote and lose it.
+ *
+ * Idempotent: a row that is already clean reproduces itself, so it is safe to
+ * run on every load where the version lags.
+ */
+export async function reparseStoredMessages(
+  ownerEmail: string,
+  context: ParsingProfileContext,
+): Promise<number> {
+  const conversationRows = await db
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(eq(conversations.accountId, ownerEmail))
+
+  const conversationIds = conversationRows.map((row) => row.id)
+  if (conversationIds.length === 0) return 0
+
+  const rows = await db
+    .select({
+      id: messagesTable.id,
+      from: messagesTable.from,
+      bodyText: messagesTable.bodyText,
+      bodyHtml: messagesTable.bodyHtml,
+      greetingText: messagesTable.greetingText,
+      signatureText: messagesTable.signatureText,
+      strippedQuote: messagesTable.strippedQuote,
+    })
+    .from(messagesTable)
+    .where(inArray(messagesTable.conversationId, conversationIds))
+
+  let updated = 0
+
+  await withWriteLock(async () => {
+    for (const row of rows) {
+      const senderEmail = row.from.email.trim().toLowerCase()
+      // A sender without a profile has no entry here at runtime, so default the
+      // lookup rather than relying on the index signature.
+      const senderPreferences = context.parsingPreferences[senderEmail] ?? {}
+      const preferences: ParsingPreferences = {
+        stripQuotedHistory:
+          senderPreferences.stripQuotedHistory ??
+          context.parsingDefaults.stripQuotedHistory,
+        stripGreeting:
+          senderPreferences.stripGreeting ??
+          context.parsingDefaults.stripGreeting,
+        stripSignature:
+          senderPreferences.stripSignature ??
+          context.parsingDefaults.stripSignature,
+      }
+
+      if (!preferences.stripQuotedHistory) continue
+
+      const reconstructed = [
+        row.greetingText,
+        row.bodyText,
+        row.signatureText,
+        row.strippedQuote,
+      ]
+        .filter((part): part is string => Boolean(part && part.trim()))
+        .join('\n\n')
+        .trim()
+
+      if (!reconstructed) continue
+
+      const cleaned = cleanMessage(
+        {
+          subject: '',
+          from: senderEmail,
+          to: [],
+          cc: [],
+          parts: [{ contentType: 'text/plain', text: reconstructed }],
+        },
+        ownerEmail,
+        preferences,
+      )
+
+      // The stored HTML is already sanitised and quote-stripped, so it is only
+      // trimmed further — never re-sanitised. Trimming re-serialises the document,
+      // which normalises markup (`<br />` becomes `<br>`), so it is done only when
+      // this pass actually detects a greeting or signature the old parser missed.
+      // Otherwise the stored markup is kept byte for byte.
+      const foundNewText =
+        cleaned.greeting !== row.greetingText ||
+        cleaned.signature !== row.signatureText
+      const bodyHtml =
+        row.bodyHtml && foundNewText
+          ? stripHtmlSignature(
+              stripHtmlGreeting(
+                row.bodyHtml,
+                preferences.stripGreeting ? cleaned.greeting : null,
+              ),
+              preferences.stripSignature ? cleaned.signature : null,
+            )
+          : row.bodyHtml
+
+      await db
+        .update(messagesTable)
+        .set({
+          bodyText: cleaned.body,
+          bodyHtml,
+          greetingText: cleaned.greeting,
+          signatureText: cleaned.signature,
+          detectedGreetingText: cleaned.detectedGreeting,
+          detectedSignatureText: cleaned.detectedSignature,
+          strippedQuote: cleaned.strippedQuote,
+        })
+        .where(eq(messagesTable.id, row.id))
+
+      updated++
+    }
+  })
+
+  return updated
 }
 
 /** Insert or replace a conversation and everything under it. */

@@ -191,13 +191,14 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] Test isolation fixed — `bunfig.toml` preload + a fatal guard against tests hitting `data/lumen.db`
 - [x] **Rich email bodies** — HTML captured for every message, sanitised at parse time, rendered in a sandboxed iframe
 - [x] **Reply quoting** — replies quote the original as HTML in a `blockquote` instead of a wall of `>` lines
-- [x] 224 tests passing; typecheck and lint pass; production build succeeds (TanStack `inputValidator()` deprecation warnings remain)
+- [x] 250 tests passing; typecheck and lint pass; production build succeeds (TanStack `inputValidator()` deprecation warnings remain)
 - [x] **Attachments on send** — composer upload, bounded server-side validation, and `multipart/mixed` MIME with base64 attachment parts
 - [x] **Topic / goal editing UI** — authenticated editor with validated saves and database persistence
 - [x] **Per-sender parsing controls** — account-wide defaults plus per-sender overrides for quotes/greetings/signatures, removed text shown per message, settings re-parse the open thread on save
 - [x] **Reply style per sender** — account-wide greeting/signature defaults with per-sender overrides that fall back to the user's own most recent message
 - [x] **Reconnect after revoked Google access** — a rejected/expired grant surfaces a "Reconnect Google" action instead of only a sync error
 - [ ] LLM decision layer behind the existing interface
+- [ ] **Multiple accounts in one merged inbox** — accounts global to the install, threads merged by shared `Message-ID`, relation-aware ownership and reply sender (see "Multiple accounts, one inbox")
 
 ## Mail parser
 
@@ -237,18 +238,29 @@ element and was taking the early-`continue` path without ever incrementing.
   forward), the original is kept — a blank chat bubble is worse than a long one.
 - **Order is quote → signature → greeting.** A reply puts the signature _above_ the
   quoted history, so stripping quotes first leaves the signature intact.
-- **Signatures** need an explicit closing (`--`, `Sent from my iPhone`, `Best regards,`,
-  `Met vriendelijke groet(en)`, `mvg`, `Cordialement`, …) within the last 12 lines, matched
-  as a whole line so a sentence that merely mentions the word never starts a signature.
-  Mid-body text is never touched. Like the greetings, the closing list is **multi-lingual**
-  — the Dutch standard was missing, so `Met vriendelijke groeten,\nNils` stayed in the
+- **Signatures** are found two ways. A closing word (`--`, `Sent from my iPhone`, `Best
+regards,`, `Met vriendelijke groet(en)`, `Groetjes`, `Bedankt`, `Take care`, `mvg`, …)
+  within the last 12 lines wins; it is matched as a whole line, with an optional name after
+  it on the same line (`Groetjes, Nils`), so a sentence that merely mentions the word never
+  starts a signature. The closing list is **multi-lingual** — the Dutch standards
+  (`groetjes`, `bedankt`, `groeten`) were missing, so `Groetjes,\nJan` stayed in the
   bubble.
-- **Greetings** must be the first non-empty line, under 70 chars, matching a known
-  opener. "Hi, I was wondering whether we could push the launch" is content, not a
-  greeting. The opener list is **multi-lingual** (`hi`, `hey`, `dag`, `hoi`, `beste`,
-  `geachte`, `hallo`, `guten tag`, …) because the mailbox is Dutch: an unknown opener is
-  not stripped, and the greeting sits in the bubble — the exact failure the parser exists
-  to prevent. A word-boundary match keeps `Dag` from matching `Dagelijks`.
+- **The positional fallback for a signature** runs only when no closing word is found: it
+  looks at the trailing block after a blank line, up to five lines, the first a name and
+  the rest name/contact lines. A lone single word is deliberately **not** enough —
+  `E-mailvoorkeuren` and `Unsubscribe` end newsletters the same way a first name ends a
+  personal mail, so a real name left in the bubble is the cheaper error. Mid-body text is
+  never touched.
+- **Greetings** are the first non-empty line. A known opener (`hi`, `hey`, `dag`, `hoi`,
+  `beste`, `geachte`, `hallo`, `guten tag`, …) with at most a short, punctuation-free tail
+  is stripped whole, so `Dag Guillaume,` and `Hallo allemaal,` both qualify. The list is
+  **multi-lingual** because the mailbox is Dutch: an unknown opener is not stripped and the
+  greeting sits in the bubble — the exact failure the parser exists to prevent. A short
+  opener that shares its line with the message (`Hi Sarah, how are you?`) loses only the
+  salutation and keeps the question, but a **long** opener line (`Hi, I was wondering
+whether we could push the launch`) is content and is left alone. A bare name plus comma
+  (`Nils,`) is accepted positionally, with discourse words (`Anyway,`, `Sure,`) excluded,
+  and a word boundary keeps `Dag` from matching `Dagelijks`.
 - **Quoted-printable encodes UTF-8 bytes**, not code points: an em dash is `=E2=80=94`.
   Encoding the code point directly produces `=2014`, which decodes as a space + "14".
 
@@ -395,13 +407,24 @@ carries an `authRequired` flag through the loader payload, and the inbox renders
 advances the cursor, the account stays stale, so the prompt reappears on every load until
 the user signs in again.
 
+On-demand actions need the same treatment, because they fail **outside** a sync: a reply
+is sent with `users.messages.send` and the thread is re-fetched to make it appear, and
+neither of those is covered by the inbox's staleness check. A rejected grant there used to
+surface as the raw `GmailAuthError` text in the composer. `describeActionFailure(error,
+fallback)` now classifies the failure: when a fresh login is the fix it returns a message
+that names the action plus `authRequired: true`, and the composer renders a **Reconnect
+Google** link beside the error; every other failure keeps its own message. It is the same
+`needsGoogleLogin` predicate that `runSync` uses, so "this needs a re-login" is decided in
+one place.
+
 ### Known gaps
 
 - Single-user: no session table, and the session cookie is not revocable server-side
   (signing out clears the cookie, but a stolen cookie stays valid until expiry).
 - `SESSION_SECRET` falls back to `TOKEN_ENCRYPTION_KEY` for local convenience.
-- Reconnect is surfaced on the inbox only. The conversation view still shows the raw
-  `GmailAuthError` message on a failed send rather than an inline re-login action.
+- Reconnect is surfaced on the inbox and on a failed send in the composer. The
+  parsing-profile save in the conversation header still reports a re-parse failure as a
+  plain message rather than offering the reconnect action.
 - `prompt: 'consent'` is sent on every `/auth/google` visit, so reconnecting asks for
   consent again rather than silently reusing the grant. That is intentional — it is what
   makes the reconnect button reliable — but it is a second consent screen.
@@ -524,6 +547,100 @@ Both are easy to get wrong in the direction of never syncing again:
   which a naive `age >= threshold` reads as fresh — suppressing syncing for an unknown
   stretch. Both cases are covered in `freshness.test.ts`.
 
+## Multiple accounts, one inbox
+
+Accounts are **global to the install**, not a per-browser set, and there is no account
+switcher: every connected mailbox appears in one list. Two decisions shape the rest.
+
+**1. Merge by shared `Message-ID`, always.** When both of your addresses are on a thread,
+Gmail stores it as two threads with different ids and overlapping messages.
+`messages.internet_message_id` is the RFC 5322 `Message-ID` — the _same string in every
+mailbox that received that message_ — so "these two conversations are the same thread" is
+exact rather than a subject/participant guess.
+
+**2. What the thread _means_ depends on how your accounts relate to it.** Classified from
+the stored `from` / `to` / `cc` of the cluster's messages:
+
+| Relation                | Detection                                                  | Reply from (default)                            |
+| ----------------------- | ---------------------------------------------------------- | ----------------------------------------------- |
+| `between-your-accounts` | one of yours in `From`, another of yours in `To`/`From`    | the account the newest message was addressed to |
+| `primary`               | exactly one of yours in `From`/`To`, the rest only in `Cc` | the primary account                             |
+| `cc-only`               | all of yours appear only in `Cc`                           | the account the newest message was addressed to |
+
+A `primary` cluster is one row owned by the primary account. The CC'd address is an
+annotation and is **excluded from state and urgency**, so a passive copy never makes a
+thread look like it needs action. A `cc-only` cluster is one row ranked low — someone
+else's thread that happens to be copied to two of your addresses.
+
+**Merge at the message level, not the conversation level.** Folding two stored
+conversations together after the fact means re-deriving `state`, `participants`,
+`messageCount` and `lastMessageAt` from a union that no rule was written against.
+Instead the cluster's messages are unioned first (by `internet_message_id`, falling back to
+the provider message id) and a single build pass runs over them, so `deriveState` and the
+rest still see one ordered thread.
+
+**"Mine" becomes a set.** `cleanMessage` compares against a single `context.ownerEmail`.
+With more than one connected address, a message from your _second_ address inside a thread
+you own would render as a stranger's — left-aligned, and counted as an inbound turn. The
+owner set replaces the singular email. `is_from_account_owner` is stored per row from a
+one-owner sync, so this also needs the existing re-derive pass — bump `DERIVED_VERSION`,
+which `reparseStoredMessages` already drives.
+
+**Reply follows the conversation, not the session.** `sendReplyAction` and
+`saveParsingProfileAction` build their Gmail client from `session.accountId`, and
+`requireConversation(session.accountId, …)` scopes the lookup. With global accounts both
+must use `conversations.accountId` instead, or a reply leaves from the wrong address. The
+composer shows the chosen sender and allows picking when more than one of yours is on the
+thread.
+
+**Reconnect and staleness are per account.** One revoked mailbox must not blank the merged
+list: `loadInbox`'s `authRequired` becomes a per-account list so the banner can name the
+mailbox that needs it, and `lastSyncedAt` is per account too.
+
+### Sequential steps
+
+1. `accounts.provider` (default `'gmail'`) and `UNIQUE(provider, email)` replacing the
+   global `accounts_email_idx`; rename the `gmail_*` id columns to `provider_*` while there is
+   still only one provider — the merge, owner set and relation rules are provider-neutral, so
+   this is what makes a second service free later.
+2. `loadInbox()` drops its account argument and fans out over `listAccounts()`, returning a
+   per-account `authRequired` / `lastSyncedAt`. `getSession()` becomes only the "this browser
+   is signed in" guard.
+3. Owner set through `BuildContext`, plus the `DERIVED_VERSION` re-derive.
+4. The cluster + relation module; `loadConversation` and the reply path resolve the
+   conversation's own `accountId`.
+5. Inbox rows carry their account and relation tag; the composer picks the sender.
+
+**Security caveat, stated because it is a real property of this design:** with accounts
+global to the install, any successful Google sign-in unlocks every connected mailbox. That
+is accepted for a single-user local install, and it must become a per-user scope before
+this is exposed on a network or shared.
+
+### A second service
+
+Everything above is provider-neutral, so a non-Gmail mailbox is a separate and later piece
+of work:
+
+- **The client seam already exists.** `GmailClient`'s six methods are all `sync` and `send`
+  see, and nothing above `lib/gmail` imports a Gmail type. But the interface is
+  Gmail-shaped: `getProfileHistoryId` / `listHistory` _are_ its cursor, `listThreads` takes
+  Gmail search syntax, and `BACKFILL_QUERY = 'newer_than:30d'` lives in `service.ts`, outside
+  the adapter.
+- **Cursors generalise to `sync_cursors(accountId, kind, value)`** — Gmail `historyId`, Graph
+  `deltaLink`, IMAP `UIDVALIDITY` + `UIDNEXT`.
+- **Threading is the expensive part.** Gmail and Graph hand you a thread/conversation id;
+  IMAP does not, so an IMAP adapter has to rebuild threads from `References` / `In-Reply-To`
+  and subject. That, not the column renames, is the work.
+- **Sending differs.** Graph sends server-side; IMAP needs SMTP, so the client wants
+  capability flags (`supportsDelta`, `hasThreadIds`, `canSend`) and a separate send
+  transport rather than one `sendMessage`.
+- **Auth generalises to an `OAuthProvider` seam** (`buildAuthUrl` / `exchangeCode` /
+  `fetchProfile` / `createClient` / `scopes`) with `google.ts` and a `microsoft.ts` behind
+  it. Token encryption is unchanged and stays per-install, not per-provider.
+- **Already neutral, and worth keeping that way:** the MIME parser, HTML sanitiser, quote /
+  greeting / signature stripping, no-reply detection (address-based), the conversation
+  model, and the decision layer.
+
 ## Machine mail is not a chat
 
 A no-reply address is not a conversation. Rendering "build #881 failed" as chat bubbles is
@@ -586,8 +703,8 @@ them and runs `backfillDerivedFields` when they lag. The recompute reads only th
 `messages` table — no Gmail round trip — and is idempotent, so it costs one extra query per
 load and a local pass once per version bump.
 
-**Bump `DERIVED_VERSION` whenever a derived column is added to `conversations`.** Otherwise
-the same silent-staleness bug returns.
+**Bump `DERIVED_VERSION` whenever a derived column is added to `conversations`, or the
+parser changes.** Otherwise the same silent-staleness bug returns.
 
 ## The conversation view
 
@@ -687,25 +804,31 @@ signature detection and were copied out of the app into whatever the user wrote 
 marks, and collapses a line left with nothing but spacing, since that filler was faking
 vertical space and keeping the empty line would render a gap the sender never asked for.
 
-### A parsing change is not a derived column
+### Parsing changes fix themselves locally — mostly
 
-`DERIVED_VERSION` (now 2) covers a new _column_ that can be recomputed from the local
-`messages` table. This change is different: the HTML was never stored, so there is
-nothing local to recompute from. `scripts/rebackfill.ts` re-fetches threads **by id**, not
+`DERIVED_VERSION` (now 3) began as a way to recompute a new _column_ from the local
+`messages` table. A parsing change looks like it cannot use that, because the raw MIME was
+never stored — but the text the old parser wrongly **kept** is right there in
+`messages.body_text`.
+
+`reparseStoredMessages` uses that: it rebuilds the pre-strip text from the row's own pieces
+— `greeting_text` + `body_text` + `signature_text` + `stripped_quote` — and runs the parser
+again, so a detection fix reaches mail already in the database with no Gmail round trip. It
+runs from `ensureDerivedFields` when the stored version lags, and is idempotent. Stored
+HTML is trimmed only when the pass actually detects text the old parser missed, because
+re-serialising an untouched document normalises markup (`<br />` becomes `<br>`).
+
+The direction it cannot fix is text a previous parser wrongly **removed** — that text is
+only in the raw message. For that, `scripts/rebackfill.ts` re-fetches threads **by id**, not
 by search query — a `newer_than:30d` query returns whatever is still inside the window (6
 threads out of 31 on this mailbox, because mail ages out of a date range whether or not
 the app still shows it), whereas ids come from the database, so every conversation already
 in the inbox is fixed and nothing else is pulled in.
 
-Worth remembering: `--missing-html` is _not_ sufficient after this change. It skips
-threads that already had a `body_html` value, which is exactly the ones holding the old
-unsanitised markup. Run the full re-fetch.
-
-The same applies to the greeting fix. `messages.body_text` stores the body _after_
-stripping, and the raw MIME is never kept locally, so rows parsed before the multi-lingual
-opener list still contain their `Dag …` greeting and cannot be corrected from the
-database alone. Re-run `bun run scripts/rebackfill.ts <account-email>` to re-fetch and
-re-parse them.
+Worth remembering: `--missing-html` is _not_ sufficient after an HTML/rendering change. It
+skips threads that already had a `body_html` value, which is exactly the ones holding the
+old unsanitised markup. Run the full re-fetch. (It is still the flag to use when the plain
+body is fine and only HTML is missing.)
 
 ### Replies
 
@@ -815,9 +938,9 @@ once at module load.** The guard is the backstop, not the mechanism.
   missing — `bun run db:migrate` recreates it. Do not `rm -rf data` casually.
 - Never write two rows from concurrent requests without `withWriteLock`. See the Gmail sync
   section for why `busy_timeout` alone does not save you.
-- Bump `DERIVED_VERSION` when adding a derived column to `conversations`. Incremental sync
-  will not revisit unchanged threads, so without it the new column stays at its migration
-  default forever and nothing reports a problem.
+- Bump `DERIVED_VERSION` when adding a derived column to `conversations` or changing the
+  parser. Incremental sync will not revisit unchanged threads, so without it the new column
+  stays at its migration default forever and nothing reports a problem.
 - `from` is a reserved word in SQLite — quote it (`"from"`) in raw queries, or select the
   column and parse the JSON in JS.
 - `sync.test.ts` sets `DATABASE_URL` to an isolated temp file _before_ importing `#/db/index.ts`,

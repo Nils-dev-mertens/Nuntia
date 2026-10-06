@@ -46,46 +46,141 @@ const WEAK_QUOTE_MARKERS: RegExp[] = [
 const QUOTED_LINE = /^\s*>/
 
 /**
+ * A person-name-shaped phrase: one to three capitalised words.
+ *
+ * Used for the optional name a sign-off carries on the same line
+ * (`Groetjes, Nils`) and for a bare-name greeting or signature line (`Nils,`).
+ *
+ * The `(?![IA]\b)` guard keeps a lone English pronoun from reading as a name,
+ * so `Thanks, I'll …` never matches `Thanks,` as a sign-off.
+ */
+const NAME_PHRASE =
+  "(?![IA]\\b)[\\p{Lu}][\\p{L}'’.-]*(?:\\s+[\\p{Lu}][\\p{L}'’.-]*){0,2}"
+
+/**
+ * Build a signature-closer pattern from raw regex fragments.
+ *
+ * Each closer matches a whole line, with an optional person-name after it on
+ * the same line and optional trailing punctuation: `Groetjes`, `Groetjes,`,
+ * `Groetjes, Nils` and `Best regards!` are all the same closer.
+ */
+function signoff(...fragments: string[]): RegExp {
+  return new RegExp(
+    `^\\s*(?:${fragments.join('|')})(?:[\\s,]+${NAME_PHRASE})?[,!]?\\s*$`,
+    'iu',
+  )
+}
+
+/**
  * Closings that mark the start of a signature block.
  *
  * Multi-lingual for the same reason the greetings are: a closing the list does
  * not know is not stripped, so it stays in the bubble. `met vriendelijke
- * groet(en)` is the Dutch standard and the one this mailbox actually uses.
+ * groeten`, `groetjes` and `bedankt` are the Dutch standards this mailbox
+ * actually uses.
  *
- * Each pattern is anchored to the whole line and matches a closing *by itself*,
- * so a sentence that merely contains the word is never treated as a signature.
+ * Each pattern is anchored to the whole line, so a sentence that merely
+ * mentions the word is never treated as a signature. A sign-off may carry the
+ * sender's name on the same line (`Groetjes, Nils`); everything from the
+ * matched line to the end of the body is taken as the signature either way.
  */
-const SIGNATURE_MARKERS = [
+const SIGNATURE_MARKERS: RegExp[] = [
   /^\s*--\s*$/, // RFC 3676 sig delimiter: "-- "
   /^\s*__+\s*$/,
   /^\s*sent from my /i, // "Sent from my iPhone"
   // English
-  /^\s*best regards,?\s*$/i,
-  /^\s*kind regards,?\s*$/i,
-  /^\s*warm regards,?\s*$/i,
-  /^\s*regards,?\s*$/i,
-  /^\s*cheers,?\s*$/i,
-  /^\s*best,\s*$/i,
-  /^\s*thanks,?\s*$/i,
-  /^\s*thank you,?\s*$/i,
-  /^\s*sincerely,?\s*$/i,
+  signoff(
+    'best regards',
+    'kind regards',
+    'warm regards',
+    'regards',
+    'cheers',
+    'best',
+    'thanks(?: so much)?',
+    'thank you',
+    'many thanks',
+    'sincerely',
+    'take care',
+    'all the best',
+    'best wishes',
+    'talk soon',
+    'speak soon',
+    'have a (?:nice|great) day',
+    'yours',
+  ),
   // Dutch / Flemish
-  /^\s*alvast bedankt!?\s*$/i,
-  /^\s*met vriendelijke groet(en)?,?\s*$/i,
-  /^\s*vriendelijke groet(en)?,?\s*$/i,
-  /^\s*hartelijke groet(en)?,?\s*$/i,
-  /^\s*groet(en)?,?\s*$/i,
-  /^\s*mvg,?\s*$/i,
+  signoff(
+    'alvast bedankt',
+    'hartstikke bedankt',
+    'hartelijk dank',
+    'dank je wel',
+    'dankjewel',
+    'bedankt',
+    'dank',
+    'met vriendelijke groet(?:en)?',
+    'vriendelijke groet(?:en)?',
+    'hartelijke groet(?:en)?',
+    'groet(?:en)?',
+    'groetjes',
+    'mvg',
+    'fijne (?:dag|avond)',
+    'tot (?:snel|morgen|gauw)',
+  ),
   // German
-  /^\s*mit freundlichen gr(ü|u)(ß|ss)en,?\s*$/i,
-  /^\s*viele gr(ü|u)(ß|ss)e,?\s*$/i,
+  signoff(
+    'mit freundlichen gr(?:ü|u)(?:ß|ss)en',
+    'viele gr(?:ü|u)(?:ß|ss)e',
+    'liebe gr(?:ü|u)(?:ß|ss)e',
+    'gr(?:ü|u)(?:ß|ss)e',
+    'lg',
+  ),
   // French / Spanish / Italian
-  /^\s*cordialement,?\s*$/i,
-  /^\s*salutations,?\s*$/i,
-  /^\s*un saludo,?\s*$/i,
-  /^\s*saludos,?\s*$/i,
-  /^\s*cordiali saluti,?\s*$/i,
+  signoff(
+    'cordialement',
+    'salutations',
+    'bien à vous',
+    'amicalement',
+    'un saludo',
+    'saludos',
+    'atentamente',
+    'cordiali saluti',
+    'un abbraccio',
+  ),
 ]
+
+/**
+ * Lines a signature tail is allowed to be made of.
+ *
+ * Beyond the name itself, a signature carries the sender's contact details,
+ * and those are the shapes a phone number, an email address and a link have.
+ */
+const CONTACT_LINE_PATTERNS = [
+  /^[+\d][\d\s()./-]{5,}$/,
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+  /^(?:https?:\/\/|www\.)\S+$/i,
+]
+
+/**
+ * Punctuation that marks a sentence, which a signature line does not carry.
+ *
+ * Checked after the contact patterns, so the dot in `nils@example.com` and in
+ * a URL is not mistaken for a full stop.
+ */
+const SENTENCE_PUNCTUATION = /[.!?;:]/
+
+/** True when a line is just a person's name, with an optional comma. */
+function isNameLine(line: string): boolean {
+  return new RegExp(`^${NAME_PHRASE},?$`, 'u').test(line.trim())
+}
+
+/** True when a line reads as a name or a single contact detail. */
+function isContactOrNameLine(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed || trimmed.length > 60) return false
+  if (CONTACT_LINE_PATTERNS.some((p) => p.test(trimmed))) return true
+  if (SENTENCE_PUNCTUATION.test(trimmed)) return false
+  return isNameLine(trimmed)
+}
 
 /**
  * Greeting openers.
@@ -145,9 +240,78 @@ const GREETING_OPENERS = [
 ]
 
 const GREETING_PATTERN = new RegExp(
-  `^(${GREETING_OPENERS.join('|')})\\b[^\\n]{0,60},?\\s*$`,
-  'i',
+  // A known opener plus at most a short, punctuation-free tail: `Hi Alex,`,
+  // `Hallo allemaal,`. The tail cap is what keeps `Hi, I was wondering …` out.
+  // `(?!\p{L})` rather than `\b` so a non-ASCII opener (`grüezi`, `hå`) still
+  // matches at a word end.
+  `^(?:${GREETING_OPENERS.join('|')})(?!\\p{L})[^.!?;:\\n]{0,16}[,!]?\\s*$`,
+  'iu',
 )
+
+/**
+ * A bare salutation line: `Nils,`, `Guillaume,`.
+ *
+ * The positional fallback for an opener the list does not know. Only the first
+ * line is tested, it must be short, and discourse openers (`Anyway,`,
+ * `However,`) are excluded so a transition still reads as content.
+ */
+// The comma is required here. It is what separates a salutation (`Nils,`) from
+// an ALL-CAPS headline of two capitalised words (`AWESOME NEWS`), which the
+// name shape alone would otherwise match.
+const NAME_GREETING_PATTERN = new RegExp(`^${NAME_PHRASE},\\s*$`, 'u')
+
+/**
+ * A greeting that shares its line with the message: `Hi Sarah, how are you?`.
+ *
+ * The comma is required, and that is the whole safety mechanism. It keeps a
+ * body that merely starts with an opener word (`Morning light streamed in`) from
+ * being read as a salutation, while still splitting the greeting off the front
+ * of the one-line opener most people actually write.
+ */
+const OPENER_INLINE_PATTERN = new RegExp(
+  `^((?:${GREETING_OPENERS.join('|')})(?!\\p{L})[^.!?;:\\n,]{0,20},)[ \\t]+(\\S.*)$`,
+  'iu',
+)
+
+/**
+ * Longest first line the inline split is allowed to touch.
+ *
+ * A whole sentence that opens with `Hi,` is content, and the existing rule is
+ * that a long opening line is left alone. A short one is a salutation plus a
+ * question (`Hi Sarah, how are you?`), and only the salutation is removed.
+ */
+const INLINE_GREETING_MAX_LINE = 60
+
+/** Words that look like a capitalised name but open a sentence, not a mail. */
+const GREETING_STOPWORDS = new Set([
+  'anyway',
+  'however',
+  'also',
+  'well',
+  'so',
+  'but',
+  'and',
+  'plus',
+  'moreover',
+  'furthermore',
+  'therefore',
+  'meanwhile',
+  'finally',
+  'then',
+  'now',
+  'ok',
+  'okay',
+  'sure',
+  'yes',
+  'no',
+  'right',
+  'agreed',
+  'correct',
+  'first',
+  'second',
+  'lastly',
+  'update',
+])
 
 /** Split into lines while keeping the original line endings out of the way. */
 function toLines(text: string): string[] {
@@ -212,13 +376,61 @@ export function stripQuotedText(
   return { body, quote: quote || null }
 }
 
+/** Index one past the last non-blank line. */
+function trimTrailingBlank(lines: string[]): number {
+  let end = lines.length
+  while (end > 0 && !lines[end - 1].trim()) end--
+  return end
+}
+
+/**
+ * The trailing block, when it reads as a signature card.
+ *
+ * The positional half of signature detection: some senders sign off with just
+ * their name and contact details and no closing word at all. A block qualifies
+ * only when a blank line separates it from the prose (a name glued to the last
+ * sentence is content), it is at most five lines, and it is made of a name line
+ * followed only by name/contact lines.
+ */
+function trailingSignatureBlock(
+  lines: string[],
+): { start: number; end: number } | null {
+  const end = trimTrailingBlank(lines)
+  if (end === 0) return null
+
+  let start = end - 1
+  while (start > 0 && lines[start - 1].trim()) start--
+
+  // No blank line above the block means it is the tail of the prose.
+  if (start === 0) return null
+
+  const block = lines.slice(start, end)
+  if (block.length > 5) return null
+  if (!isNameLine(block[0])) return null
+  if (!block.every((line) => isContactOrNameLine(line))) return null
+
+  // A lone single word is too weak to call a signature: a newsletter footer
+  // ends in `E-mailvoorkeuren` or `Unsubscribe` just as a person ends in their
+  // first name. Requiring a second word or line keeps the guess off those
+  // footers, and leaving a real first name in the bubble is the cheaper error.
+  if (block.length === 1 && nameWordCount(block[0]) < 2) return null
+
+  return { start, end }
+}
+
+/** How many capitalised words a name line carries. */
+function nameWordCount(line: string): number {
+  return line.trim().replace(/,$/, '').split(/\s+/).filter(Boolean).length
+}
+
 /**
  * Detect a trailing signature block.
  *
- * Returns the signature text and the body with it removed. We require either an
- * explicit delimiter ("--", "Sent from my iPhone") or a salutation in the last
- * few lines, because everything after a salutation in a short tail is almost
- * always the signature.
+ * Returns the signature text and the body with it removed. Detection is
+ * two-pass: a closing word (`Met vriendelijke groeten`, `Groetjes`, `Thanks`)
+ * anywhere in the last few lines wins, and only when none is found does the
+ * positional fallback try the trailing name/contact block. A known closer is a
+ * much stronger signal than position, so it is tried first.
  */
 export function stripSignature(text: string): {
   body: string
@@ -232,19 +444,30 @@ export function stripSignature(text: string): {
   const tailStart = Math.max(0, lines.length - 12)
 
   for (let i = lines.length - 1; i >= tailStart; i--) {
-    const line = lines[i]
-    if (SIGNATURE_MARKERS.some((m) => m.test(line))) {
-      // Walk forward to the end, skipping trailing blank lines.
-      let end = lines.length
-      while (end > i && !lines[end - 1].trim()) end--
+    if (!SIGNATURE_MARKERS.some((m) => m.test(lines[i]))) continue
 
-      const signature = lines.slice(i, end).join('\n').trim()
-      const body = lines.slice(0, i).join('\n').trim()
+    // Walk forward to the end, skipping trailing blank lines.
+    const end = trimTrailingBlank(lines)
 
-      // Never strip the whole message.
-      if (!body) return { body: text.trim(), signature: null }
+    const signature = lines.slice(i, end).join('\n').trim()
+    const body = lines.slice(0, i).join('\n').trim()
 
-      return { body, signature: signature || null }
+    // Never strip the whole message.
+    if (!body) return { body: text.trim(), signature: null }
+
+    return { body, signature: signature || null }
+  }
+
+  // No closing word: a bare name block is still a signature.
+  const block = trailingSignatureBlock(lines)
+  if (block) {
+    const body = lines.slice(0, block.start).join('\n').trim()
+    // Never strip the whole message.
+    if (body) {
+      return {
+        body,
+        signature: lines.slice(block.start, block.end).join('\n').trim(),
+      }
     }
   }
 
@@ -252,11 +475,49 @@ export function stripSignature(text: string): {
 }
 
 /**
+ * Split a first line into a greeting and whatever the line says after it.
+ *
+ * Three shapes are accepted, in order of strength: a whole line that is a known
+ * opener with a short tail, a whole line that is a bare name (`Nils,`), and a
+ * line that starts with an opener and carries the message after the comma
+ * (`Hi Sarah, how are you?`). Returns null when the line is content.
+ */
+function splitGreeting(
+  line: string,
+): { greeting: string; rest: string } | null {
+  if (line.length <= 70 && GREETING_PATTERN.test(line)) {
+    return { greeting: line, rest: '' }
+  }
+
+  // The positional form is stricter: a short, bare name followed by a comma.
+  if (
+    line.length <= 40 &&
+    NAME_GREETING_PATTERN.test(line) &&
+    !GREETING_STOPWORDS.has(line.replace(/,$/, '').trim().toLowerCase())
+  ) {
+    return { greeting: line, rest: '' }
+  }
+
+  if (line.length > INLINE_GREETING_MAX_LINE) return null
+
+  const inline = OPENER_INLINE_PATTERN.exec(line)
+  if (!inline) return null
+
+  const greeting = inline[1].trim()
+  const rest = inline[2].trim()
+  // A salutation longer than this is the start of a sentence, not a greeting.
+  if (greeting.length > 40 || !rest) return null
+
+  return { greeting, rest }
+}
+
+/**
  * Strip a leading greeting.
  *
- * Only the first non-empty line is considered, and only if it is short and
- * matches a greeting shape. A long first line starting with "Hi" is content,
- * not a greeting.
+ * Only the first non-empty line is looked at. A greeting never costs the
+ * message its content: when the line continues past the salutation, only the
+ * greeting is removed and the rest of the line is kept as the body's first
+ * line. A long sentence that merely starts with "Hi" is content.
  */
 export function stripGreeting(text: string): {
   body: string
@@ -269,22 +530,18 @@ export function stripGreeting(text: string): {
 
   if (firstIdx === -1) return { body: '', greeting: null }
 
-  const first = lines[firstIdx].trim()
-  if (!GREETING_PATTERN.test(first))
-    return { body: text.trim(), greeting: null }
+  const split = splitGreeting(lines[firstIdx].trim())
+  if (!split) return { body: text.trim(), greeting: null }
 
-  // A greeting must be short. "Hi, I was wondering whether we could" is content.
-  if (first.length > 70) return { body: text.trim(), greeting: null }
+  const bodyLines = lines.slice(firstIdx + 1)
+  if (split.rest) bodyLines.unshift(split.rest)
 
-  const body = lines
-    .slice(firstIdx + 1)
-    .join('\n')
-    .trim()
+  const body = bodyLines.join('\n').trim()
 
   // If the greeting is the entire message, keep it — it's the content.
   if (!body) return { body: text.trim(), greeting: null }
 
-  return { body, greeting: first }
+  return { body, greeting: split.greeting }
 }
 
 /**
