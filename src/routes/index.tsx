@@ -31,8 +31,37 @@ const fetchInbox = createServerFn({ method: 'GET' }).handler(async () => {
 
   if (!session) return { signedIn: false } as const
 
-  return loadInbox(session.accountId)
+  // Accounts are global to the install, so the loader does not name one: every
+  // connected mailbox is read and merged into a single list.
+  return loadInbox()
 })
+
+/**
+ * Rebuild the inbox from Gmail on demand.
+ *
+ * The escape hatch for the failure incremental sync cannot fix on its own: a
+ * thread whose save failed while the cursor still advanced past it. Passing
+ * `full` turns the run into a backfill, which re-lists threads rather than
+ * trusting the cursor.
+ */
+const resyncInbox = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      const payload = await loadInbox({ force: true, full: true })
+      if (!payload.signedIn) return { error: 'No mailbox is connected.' }
+      // A failed sync does not throw — it is reported on the payload.
+      return { error: payload.syncError }
+    } catch (error) {
+      console.error('[resync] failed:', error)
+      return {
+        error: error instanceof Error ? error.message : 'Re-sync failed.',
+      }
+    }
+  },
+)
 
 export const Route = createFileRoute('/')({
   loader: () => fetchInbox(),
@@ -63,5 +92,16 @@ function Home() {
     }
   }, [router])
 
-  return <Inbox payload={payload} />
+  return (
+    <Inbox
+      payload={payload}
+      onResync={async () => {
+        const result = await resyncInbox()
+        // The action has already written whatever it could, so a refresh is
+        // what makes the list reflect it.
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+    />
+  )
 }

@@ -22,6 +22,9 @@ const STRONG_QUOTE_MARKERS: RegExp[] = [
   /^\s*-{2,}\s*forwarded(\s+message)?\s*-{2,}\s*$/i,
   // Apple Mail / Gmail web: "On <date>, <person> wrote:"
   /^\s*on .{0,200}\bwrote:\s*$/i,
+  // Outlook web / new Outlook: a long machine-drawn rule of underscores above
+  // the "From:" block. Long enough that it is not a person underlining a word.
+  /^_{10,}$/,
 ]
 
 /**
@@ -65,8 +68,11 @@ const NAME_PHRASE =
  * `Groetjes, Nils` and `Best regards!` are all the same closer.
  */
 function signoff(...fragments: string[]): RegExp {
+  const closer = `(?:${fragments.join('|')})`
   return new RegExp(
-    `^\\s*(?:${fragments.join('|')})(?:[\\s,]+${NAME_PHRASE})?[,!]?\\s*$`,
+    // One closing, or several chained with `/` (see `ALL_CLOSINGS`).
+    `^\\s*${closer}(?:\\s*[/|]\\s*${closer})*` +
+      `(?:[\\s,]+${NAME_PHRASE})?[,!]?\\s*$`,
     'iu',
   )
 }
@@ -84,68 +90,89 @@ function signoff(...fragments: string[]): RegExp {
  * sender's name on the same line (`Groetjes, Nils`); everything from the
  * matched line to the end of the body is taken as the signature either way.
  */
+/** English closings. */
+const ENGLISH_CLOSINGS = [
+  'best regards',
+  'kind regards',
+  'warm regards',
+  'regards',
+  'cheers',
+  'best',
+  'thanks(?: so much)?',
+  'thank you',
+  'many thanks',
+  'sincerely',
+  'take care',
+  'all the best',
+  'best wishes',
+  'talk soon',
+  'speak soon',
+  'have a (?:nice|great) day',
+  'yours',
+]
+
+/** Dutch / Flemish closings. */
+const DUTCH_CLOSINGS = [
+  'alvast bedankt',
+  'hartstikke bedankt',
+  'hartelijk dank',
+  'dank je wel',
+  'dankjewel',
+  'bedankt',
+  'dank',
+  'met vriendelijke groet(?:en)?',
+  'vriendelijke groet(?:en)?',
+  'hartelijke groet(?:en)?',
+  'groet(?:en)?',
+  'groetjes',
+  'mvg',
+  'fijne (?:dag|avond)',
+  'tot (?:snel|morgen|gauw)',
+]
+
+/** German closings. */
+const GERMAN_CLOSINGS = [
+  'mit freundlichen gr(?:ü|u)(?:ß|ss)en',
+  'viele gr(?:ü|u)(?:ß|ss)e',
+  'liebe gr(?:ü|u)(?:ß|ss)e',
+  'gr(?:ü|u)(?:ß|ss)e',
+  'lg',
+]
+
+/** French / Spanish / Italian closings. */
+const ROMANCE_CLOSINGS = [
+  'cordialement',
+  'salutations',
+  'bien à vous',
+  'amicalement',
+  'un saludo',
+  'saludos',
+  'atentamente',
+  'cordiali saluti',
+  'un abbraccio',
+]
+
+/**
+ * Every closing the parser knows, matched as one alternation.
+ *
+ * Grouping the list by language is for the reader; matching has to be done
+ * against all of them at once, because a signature is often written in several
+ * languages on one line — `Best regards / Met vriendelijke groeten /
+ * Cordialement,`. Judging each language separately could never see that as a
+ * closing, so the whole signature stayed in the bubble.
+ */
+const ALL_CLOSINGS = [
+  ...ENGLISH_CLOSINGS,
+  ...DUTCH_CLOSINGS,
+  ...GERMAN_CLOSINGS,
+  ...ROMANCE_CLOSINGS,
+]
+
 const SIGNATURE_MARKERS: RegExp[] = [
   /^\s*--\s*$/, // RFC 3676 sig delimiter: "-- "
   /^\s*__+\s*$/,
   /^\s*sent from my /i, // "Sent from my iPhone"
-  // English
-  signoff(
-    'best regards',
-    'kind regards',
-    'warm regards',
-    'regards',
-    'cheers',
-    'best',
-    'thanks(?: so much)?',
-    'thank you',
-    'many thanks',
-    'sincerely',
-    'take care',
-    'all the best',
-    'best wishes',
-    'talk soon',
-    'speak soon',
-    'have a (?:nice|great) day',
-    'yours',
-  ),
-  // Dutch / Flemish
-  signoff(
-    'alvast bedankt',
-    'hartstikke bedankt',
-    'hartelijk dank',
-    'dank je wel',
-    'dankjewel',
-    'bedankt',
-    'dank',
-    'met vriendelijke groet(?:en)?',
-    'vriendelijke groet(?:en)?',
-    'hartelijke groet(?:en)?',
-    'groet(?:en)?',
-    'groetjes',
-    'mvg',
-    'fijne (?:dag|avond)',
-    'tot (?:snel|morgen|gauw)',
-  ),
-  // German
-  signoff(
-    'mit freundlichen gr(?:ü|u)(?:ß|ss)en',
-    'viele gr(?:ü|u)(?:ß|ss)e',
-    'liebe gr(?:ü|u)(?:ß|ss)e',
-    'gr(?:ü|u)(?:ß|ss)e',
-    'lg',
-  ),
-  // French / Spanish / Italian
-  signoff(
-    'cordialement',
-    'salutations',
-    'bien à vous',
-    'amicalement',
-    'un saludo',
-    'saludos',
-    'atentamente',
-    'cordiali saluti',
-    'un abbraccio',
-  ),
+  signoff(...ALL_CLOSINGS),
 ]
 
 /**
@@ -340,12 +367,33 @@ export function findQuoteStart(lines: string[]): number {
 
     if (STRONG_QUOTE_MARKERS.some((m) => m.test(trimmed))) return i
 
+    // The Outlook reply header marks a boundary wherever it sits. A lone
+    // `From:` could be the body (hence the positional weak marker below), but
+    // the `From:` + `Sent:`/`Date:` block only appears above quoted history.
+    if (isOutlookHeaderBlock(lines, i)) return i
+
     if (i >= floor && WEAK_QUOTE_MARKERS.some((m) => m.test(trimmed))) {
       return i
     }
   }
 
   return -1
+}
+
+/**
+ * A `From:` line followed by `Sent:`/`Date:`, as Outlook writes above a quote.
+ *
+ * The pair is what makes it unambiguous: a message that merely begins "From:"
+ * does not carry the rest of the header block.
+ */
+function isOutlookHeaderBlock(lines: string[], index: number): boolean {
+  if (!/^\s*from:\s*\S/i.test((lines[index] ?? '').trim())) return false
+
+  for (const line of lines.slice(index + 1, index + 4)) {
+    if (/^\s*(sent|date):/i.test(line.trim())) return true
+  }
+
+  return false
 }
 
 /**

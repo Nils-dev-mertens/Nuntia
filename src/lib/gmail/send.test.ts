@@ -44,6 +44,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     attachments: [],
     state: 'needs-action',
     isAutomated: false,
+    replyable: true,
     awaitingReply: true,
     requiresReply: true,
     importance: 5,
@@ -328,10 +329,22 @@ describe('sendReply', () => {
     // The whole point of the automated classification: no reply box, and the
     // server refuses too, so a stale UI cannot send into a void.
     const client = new FakeGmailClient()
-    const conv = conversation({ isAutomated: true })
+    const conv = conversation({ isAutomated: true, replyable: false })
 
     await expect(sendReply(client, OWNER, conv, 'Thanks!')).rejects.toThrow(
       /no reply address/i,
+    )
+    expect(client.sent).toHaveLength(0)
+  })
+
+  test('refuses when the conversation has no reply address', async () => {
+    // A human thread the decision layer judged unanswerable — a broadcast with
+    // no return address. The composer is hidden, and the server refuses too.
+    const client = new FakeGmailClient()
+    const conv = conversation({ replyable: false })
+
+    await expect(sendReply(client, OWNER, conv, 'Hello?')).rejects.toThrow(
+      /no address to reply to/i,
     )
     expect(client.sent).toHaveLength(0)
   })

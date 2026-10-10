@@ -20,15 +20,18 @@ const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 
 const { db, initDatabase } = await import('#/db/index.ts')
-const { accounts, conversations, messages } = await import('#/db/schema.ts')
+const { accounts, appSettings, conversations, decisions, messages } =
+  await import('#/db/schema.ts')
 const { FakeGmailClient } = await import('./fake.ts')
 const { backfill, syncIncremental, sync } = await import('./sync.ts')
 const { toParsedMessage, toAttachmentRefs } = await import('./message.ts')
 const { decodeGmailData } = await import('./message.ts')
 const { safeFilename, MAX_ATTACHMENT_BYTES } = await import('./attachments.ts')
 const {
+  getConversation,
   getParsingProfileContext,
   listConversations,
+  saveConversation,
   saveParsingProfile,
   setConversationDetails,
 } = await import('#/lib/conversation/index.ts')
@@ -49,8 +52,10 @@ afterAll(async () => {
 })
 
 beforeEach(async () => {
+  await db.delete(decisions)
   await db.delete(messages)
   await db.delete(conversations)
+  await db.delete(appSettings)
   await db.delete(accounts)
 
   await db.insert(accounts).values({
@@ -455,7 +460,7 @@ describe('sender parsing profiles', () => {
     expect(saved?.messages[0].strippedQuote).toBeNull()
 
     const { loadConversation } = await import('./service.ts')
-    const detail = await loadConversation(ACCOUNT, 'sender-profile-thread')
+    const detail = await loadConversation('sender-profile-thread')
     expect(detail?.parsingProfile).toMatchObject({
       senderEmail: 'alice@example.com',
       useAccountParsingDefaults: false,
@@ -557,6 +562,195 @@ describe('conversation detail edits', () => {
     const [cleared] = await listConversations(ACCOUNT)
     expect(cleared.topic).toBeNull()
     expect(cleared.goal).toBeNull()
+  })
+})
+
+describe('replyability', () => {
+  test('a human thread is replyable, a no-reply sender is not', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'human-thread',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'human-thread',
+              from: 'sarah@example.com',
+              subject: 'Project',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'Can you confirm Tuesday?',
+            }),
+          ],
+        },
+        {
+          id: 'robot-thread',
+          historyId: '901',
+          messages: [
+            message({
+              id: 'm2',
+              threadId: 'robot-thread',
+              from: 'GitHub <noreply@github.com>',
+              subject: 'Build failed',
+              date: 'Mon, 15 Jan 2024 11:00:00 +0000',
+              body: 'Build #881 failed.',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+    const stored = await listConversations(ACCOUNT)
+    const human = stored.find((c) => c.gmailThreadId === 'human-thread')
+    const robot = stored.find((c) => c.gmailThreadId === 'robot-thread')
+
+    expect(human?.isAutomated).toBe(false)
+    expect(human?.replyable).toBe(true)
+    // The deterministic machine-mail marker settles automation before Jev.
+    expect(robot?.isAutomated).toBe(true)
+    expect(robot?.replyable).toBe(false)
+  })
+
+  test('re-analyse recomputes the stored decision without a Gmail call', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'reanalyse-thread',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'reanalyse-thread',
+              from: 'sarah@example.com',
+              subject: 'Project',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'Can you confirm Tuesday?',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+
+    // Simulate a classification written before the thread last changed: stale
+    // state and a wrongly cleared replyability.
+    const { eq } = await import('drizzle-orm')
+    await db
+      .update(conversations)
+      .set({ state: 'informational', replyable: false })
+      .where(eq(conversations.gmailThreadId, 'reanalyse-thread'))
+
+    // Re-analyse must not talk to Gmail; the assertion below covers the whole call.
+    client.calls.length = 0
+
+    const { reanalyseConversation } = await import('./service.ts')
+    await reanalyseConversation('reanalyse-thread')
+
+    const [updated] = await listConversations(ACCOUNT)
+    expect(updated.state).toBe('needs-action')
+    expect(updated.replyable).toBe(true)
+    // Re-analyse runs the local pipeline only — no thread was fetched.
+    expect(client.calls.some((c) => c.startsWith('getThread'))).toBe(false)
+  })
+})
+
+describe('fragmented threads across two mailboxes', () => {
+  // The bug this guards: Gmail does not always group a message the same way in
+  // the sender's and recipient's mailboxes. Here one mailbox holds the whole
+  // thread and the other holds each message as its own thread — the inbox merges
+  // them by Message-ID, but the detail view used to load only the single thread
+  // its id named, so opening a merged row showed a one-message fragment.
+  const OTHER = 'other@example.com'
+
+  function parsedMessage(args: {
+    from: string
+    to: string
+    messageId: string
+    date: string
+    body: string
+  }) {
+    return {
+      subject: 'This is a test',
+      from: args.from,
+      to: [args.to],
+      cc: [],
+      date: new Date(args.date),
+      messageId: args.messageId,
+      parts: [{ contentType: 'text/plain', text: args.body }],
+    }
+  }
+
+  test('resolves a fragment to the whole merged conversation', async () => {
+    const { buildConversation, saveConversation } = await import(
+      '#/lib/conversation/index.ts'
+    )
+    await db.insert(accounts).values({
+      id: OTHER,
+      email: OTHER,
+      refreshTokenEncrypted: 'v1:a:b:c',
+    })
+
+    const m1 = parsedMessage({
+      from: ACCOUNT,
+      to: OTHER,
+      messageId: '<m1@example.com>',
+      date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+      body: 'First.',
+    })
+    const m2 = parsedMessage({
+      from: OTHER,
+      to: ACCOUNT,
+      messageId: '<m2@example.com>',
+      date: 'Mon, 15 Jan 2024 11:00:00 +0000',
+      body: 'Second.',
+    })
+
+    // One complete thread in the first mailbox...
+    await saveConversation(
+      ACCOUNT,
+      buildConversation([m1, m2], {
+        ownerEmail: ACCOUNT,
+        gmailThreadId: 'complete-thread',
+      }),
+    )
+
+    // ...and two single-message fragments in the other, for the same messages.
+    await saveConversation(
+      OTHER,
+      buildConversation([m1], {
+        ownerEmail: OTHER,
+        gmailThreadId: 'fragment-one',
+      }),
+    )
+    await saveConversation(
+      OTHER,
+      buildConversation([m2], {
+        ownerEmail: OTHER,
+        gmailThreadId: 'fragment-two',
+      }),
+    )
+
+    const { loadConversation } = await import('./service.ts')
+
+    // Loading the *fragment* must still show the whole conversation.
+    const detail = await loadConversation('fragment-one')
+    expect(detail).not.toBeNull()
+    // The DTO does not expose Message-IDs; the bodies identify both messages.
+    expect(detail?.messages.map((m) => m.body)).toEqual(['First.', 'Second.'])
+    // The canonical row is the owner's most complete copy, not the fragment.
+    expect(detail?.gmailThreadId).toBe('complete-thread')
+    expect(detail?.accountId).toBe(ACCOUNT)
+    expect(detail?.ownerEmails).toEqual([ACCOUNT, OTHER])
+
+    // Both ways into the cluster resolve to the same conversation.
+    const fromComplete = await loadConversation('complete-thread')
+    expect(fromComplete?.messages.map((m) => m.body)).toEqual([
+      'First.',
+      'Second.',
+    ])
+    expect(fromComplete?.gmailThreadId).toBe('complete-thread')
   })
 })
 
@@ -846,6 +1040,138 @@ describe('backfill', () => {
     expect(client.calls.some((c) => c.startsWith('getAttachment'))).toBe(false)
   })
 
+  test('saves a thread whose attachment-bearing message has a Message-ID header', async () => {
+    // The messages row is keyed by the parsed `messageId` — the RFC 5322
+    // Message-ID when the mail carries one — so the attachment's foreign key has
+    // to reference that same value. Keying it by Gmail's own message id instead
+    // left the FK pointing at no row, and every real thread with an attachment
+    // failed to save as a whole. The no-Message-ID case above hid this because
+    // the fallback made both ids coincide.
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            {
+              id: 'm1',
+              threadId: 't1',
+              labelIds: ['INBOX'],
+              internalDate: String(Date.now()),
+              snippet: '',
+              payload: normalizePart(
+                multipartPayload({
+                  headers: {
+                    from: 's@e.com',
+                    subject: 'Report',
+                    'Message-ID': '<abc123@mail.example.com>',
+                  },
+                  text: 'See attached.',
+                  attachment: {
+                    filename: 'q1.pdf',
+                    mimeType: 'application/pdf',
+                    attachmentId: 'att-1',
+                    size: 4096,
+                  },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    })
+
+    const result = await backfill(client, ACCOUNT)
+    expect(result.synced).toBe(1)
+
+    const [conversation] = await listConversations(ACCOUNT)
+    expect(conversation.attachmentCount).toBe(1)
+    expect(conversation.attachments[0].filename).toBe('q1.pdf')
+  })
+
+  test('re-saving a stored conversation keeps its attachments addressable', async () => {
+    // Re-analysis loads a conversation from the database and persists it again.
+    // The stored attachment points at a message by its row id, and re-saving
+    // used to prefix that a second time — a foreign key matching no row, so the
+    // save failed. The same value is what the chat view groups chips by.
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            {
+              id: 'm1',
+              threadId: 't1',
+              labelIds: ['INBOX'],
+              internalDate: String(Date.now()),
+              snippet: '',
+              payload: normalizePart(
+                multipartPayload({
+                  headers: {
+                    from: 's@e.com',
+                    subject: 'Report',
+                    'Message-ID': '<abc123@mail.example.com>',
+                  },
+                  text: 'See attached.',
+                  attachment: {
+                    filename: 'q1.pdf',
+                    mimeType: 'application/pdf',
+                    attachmentId: 'att-1',
+                    size: 4096,
+                  },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+
+    const loaded = await getConversation(ACCOUNT, 't1')
+    expect(loaded?.attachments).toHaveLength(1)
+
+    // The chat view matches a chip to its bubble through this value.
+    const attachmentMessageId = loaded?.attachments[0]?.gmailMessageId
+    expect(loaded?.messages.map((m) => m.gmailMessageId)).toContain(
+      attachmentMessageId,
+    )
+
+    await expect(saveConversation(ACCOUNT, loaded!)).resolves.toBeUndefined()
+  })
+
+  test('records a decision for every synced conversation', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 't1',
+              from: 'sarah@example.com',
+              subject: 'Project',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'Can you confirm Tuesday?',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+
+    // The seam is now actually invoked by sync, not just defined.
+    const rows = await db.select().from(decisions)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].provider).toBe('rules+rules+none')
+    expect(rows[0].state).toBe('needs-action')
+    expect(rows[0].reasoning).toBeTruthy()
+  })
+
   test('advances the history cursor', async () => {
     const client = new FakeGmailClient({
       threads: [],
@@ -997,6 +1323,68 @@ describe('sync', () => {
 
     expect(result.synced).toBe(1)
     expect(client.calls.some((c) => c.startsWith('listThreads'))).toBe(false)
+  })
+})
+
+describe('AI settings', () => {
+  test('stores keys encrypted and builds the pipeline config without leaking them', async () => {
+    process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
+    const { getAiPipelineConfig, getAiSettings, saveAiSettings } = await import(
+      '#/lib/ai/settings.ts'
+    )
+
+    await saveAiSettings({
+      jevModel: 'jev-latest',
+      llmProvider: 'gemini',
+      llmModel: null,
+      jevApiKey: 'jev-secret',
+      llmApiKey: 'llm-secret',
+    })
+
+    const summary = await getAiSettings()
+    expect(summary.jevConfigured).toBe(true)
+    expect(summary.llmProvider).toBe('gemini')
+    expect(summary.llmConfigured).toBe(true)
+    // The summary shown to the browser never contains a secret.
+    expect(JSON.stringify(summary)).not.toContain('jev-secret')
+    expect(JSON.stringify(summary)).not.toContain('llm-secret')
+
+    const config = await getAiPipelineConfig()
+    expect(config.jev).toEqual({ apiKey: 'jev-secret', model: 'jev-latest' })
+    expect(config.llm).toEqual({
+      provider: 'gemini',
+      apiKey: 'llm-secret',
+      model: 'gemini-2.5-flash',
+    })
+  })
+
+  test('leaves a key unchanged when omitted and clears it when emptied', async () => {
+    process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
+    const { getAiPipelineConfig, getAiSettings, saveAiSettings } = await import(
+      '#/lib/ai/settings.ts'
+    )
+
+    await saveAiSettings({
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      jevApiKey: 'first',
+    })
+    expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
+
+    // Omitting the key leaves it as-is.
+    await saveAiSettings({ jevModel: null, llmProvider: null, llmModel: null })
+    expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
+
+    // An empty string clears it.
+    await saveAiSettings({
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      jevApiKey: '',
+    })
+    expect((await getAiPipelineConfig()).jev).toBeNull()
+    expect((await getAiSettings()).jevConfigured).toBe(false)
   })
 })
 

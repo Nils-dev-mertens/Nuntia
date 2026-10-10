@@ -155,18 +155,24 @@ export function isAutomatedSender(participant: Participant): boolean {
  * flag, because that flag is itself produced by comparing against a normalized
  * address, and repeating the comparison here keeps this function independent of
  * how the parser resolved it.
+ *
+ * Takes a *set* of owner addresses because an install can have several connected
+ * mailboxes: a thread you wrote from one address and received on another is still
+ * yours, and excluding only one of them would count your own reply as a human's.
  */
 export function isAutomatedThread(
   messages: Array<Pick<ConversationMessage, 'from'>>,
-  ownerEmail: string,
+  ownerEmails: string | readonly string[],
 ): boolean {
   if (messages.length === 0) return false
 
-  const owner = normalize(ownerEmail)
+  const ownerList =
+    typeof ownerEmails === 'string' ? [ownerEmails] : [...ownerEmails]
+  const owners = new Set(ownerList.map(normalize))
   let sawAutomatedSender = false
 
   for (const message of messages) {
-    if (normalize(message.from.email) === owner) continue
+    if (owners.has(normalize(message.from.email))) continue
 
     if (!isAutomatedSender(message.from)) return false
     sawAutomatedSender = true

@@ -16,8 +16,8 @@ source of truth; Lumen is a presentation + composition layer.
 | DB                | SQLite via **`@libsql/client`** + Drizzle ORM                                                     | Single-user, local-first. **Changed from the original `better-sqlite3`** — see below.                                       |
 | Auth              | Google OAuth 2.0, refresh token AES-encrypted at rest                                             | Gmail is the only provider in MVP.                                                                                          |
 | Mail              | `googleapis` — `threads.get`, `messages.attachments.get`, `history.list`; inbox polling           | Gmail API is the source of truth. Push watch is not implemented in the MVP.                                                 |
-| AI decisions      | `DecisionLayer` interface; rule-based/no-op implementation for MVP, structured-output LLM planned | See "Deviations".                                                                                                           |
-| AI generation     | LLM API, invoked on demand only                                                                   | Phase 2. Draft-only, never auto-send.                                                                                       |
+| AI decisions      | Deterministic rules first, then **Jev** for importance / urgency / state-when-unset / replyability | See "Deviations".                                                                                                           |
+| AI generation     | **LLM** (Gemini, OpenAI or Anthropic, BYO key): topic now, suggested replies / drafts in Phase 2                                                                   | Phase 2. Draft-only, never auto-send.                                                                                       |
 | Runtime / tooling | bun 1.3.10, TypeScript 6.x (`^6.0.2`)                                                             | Matches the `forma` project conventions.                                                                                    |
 
 ### Why libSQL instead of better-sqlite3
@@ -92,12 +92,22 @@ to end: `.bg-success { background-color: var(--success) }` with
 
 ## Deviations from chatmail.md
 
-**1. Do not build on Jev yet.**
-Jev shipped 15 Sep 2026 — roughly two weeks old at time of writing. The fit is genuinely
-good (typed structured decisions, cannot hallucinate prose), but betting the decision layer
-on a two-week-old closed service is the single riskiest dependency in the plan. Ship the
-MVP with cheap structured-output calls (Gemini 2.5 Flash / GPT-4.1 mini with a JSON
-schema) behind a `DecisionLayer` interface. Jev then becomes a drop-in swap, not a rewrite.
+**1. Jev and the LLM are two different services, not one.**
+Jev (TypeSafe's System One) returns typed *decisions* — "a decision instead of a paragraph"
+— and skips token-by-token generation entirely. A general LLM's job here is **prose**: the
+topic label today, and Phase 2's suggested replies and drafts. Treating Jev as a drop-in
+swap for a structured-output LLM, as this plan originally did, conflates the two. The split:
+
+- **rules** decide the obvious state (e.g. you sent last ⇒ waiting for reply), and always win
+  where they apply;
+- **Jev** decides importance, urgency, the state the rules could not, and whether the mail is
+  replyable at all;
+- the **LLM** writes the topic (and later the drafts);
+- **intent** is the user's — never AI-written.
+
+Each service has its own bring-your-own key and degrades **independently**: a Jev key with no
+LLM key still classifies, an LLM key with no Jev key still labels topics, and neither leaves
+the app broken.
 
 **2. Drop Convex.**
 Listed as optional in the spec. Inbox freshness currently comes from periodic polling and
@@ -191,14 +201,20 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] Test isolation fixed — `bunfig.toml` preload + a fatal guard against tests hitting `data/lumen.db`
 - [x] **Rich email bodies** — HTML captured for every message, sanitised at parse time, rendered in a sandboxed iframe
 - [x] **Reply quoting** — replies quote the original as HTML in a `blockquote` instead of a wall of `>` lines
-- [x] 250 tests passing; typecheck and lint pass; production build succeeds (TanStack `inputValidator()` deprecation warnings remain)
+- [x] 262 tests passing; typecheck and lint pass; production build succeeds (TanStack `inputValidator()` deprecation warnings remain)
 - [x] **Attachments on send** — composer upload, bounded server-side validation, and `multipart/mixed` MIME with base64 attachment parts
 - [x] **Topic / goal editing UI** — authenticated editor with validated saves and database persistence
 - [x] **Per-sender parsing controls** — account-wide defaults plus per-sender overrides for quotes/greetings/signatures, removed text shown per message, settings re-parse the open thread on save
 - [x] **Reply style per sender** — account-wide greeting/signature defaults with per-sender overrides that fall back to the user's own most recent message
 - [x] **Reconnect after revoked Google access** — a rejected/expired grant surfaces a "Reconnect Google" action instead of only a sync error
-- [ ] LLM decision layer behind the existing interface
-- [ ] **Multiple accounts in one merged inbox** — accounts global to the install, threads merged by shared `Message-ID`, relation-aware ownership and reply sender (see "Multiple accounts, one inbox")
+- [x] **Decision pipeline wired (rules-first)** — split into rules → decision-model (Jev) → topic (LLM) stages, run from `syncThread` and recorded on `decisions`; keyless defaults keep behaviour identical
+- [x] **Jev decision model** behind the `DecisionModel` seam — importance, urgency, and a state to fill the rules' gap; configured in Settings, key encrypted at rest
+- [x] **LLM topic generator** behind the `TopicGenerator` seam — Anthropic, OpenAI or Gemini, provider-agnostic; configured in Settings
+- [ ] **Replyability** — Jev's "can this be replied to" verdict, unified with machine-mail detection, plus the schema column and composer/tag behaviour (the Jev client does not ask it yet)
+- [ ] **Decision trigger** — the sync-time path is in; the manual re-analyse action is not
+- [ ] **Phase 2 generation** — suggested replies / drafts; the `TopicGenerator` seam is the place
+- [x] **Multiple accounts in one merged inbox** — accounts global to the install, `loadInbox` fanning out and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
+- [ ] **A second mailbox service** — the provider seam, `accounts.provider` and the `provider_*` rename (see "A second service")
 
 ## Mail parser
 
@@ -343,12 +359,85 @@ Key rules:
 - **`goal` is user-owned and never written by the decision layer.** `applyDecision`
   copies it through untouched; there is a test asserting exactly that.
 
-### The decision-layer seam
+### The decision layer is split by owner
 
-`DecisionLayer` has one method, `decide(input) -> Decision`. `RuleBasedDecisionLayer`
-wraps `deriveState` today; swapping in an LLM-backed or Jev-backed implementation must not
-touch `model.ts` or anything upstream. `NoopDecisionLayer` keeps the app working with no
-API keys configured.
+The original `DecisionLayer` had one method returning `state`, `importance`, `urgency`,
+`requiresReply`, `intent` and `currentTopic` together — the wrong shape, because the fields
+have different owners:
+
+| Field        | Owner                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `state`      | **rules** when determinable (you sent last ⇒ waiting for reply); otherwise **Jev**       |
+| `importance` | **Jev**                                                                                  |
+| `urgency`    | **Jev**                                                                                  |
+| replyability | deterministic machine-mail marker **first**, Jev over everything else                    |
+| `topic`      | **LLM**                                                                                  |
+| `intent`     | the **user** — never AI-written                                                          |
+
+Machine-mail detection is **step 1**: an address that marks itself no-reply is settled, and
+Jev skips it rather than spending a call.
+
+**Built:** `decision.ts` is now the three-stage pipeline (`RuleClassifier` → `DecisionModel`
+→ `TopicGenerator`), with `HeuristicRuleClassifier`, `PlaceholderDecisionModel` and
+`NoTopicGenerator` as the keyless defaults. `syncThread` runs `decideConversation`,
+`applyDecision` and `recordDecision`, so the seam is actually invoked — before this,
+`buildConversation` called `deriveState` directly and **nothing ever called the decision
+layer**. A keyless install is behaviourally identical to before; `intent` and `goal` are
+never written by any stage (`applyDecision` no longer touches `intent`).
+
+A confident rule is never overridden: the classifier reports `null` for its "no strong
+signal" (`informational`) bucket, and that is the only case where the decision model may
+choose the state. One gap still open: `merge.rebuildConversation` re-derives multi-source
+clusters with `deriveState` directly, so a merged thread will not pick up a model's
+importance/urgency until that path runs the pipeline too.
+
+**"You" stays the whole connected set** (see "Multiple accounts"). A thread between two of
+the user's own addresses therefore still reads from the set, so a message from the other
+address counts as the user's — even though the chat view draws sides from the owning mailbox
+alone. That is a deliberate split between the classified semantics and the rendering, not an
+oversight.
+
+## AI services are configured in the UI, not the environment
+
+`src/lib/ai/`. Both services are optional, per-install, and **bring-your-own-key**, and
+the keys are set from a **Settings page**, not `.env`. A secret that lives in the
+environment is a secret you cannot change without a redeploy, and this app is
+local-first and single-user — the credentials belong with the data.
+
+- **Storage.** One `app_settings` row (migration `0006`). The keys are encrypted with the
+  same AES-256-GCM envelope as the OAuth refresh tokens (`auth/crypto.ts`).
+- **The UI never sees a key.** `getAiSettings()` returns a summary only — configured or not,
+  which model — and a stored key is shown as `••••••••`. A blank key field means "leave it as
+  it is"; an explicit checkbox clears it. Only `getAiPipelineConfig()` decrypts, and only on
+  the server while a client is being built.
+- **Server-only, verified.** `grep` over `dist/client/assets` finds no `app_settings`, no
+  `TOKEN_ENCRYPTION_KEY`, no `drizzle-orm` and no `api.typesafe.ai` — the AI clients stay on
+  the server, the same rule `googleapis` follows.
+
+| Module        | Role                                                                                         |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| `http.ts`     | shared JSON POST: exponential backoff + jitter, honours `Retry-After`, retries 429/5xx/529    |
+| `jev.ts`      | `JevDecisionModel` — the `DecisionModel` seam                                                |
+| `llm.ts`      | `LlmTopicGenerator` — the `TopicGenerator` seam, Anthropic / OpenAI / Gemini                  |
+| `settings.ts` | persistence for `app_settings`, encryption at the boundary                                    |
+| `index.ts`    | `pipelineFromConfig` (pure) and `loadDecisionPipeline` (reads settings, never throws)         |
+
+**Jev's wire shape** (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`
+with `{ state, model, questions }`, where each question is a typed `noul` (yes/no),
+`choice`, or `score` (an ordered rubric). It returns calibrated probabilities per answer.
+Two consequences shaped the client:
+
+- The two scores use a **ten-level rubric** so the probability-weighted value maps cleanly
+  onto `importance`/`urgency` 1–10 (`round(score) + 1`).
+- The **state question is only asked when the rule classifier abstained** (`facts.state ===
+  null`). Asking it always would waste a call and invite the model to contradict a rule that
+  is already certain.
+
+**The LLM providers differ only in transport.** Anthropic (`x-api-key`), OpenAI (bearer), and
+Gemini (`x-goog-api-key`, model in the path) each have one `complete` function; the prompt and
+the sanitiser are shared. The sanitiser matters more than it sounds: models wrap a short label
+in quotes, a markdown fence, or a trailing period, and a chatty one adds a whole sentence —
+all of that is stripped, and an empty result becomes `null` rather than an empty topic.
 
 ## Auth
 
@@ -425,9 +514,11 @@ one place.
 - Reconnect is surfaced on the inbox and on a failed send in the composer. The
   parsing-profile save in the conversation header still reports a re-parse failure as a
   plain message rather than offering the reconnect action.
-- `prompt: 'consent'` is sent on every `/auth/google` visit, so reconnecting asks for
-  consent again rather than silently reusing the grant. That is intentional — it is what
-  makes the reconnect button reliable — but it is a second consent screen.
+- `prompt: 'consent select_account'` is sent on every `/auth/google` visit. `consent`
+  forces a refresh token rather than silently reusing the grant, which is what makes the
+  reconnect button reliable; `select_account` forces Google's account chooser, without
+  which adding a _second_ mailbox would re-authorize the account the browser is already
+  signed into. It costs a second consent screen.
 
 ## Gmail sync
 
@@ -466,6 +557,35 @@ state, not a bug.
 
 A single failing thread also does not abort the run: `backfill` catches per thread, so one
 malformed message cannot cost the user the other 200.
+
+### Quota errors are 403, not 429, and must be retried
+
+A real mailbox hit this on first connect:
+
+```
+Sync failed: Gmail request failed (403): Quota exceeded for quota metric
+'Total Query Cost' and limit 'Units per minute per user' of service
+'gmail.googleapis.com'
+```
+
+Two bugs sat behind that one line. **`wrapGmailError` only mapped `429` to
+`GmailRateLimitError`**, but Gmail reports an exhausted per-user rate limit or daily
+quota as **`403`** with `reason: 'rateLimitExceeded'`/`'quotaExceeded'` — or, on the newer
+quota model, only a message naming the metric and no reason at all. The typed error
+existed but was effectively dead for real Gmail traffic, so the response fell through to
+the generic `Gmail request failed (403)` and aborted the sync. Both the reason codes and a
+message match (`/quota exceeded|rate limit exceeded|…/i`) are now classified, and a plain
+403 is left alone.
+
+**Nothing retried.** `createGmailApiClient`'s `req` wrapper now retries a
+`GmailRateLimitError` with exponential backoff and full jitter (base 1.5s, cap 30s, four
+retries), honouring Google's `Retry-After` header when it is present. Only rate limits are
+retried — auth, 404 and real 5xx keep their existing behaviour. The policy is injectable
+(`GmailRetryPolicy`) so the loop is tested without real timers.
+
+`CONCURRENCY` also dropped from 4 to 2. Four concurrent `threads.get` calls is enough to
+trip the per-minute cost limit on a fresh backfill, and retry only turns a fatal burst
+into a recoverable one — the cheapest fix is to not create it.
 
 ### Parallelise the network, serialise the write
 
@@ -595,26 +715,110 @@ thread.
 
 **Reconnect and staleness are per account.** One revoked mailbox must not blank the merged
 list: `loadInbox`'s `authRequired` becomes a per-account list so the banner can name the
-mailbox that needs it, and `lastSyncedAt` is per account too.
+mailbox that needs it, and `lastSyncedAt` is per account too.### How it is built
 
-### Sequential steps
+`src/lib/conversation/merge.ts` is the whole of it, and it is pure — no database, so the
+rules are testable on their own.
 
-1. `accounts.provider` (default `'gmail'`) and `UNIQUE(provider, email)` replacing the
-   global `accounts_email_idx`; rename the `gmail_*` id columns to `provider_*` while there is
-   still only one provider — the merge, owner set and relation rules are provider-neutral, so
-   this is what makes a second service free later.
-2. `loadInbox()` drops its account argument and fans out over `listAccounts()`, returning a
-   per-account `authRequired` / `lastSyncedAt`. `getSession()` becomes only the "this browser
-   is signed in" guard.
-3. Owner set through `BuildContext`, plus the `DERIVED_VERSION` re-derive.
-4. The cluster + relation module; `loadConversation` and the reply path resolve the
-   conversation's own `accountId`.
-5. Inbox rows carry their account and relation tag; the composer picks the sender.
+1. **Cluster** the loaded conversations with union-find, joined by any shared
+   `internetMessageId`. A message with no `Message-ID` (a synthetic one) stays in its own
+   cluster, since only a real one can be shared across mailboxes.
+2. **Classify** the cluster from the stored `from`/`to`/`cc` — see the table above. A direct
+   sighting anywhere outranks a CC one anywhere.
+3. **Choose the owner**: the newest message's addressee if that address is one of yours,
+   else the sole correspondent, else the first CC'd address. The owner is what the row's
+   details editor, sender profile and default reply address use.
+4. **Rebuild once**, from the union of messages with `isFromOwner` recomputed against the
+   _set_ of connected addresses, and with attachments deduped on
+   `filename|size|contentId` (not on the provider attachment id, which differs between
+   mailboxes holding the same message).
+
+```
+loadInbox()
+  → listAccounts()
+  → per account: ensureDerivedFields, staleness check, opportunistic sync
+  → listConversations(account) each
+  → mergeAccountConversations(...)
+  → sort by lastMessageAt, count by state
+```
+
+The account argument is gone from `loadInbox()` and `loadConversation()`; `getSession()` is
+now only the "this browser is signed in" guard. `getConversationByThreadId` resolves a
+thread across accounts rather than inside one, and the reply and sender-profile actions read
+`conversations.accountId` instead of the session's — otherwise a reply leaves from the
+wrong address.
+
+The composer shows which address a reply will leave from and offers a picker when more than
+one of the user's addresses is on the thread; `sendReplyAction` recomputes the allowed set
+server-side rather than trusting the client. `InboxPayload.authRequired` became
+`authRequiredAccounts`, so one revoked mailbox is named without blanking the others.
+
+**Adding a mailbox is an action on the signed-in inbox.** The only sign-in prompt is the
+signed-out one, so a user already connected to one mailbox had no route back to
+`/auth/google` and could not add a second. The inbox header now carries an **Add mailbox**
+link beside the connected addresses; because accounts are global and `upsertAccount`
+inserts by email, re-running the OAuth flow connects the new mailbox alongside the
+existing ones and the session cookie simply moves to the newest account.
+
+**Rebuilt conversations reuse the stored derived fields unless a merge actually happened.**
+With one mailbox holding the thread and the connected set unchanged, `state`, `urgency`,
+`isAutomated` and friends are taken from the row as-is — they belong to the decision layer,
+and re-deriving them here would override a stored decision and mask the deliberate
+`DERIVED_VERSION` behaviour. Only a genuine merge (more than one source) or a second one of
+your addresses appearing on the thread triggers recomputation. Verified against a copy of
+the real mailbox: 59 stored conversations and 59 merged rows, byte-identical on
+subject/state/count/ordering.
+
+Step that is **not** done, and is what a second service needs first: `accounts.provider`
+(default `'gmail'`) and `UNIQUE(provider, email)` replacing the global `accounts_email_idx`,
+plus renaming the `gmail_*` id columns to `provider_*` while there is still only one
+provider.
 
 **Security caveat, stated because it is a real property of this design:** with accounts
 global to the install, any successful Google sign-in unlocks every connected mailbox. That
 is accepted for a single-user local install, and it must become a per-user scope before
 this is exposed on a network or shared.
+
+### A merged thread is a *cluster*, not a thread id — the detail view has to re-merge
+
+Learned from the real mailbox: a thread _between two of the user's own accounts_ looked
+broken, and the specific symptom was that opening a merged row showed one mailbox's mail
+and hid the other's.
+
+The rows were there — the inbox merges them correctly — but **the detail view never
+re-merged**. `loadConversation` loaded the single stored conversation the row's
+`gmailThreadId` pointed at. A thread id is mailbox-scoped, and Gmail does **not** always
+group a message the same way in the sender's and recipient's mailboxes: on the test
+mailbox, one address held the conversation as a nine-message thread while the other held
+the same messages as **seven separate single-message threads**. The merge picked the
+owner as the account the newest message was addressed to, so the row's thread id pointed
+at a one-message fragment. The inbox said "9 messages"; opening it showed 1.
+
+`getConversationClusterByThreadId` now resolves the **Message-ID-connected component**
+(BFS over message ids, transitively — the fragments only link through the ids they carry),
+and both `loadConversation` and `requireConversationByThreadId` fold it back with the same
+`mergeAccountConversations` the inbox uses. Verified against the real data: both the
+fragment id and the complete id resolve to the same 8-source cluster of 9 messages.
+
+**The canonical row is the owner's most complete copy**, not the first one found. Cluster
+order is not stable — the inbox and the detail view can feed the same cluster in different
+orders, and an order-dependent choice would move the row id (and the topic/goal stored
+against it). Ties break on thread id for determinism.
+
+### Between your own accounts, the chat is drawn from the owning mailbox
+
+With the cluster fixed, the second half of the weirdness was presentational. `isFromOwner`
+is deliberately the whole connected set, so in a thread between two of the user's accounts
+**every** message is "yours" — the chat rendered everything right-aligned as "You", a
+person talking to themselves down one side.
+
+The view now renders from the **owning mailbox's point of view**: messages from
+`detail.accountId` are "You" on the right, and messages from another of the user's
+addresses are the other side, labelled with that **address** rather than the display name
+(both accounts are, after all, the same person's name). `ownerEmails` on the detail payload
+is what lets the view tell an own-address from a stranger. This is a rendering decision and
+leaves `isFromOwner` — and therefore state derivation — untouched; the two only coincide
+for single-account installs.
 
 ### A second service
 

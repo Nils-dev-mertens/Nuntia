@@ -127,6 +127,57 @@ function EmailFrame({ html }: { html: string }) {
   )
 }
 
+/** Marks a thread there is nobody to answer, next to the state badge. */
+function NoReplyTag() {
+  return (
+    <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+      No reply
+    </span>
+  )
+}
+
+/** Re-run the decision layer for this thread, without waiting for a sync. */
+function ReanalyseButton({
+  onReanalyse,
+}: {
+  onReanalyse: () => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onReanalyse()
+      if (result.error) setError(result.error)
+    } catch {
+      setError('Could not re-analyse this conversation.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={busy}
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
+      >
+        {busy ? 'Re-analysing…' : 'Re-analyse'}
+      </button>
+      {error ? (
+        <span role="alert" className="text-right text-xs text-destructive">
+          {error}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
     month: 'short',
@@ -564,15 +615,22 @@ function ConversationDetailsEditor({
  * `noreply@` notification is a promise the app cannot keep.
  */
 function Composer({
+  accounts,
   onSend,
 }: {
+  /** Addresses this reply could leave from, best first. */
+  accounts: Array<{ id: string; email: string }>
   onSend: (
     body: string,
     attachments: ReplyAttachmentUpload[],
+    fromAccountId: string,
   ) => Promise<ActionFailure>
 }) {
   const [body, setBody] = useState('')
   const [attachments, setAttachments] = useState<ReplyAttachmentUpload[]>([])
+  // Defaults to the owning mailbox; the user can change it when the thread
+  // carries more than one of their addresses.
+  const [fromAccountId, setFromAccountId] = useState(accounts[0]?.id ?? '')
   const [readingFiles, setReadingFiles] = useState(false)
   const filePicker = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
@@ -600,7 +658,7 @@ function Composer({
     setAuthRequired(false)
 
     try {
-      const result = await onSend(trimmed, attachments)
+      const result = await onSend(trimmed, attachments, fromAccountId)
 
       if (result.error) {
         setError(result.error)
@@ -751,6 +809,29 @@ function Composer({
 
       <div className="mt-2 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          {/* Only offered when there is a choice: a single-account install
+              should not see a one-option dropdown on every reply. */}
+          {accounts.length > 1 ? (
+            <label className="flex items-center gap-1 text-xs text-muted-foreground">
+              From
+              <select
+                value={fromAccountId}
+                disabled={busy}
+                onChange={(event) => setFromAccountId(event.target.value)}
+                className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-foreground"
+              >
+                {accounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {account.email}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : accounts.length === 1 ? (
+            <span className="text-xs text-muted-foreground">
+              From {accounts[0]?.email}
+            </span>
+          ) : null}
           <button
             type="button"
             onClick={() => filePicker.current?.click()}
@@ -802,8 +883,10 @@ export function ConversationView({
   onSaveDetails,
   onSaveParsingProfile,
   onSend,
+  onReanalyse,
 }: {
   detail: ConversationDetail
+  onReanalyse: () => Promise<{ error: string | null }>
   onSaveParsingProfile: (
     profile: SenderProfileSettings,
     defaults: {
@@ -821,6 +904,7 @@ export function ConversationView({
   onSend: (
     body: string,
     attachments: ReplyAttachmentUpload[],
+    fromAccountId: string,
   ) => Promise<ActionFailure>
 }) {
   const bottom = useRef<HTMLDivElement>(null)
@@ -828,6 +912,16 @@ export function ConversationView({
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
   }, [detail.messages.length])
+
+  // A thread between two of the user's own connected accounts has "mine" on both
+  // sides, so `isFromOwner` cannot decide which bubble is which. The chat is
+  // rendered from the owning mailbox's point of view: its messages are "You",
+  // and messages from another connected address are the other side, labelled with
+  // that address so the two are told apart.
+  const ownerEmail = detail.accountId.trim().toLowerCase()
+  const ownAddresses = new Set(
+    detail.ownerEmails.map((email) => email.trim().toLowerCase()),
+  )
 
   const attachmentsByMessage = new Map<
     string,
@@ -864,7 +958,13 @@ export function ConversationView({
             />
           ) : null}
         </div>
-        <StateBadge state={detail.state} />
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <div className="flex items-center gap-2">
+            {!detail.replyable ? <NoReplyTag /> : null}
+            <StateBadge state={detail.state} />
+          </div>
+          <ReanalyseButton onReanalyse={onReanalyse} />
+        </div>
       </header>
 
       <div className="flex-1 space-y-1 overflow-y-auto px-6 py-6">
@@ -873,7 +973,15 @@ export function ConversationView({
           const showDay = day !== lastDay
           lastDay = day
 
-          const mine = message.isFromOwner
+          const from = message.from.email.trim().toLowerCase()
+          const mine = from === ownerEmail
+          const speaker = mine
+            ? 'You'
+            : ownAddresses.has(from)
+              ? // Another of the user's addresses is still the user, so name the
+                // address rather than the display name — both are "Nils Mertens".
+                message.from.email
+              : (message.from.name ?? message.from.email)
           const files = attachmentsByMessage.get(message.gmailMessageId) ?? []
 
           return (
@@ -901,7 +1009,7 @@ export function ConversationView({
                   )}
                 >
                   <span className="font-medium text-foreground">
-                    {mine ? 'You' : (message.from.name ?? message.from.email)}
+                    {speaker}
                   </span>
                   <time dateTime={message.sentAt}>
                     {formatTime(message.sentAt)}
@@ -935,12 +1043,14 @@ export function ConversationView({
         <div ref={bottom} />
       </div>
 
-      {detail.isAutomated ? (
-        <div className="border-t border-border bg-muted/30 px-6 py-3 text-center text-xs text-muted-foreground">
-          This is an automated notification — there is nobody to reply to.
-        </div>
+      {detail.replyable ? (
+        <Composer accounts={detail.replyAccounts} onSend={onSend} />
       ) : (
-        <Composer onSend={onSend} />
+        <div className="border-t border-border bg-muted/30 px-6 py-3 text-center text-xs text-muted-foreground">
+          {detail.isAutomated
+            ? 'This is an automated notification — there is nobody to reply to.'
+            : 'This conversation has no address to reply to.'}
+        </div>
       )}
     </div>
   )

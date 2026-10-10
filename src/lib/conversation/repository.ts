@@ -24,6 +24,7 @@ import type {
   ConversationMessage,
   ParsingPreferences,
 } from './model.ts'
+import type { AccountConversation } from './merge.ts'
 import type { Decision } from './decision.ts'
 import { cleanMessage, conversationId } from './model.ts'
 import { stripHtmlGreeting, stripHtmlSignature } from '#/lib/mail/index.ts'
@@ -47,8 +48,12 @@ import { isAutomatedThread } from './automated.ts'
  * applied locally, because the text the old parser wrongly kept is still in
  * `body_text`; `reparseStoredMessages` rebuilds the pre-strip text and runs the
  * parser again. Only text that was wrongly *removed* still needs `rebackfill`.
+ *
+ * v4 — `conversations.replyable` was added. Derived from the stored sender
+ * addresses alone, so it backfills locally like v1; the decision model's
+ * contribution is only recomputed on the next sync or manual re-analyse.
  */
-export const DERIVED_VERSION = 3
+export const DERIVED_VERSION = 4
 
 /**
  * Recompute derived fields for every conversation of an account.
@@ -72,9 +77,10 @@ export async function backfillDerivedFields(
         .from(messagesTable)
         .where(eq(messagesTable.conversationId, id))
 
+      const isAutomated = isAutomatedThread(msgs, ownerEmail)
       await db
         .update(conversations)
-        .set({ isAutomated: isAutomatedThread(msgs, ownerEmail) })
+        .set({ isAutomated, replyable: !isAutomated })
         .where(eq(conversations.id, id))
     }
   })
@@ -235,6 +241,7 @@ export async function saveConversation(
           participants: conversation.participants,
           state: conversation.state,
           isAutomated: conversation.isAutomated,
+          replyable: conversation.replyable,
           awaitingReply: conversation.awaitingReply,
           topic: conversation.topic,
           goal: conversation.goal,
@@ -256,6 +263,7 @@ export async function saveConversation(
             participants: conversation.participants,
             state: conversation.state,
             isAutomated: conversation.isAutomated,
+            replyable: conversation.replyable,
             awaitingReply: conversation.awaitingReply,
             importance: conversation.importance,
             urgency: conversation.urgency,
@@ -471,13 +479,16 @@ export async function recordDecision(
     await db.insert(decisions).values({
       id: `${conversation.id}:${Date.now()}`,
       conversationId: conversation.id,
-      provider: decision.provider,
+      // The stages that produced this row, in order (e.g. `rules+jev+llm`).
+      provider: decision.providers.join('+'),
       state: decision.state,
       importance: decision.importance,
       urgency: decision.urgency,
       requiresReply: decision.requiresReply,
-      intent: decision.intent,
-      topic: decision.currentTopic,
+      // `intent` is user-owned: the decision layer does not produce it, so the
+      // audit row records whatever the conversation currently carries.
+      intent: conversation.intent,
+      topic: decision.topic,
       reasoning: decision.reasoning,
       decidedAt: new Date(),
     })
@@ -544,6 +555,94 @@ export async function getStoredThreadIds(
   return rows
     .map((r) => r.gmailThreadId)
     .filter((threadId) => missing.has(conversationId(ownerEmail, threadId)))
+}
+
+/**
+ * Find a conversation by thread id in *any* connected account.
+ *
+ * Thread ids are mailbox-scoped and the inbox can span several accounts, so the
+ * conversation view cannot be scoped to one session account any more — the row
+ * the user clicked belongs to whichever mailbox owns it. The account id comes
+ * back alongside the conversation because the reply and the sender profile both
+ * need to know whose mailbox they are working in.
+ */
+export async function getConversationByThreadId(
+  gmailThreadId: string,
+): Promise<{ accountId: string; conversation: Conversation } | null> {
+  const row = await db.query.conversations.findFirst({
+    where: eq(conversations.gmailThreadId, gmailThreadId),
+  })
+  if (!row) return null
+
+  return {
+    accountId: row.accountId,
+    conversation: await rowToConversation(row),
+  }
+}
+
+/**
+ * Every stored conversation connected to a thread by a shared `Message-ID`,
+ * across all accounts — the cluster the inbox merges into one row.
+ *
+ * A thread id resolves to *one* mailbox's copy, and that copy is not always the
+ * whole conversation. Gmail does not guarantee it threads a message the same way
+ * in the sender's and recipient's mailboxes: a message sent between two of the
+ * user's own accounts can live in a nine-message thread in one mailbox and as
+ * several single-message threads in the other. Rendering only the thread id's
+ * conversation therefore showed a fragment and hid the rest — so the detail view
+ * has to resolve the same Message-ID-connected component the inbox merges.
+ *
+ * Walked transitively (BFS over message ids) rather than one hop, because the
+ * fragments only link to each other through the shared ids they carry.
+ */
+export async function getConversationClusterByThreadId(
+  gmailThreadId: string,
+): Promise<AccountConversation[] | null> {
+  const seed = await db.query.conversations.findFirst({
+    where: eq(conversations.gmailThreadId, gmailThreadId),
+  })
+  if (!seed) return null
+
+  const visited = new Set<string>([seed.id])
+  let frontier = [seed.id]
+
+  while (frontier.length > 0) {
+    const ids = frontier
+    frontier = []
+
+    const messageRows = await db
+      .selectDistinct({ internetMessageId: messagesTable.internetMessageId })
+      .from(messagesTable)
+      .where(inArray(messagesTable.conversationId, ids))
+    const messageIds = messageRows
+      .map((row) => row.internetMessageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+    if (messageIds.length === 0) continue
+
+    const neighbours = await db
+      .selectDistinct({ conversationId: messagesTable.conversationId })
+      .from(messagesTable)
+      .where(inArray(messagesTable.internetMessageId, messageIds))
+
+    for (const { conversationId: neighbourId } of neighbours) {
+      if (visited.has(neighbourId)) continue
+      visited.add(neighbourId)
+      frontier.push(neighbourId)
+    }
+  }
+
+  const rows = await db
+    .select()
+    .from(conversations)
+    .where(inArray(conversations.id, [...visited]))
+
+  return Promise.all(
+    rows.map(async (row) => ({
+      accountId: row.accountId,
+      conversation: await rowToConversation(row),
+    })),
+  )
 }
 
 /** Fetch one conversation with its messages and attachments. */
@@ -643,16 +742,30 @@ async function rowToConversation(
     },
   }))
 
-  const conversationAttachments: ConversationAttachment[] = atts.map((a) => ({
-    gmailMessageId: gmailIdFromRowId(messages, a.messageId),
-    messageId: a.messageId,
-    gmailAttachmentId: a.gmailAttachmentId,
-    filename: a.filename,
-    mimeType: a.mimeType,
-    sizeBytes: a.sizeBytes,
-    isInline: a.isInline,
-    contentId: a.contentId,
-  }))
+  // A stored attachment points at a message by that message's *row* id. The
+  // domain field is the message's own identity, which `saveConversation`
+  // re-prefixes, so the row prefix is stripped here. Leaving it on broke two
+  // things at once: the chat view matches attachments to messages by this value
+  // (so no chip rendered), and re-saving — which is what re-analysis does —
+  // wrote `<conversation>:<conversation>:<identity>`, a foreign key pointing at
+  // no row, and the save failed outright.
+  const messageRowPrefix = `${row.id}:`
+  const conversationAttachments: ConversationAttachment[] = atts.map((a) => {
+    const identity = a.messageId.startsWith(messageRowPrefix)
+      ? a.messageId.slice(messageRowPrefix.length)
+      : a.messageId
+
+    return {
+      gmailMessageId: identity,
+      messageId: identity,
+      gmailAttachmentId: a.gmailAttachmentId,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      sizeBytes: a.sizeBytes,
+      isInline: a.isInline,
+      contentId: a.contentId,
+    }
+  })
 
   return {
     id: row.id,
@@ -663,6 +776,7 @@ async function rowToConversation(
     attachments: conversationAttachments,
     state: row.state,
     isAutomated: row.isAutomated,
+    replyable: row.replyable,
     awaitingReply: row.awaitingReply,
     requiresReply: row.requiresReply,
     importance: row.importance,
@@ -674,17 +788,6 @@ async function rowToConversation(
     topic: row.topic,
     goal: row.goal,
   }
-}
-
-/** Recover the Gmail message id from a composite message row id. */
-function gmailIdFromRowId(
-  messages: ConversationMessage[],
-  messageRowId: string,
-): string {
-  const suffix = messageRowId.split(':').slice(1).join(':')
-  return (
-    messages.find((m) => m.gmailMessageId === suffix)?.gmailMessageId ?? suffix
-  )
 }
 
 /** Delete a conversation and its children. */

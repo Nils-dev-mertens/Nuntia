@@ -103,8 +103,11 @@ export async function buildAuthUrl(
 
   return createClient().generateAuthUrl({
     access_type: 'offline', // ask for a refresh token
-    // Force a refresh token even when one already exists for this app.
-    prompt: 'consent',
+    // Force a refresh token even when one already exists for this app, and
+    // force Google's account chooser so a second mailbox can actually be
+    // picked — `consent` alone re-authorizes whichever Google account the
+    // browser is already signed into, which makes "add account" impossible.
+    prompt: 'consent select_account',
     scope: SCOPES,
     state,
     code_challenge: await codeChallenge(verifier),

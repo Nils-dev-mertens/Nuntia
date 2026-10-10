@@ -5,6 +5,8 @@
  * what needs doing comes first, and time is secondary.
  */
 
+import { useState } from 'react'
+
 import type { ConversationState } from '#/db/schema.ts'
 import type { ConversationSummary, InboxPayload } from '#/lib/gmail/service.ts'
 
@@ -71,6 +73,48 @@ function NoReplyTag() {
 }
 
 /**
+ * Which connected mailbox this row belongs to.
+ *
+ * The inbox is one merged list, so a row has to say where it came from — with
+ * several addresses in play, "who is this from" is only half the question.
+ */
+function AccountTag({ email }: { email: string }) {
+  return (
+    <span className="shrink-0 rounded-full border border-border bg-background px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+      {email}
+    </span>
+  )
+}
+
+/**
+ * How the user's addresses relate to the thread.
+ *
+ * `cc-only` is the one worth surfacing as a tag: it is someone else's
+ * conversation you happen to be copied on twice, so it reads as informational
+ * rather than as something waiting on you. Anything else only needs the CC'd
+ * addresses named.
+ */
+function RelationTag({ conversation }: { conversation: ConversationSummary }) {
+  if (conversation.relation === 'cc-only') {
+    return (
+      <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
+        Cc
+      </span>
+    )
+  }
+
+  if (conversation.ccAccountEmails.length > 0) {
+    return (
+      <span className="shrink-0 text-xs text-muted-foreground">
+        also {conversation.ccAccountEmails.join(', ')}
+      </span>
+    )
+  }
+
+  return null
+}
+
+/**
  * A machine-generated update: receipts, build results, alerts, invitations.
  *
  * Denser than a chat row and missing everything that implies a conversation —
@@ -93,6 +137,7 @@ function AutomatedRow({ conversation }: { conversation: ConversationSummary }) {
               {sender}
             </span>
             <NoReplyTag />
+            <AccountTag email={conversation.accountEmail} />
           </div>
 
           <time
@@ -153,8 +198,13 @@ function ConversationRow({
           </p>
         ) : null}
 
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <StateBadge state={conversation.state} />
+          {/* A human thread can still have nobody to answer — same "No reply"
+              tag as an automated card, since the composer is hidden either way. */}
+          {conversation.replyable ? null : <NoReplyTag />}
+          <AccountTag email={conversation.accountEmail} />
+          <RelationTag conversation={conversation} />
           <span className="text-xs text-muted-foreground">
             {conversation.messageCount}{' '}
             {conversation.messageCount === 1 ? 'message' : 'messages'}
@@ -196,7 +246,35 @@ function SignInPrompt() {
   )
 }
 
-export function Inbox({ payload }: { payload: InboxPayload }) {
+export function Inbox({
+  payload,
+  onResync,
+}: {
+  payload: InboxPayload
+  /** Present when the app can rebuild from Gmail; absent in isolation/tests. */
+  onResync?: () => Promise<{ error: string | null }>
+}) {
+  // Hooks run before the signed-out early return, so the hook order is stable.
+  const [resyncing, setResyncing] = useState(false)
+  const [resyncError, setResyncError] = useState<string | null>(null)
+
+  const handleResync = async () => {
+    if (!onResync || resyncing) return
+
+    setResyncing(true)
+    setResyncError(null)
+    try {
+      const result = await onResync()
+      if (result.error) setResyncError(result.error)
+    } catch (error) {
+      setResyncError(
+        error instanceof Error ? error.message : 'Could not re-sync.',
+      )
+    } finally {
+      setResyncing(false)
+    }
+  }
+
   if (!payload.signedIn) {
     return (
       <div className="mx-auto max-w-2xl p-8">
@@ -208,8 +286,14 @@ export function Inbox({ payload }: { payload: InboxPayload }) {
     )
   }
 
-  const { conversations, counts, syncError, authRequired, lastSyncedAt } =
-    payload
+  const {
+    accounts,
+    conversations,
+    counts,
+    syncError,
+    authRequiredAccounts,
+    lastSyncedAt,
+  } = payload
 
   // Every state is present in `counts`, including zeroes — an absent key would
   // mean the counts and the list disagree, which is worth hiding rather than
@@ -220,17 +304,58 @@ export function Inbox({ payload }: { payload: InboxPayload }) {
     <div className="mx-auto max-w-2xl p-8">
       <header className="flex items-baseline justify-between gap-4">
         <h1 className="text-3xl font-bold">Lumen</h1>
-        <span className="text-xs text-muted-foreground">{payload.email}</span>
+        {/* All connected mailboxes are merged into the one list below. The
+            "Add mailbox" action re-runs the same OAuth flow as the sign-in
+            prompt, but accounts are global, so signing in again connects the
+            new mailbox alongside the existing ones instead of replacing them. */}
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="truncate text-xs text-muted-foreground">
+            {accounts.map((account) => account.email).join(' · ')}
+          </span>
+          <button
+            type="button"
+            onClick={() => void handleResync()}
+            disabled={resyncing || !onResync}
+            title="Re-fetch the last 30 days from Gmail"
+            className={cn(
+              'shrink-0 inline-flex h-8 items-center rounded-md border border-border bg-background px-3',
+              'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
+              (resyncing || !onResync) && 'cursor-not-allowed opacity-50',
+            )}
+          >
+            {resyncing ? 'Re-syncing…' : 'Re-sync'}
+          </button>
+          <a
+            href="/auth/google"
+            className={cn(
+              'shrink-0 inline-flex h-8 items-center rounded-md border border-border bg-background px-3',
+              'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
+            )}
+          >
+            Add mailbox
+          </a>
+          <Link
+            to="/settings"
+            className={cn(
+              'shrink-0 inline-flex h-8 items-center rounded-md border border-border bg-background px-3',
+              'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
+            )}
+          >
+            Settings
+          </Link>
+        </div>
       </header>
 
-      {authRequired ? (
+      {authRequiredAccounts.length > 0 ? (
         <div
           role="alert"
           className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
         >
           <p>
-            Google no longer accepts the stored access — you may have revoked
-            it, or it expired. Sign in again to keep syncing.
+            Google no longer accepts the stored access for{' '}
+            {authRequiredAccounts.map((account) => account.email).join(', ')} —
+            you may have revoked it, or it expired. Sign in again to keep
+            syncing. The other mailboxes are unaffected.
           </p>
           <a
             href="/auth/google"
@@ -248,6 +373,15 @@ export function Inbox({ payload }: { payload: InboxPayload }) {
           className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
         >
           Sync failed: {syncError}
+        </p>
+      ) : null}
+
+      {resyncError ? (
+        <p
+          role="status"
+          className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+        >
+          Re-sync failed: {resyncError}
         </p>
       ) : null}
 

@@ -18,12 +18,20 @@ import {
   toParsedMessage,
 } from './message.ts'
 import {
+  applyDecision,
   buildConversation,
+  decideConversation,
   getParsingProfileContext,
+  recordDecision,
   saveConversation,
 } from '#/lib/conversation/index.ts'
-import type { ParsingProfileContext } from '#/lib/conversation/index.ts'
+import type {
+  Conversation,
+  Decision,
+  ParsingProfileContext,
+} from '#/lib/conversation/index.ts'
 import { setHistoryId } from '#/lib/auth/accounts.ts'
+import { loadDecisionPipeline } from '#/lib/ai/index.ts'
 
 /** Progress callback, so a long backfill can report what it is doing. */
 export type SyncProgress = (event: SyncEvent) => void
@@ -54,14 +62,22 @@ export type SyncOptions = {
   onProgress?: SyncProgress
 }
 
-/** Threads fetched concurrently. Higher risks rate limits for no real gain. */
-const CONCURRENCY = 4
+/**
+ * Threads fetched concurrently.
+ *
+ * Kept low deliberately: each `threads.get` costs quota, and fetching four at
+ * once is enough to trip Gmail's per-user "Total Query Cost" limit on a real
+ * mailbox. Backoff-and-retry lives in `client.ts`, so a burst is recoverable
+ * rather than fatal — but the cheapest fix is not to create the burst.
+ */
+const CONCURRENCY = 2
 
 /**
  * Run a bounded number of tasks at once.
  *
- * Deliberately simple: no queue library, and no retry. Rate-limit handling lives
- * at the sync level where a backoff actually helps, rather than per request.
+ * Deliberately simple: no queue library. Rate-limit handling lives one layer
+ * down in `client.ts`, which retries a rate-limited request with backoff, so a
+ * worker here never has to know the difference.
  */
 async function mapWithConcurrency<T, TResult>(
   items: T[],
@@ -88,6 +104,50 @@ async function mapWithConcurrency<T, TResult>(
 /** Messages worth turning into conversation bubbles. */
 function relevantMessages(messages: GmailMessage[]): GmailMessage[] {
   return messages.filter((m) => !isDraft(m) && !isTrashed(m))
+}
+
+/**
+ * The underlying reason for a failure.
+ *
+ * A Drizzle query error's own `message` is the SQL plus every bound parameter,
+ * which buries the actual cause ("UNIQUE constraint failed: …") in `cause`. The
+ * short reason is surfaced so a sync log names the problem instead of the query.
+ */
+function reasonOf(error: unknown): string {
+  const cause = (error as { cause?: unknown })?.cause
+  if (cause instanceof Error && cause.message) return cause.message
+  if (error instanceof Error && error.message) return error.message
+  return 'unknown error'
+}
+
+/**
+ * Run the decision pipeline over an already-built conversation and persist it.
+ *
+ * Split out of `syncThread` so the manual re-analyse action reuses the exact
+ * path a sync takes — rules, then Jev and the topic generator when configured —
+ * against a conversation that is already in the database, without a Gmail round
+ * trip.
+ */
+export async function decideAndSave(
+  accountId: string,
+  conversation: Conversation,
+): Promise<{ decision: Decision; conversation: Conversation }> {
+  const decision = await decideConversation(
+    {
+      subject: conversation.subject,
+      messages: conversation.messages,
+      ownerEmail: accountId,
+      goal: conversation.goal,
+      decidedAt: null,
+    },
+    await loadDecisionPipeline(),
+  )
+  const updated = applyDecision(conversation, decision)
+
+  await saveConversation(accountId, updated)
+  await recordDecision(updated, decision)
+
+  return { decision, conversation: updated }
 }
 
 /**
@@ -118,28 +178,47 @@ export async function syncThread(
 
     // Gmail's structured payload carries attachment metadata in the MIME tree
     // rather than in the decoded parts, so it is collected separately.
-    const attachments = messages.flatMap((m) =>
-      toAttachmentRefs(m).map((ref) => ({
-        gmailMessageId: m.id,
+    //
+    // Each ref is tagged with the identity the *message row* is keyed by — the
+    // parsed `messageId`, which is the RFC 5322 Message-ID — not Gmail's own
+    // message id. The messages table and the attachment's `message_id` foreign
+    // key have to agree, or every thread that carries an attachment fails to
+    // save as a whole (SQLITE_CONSTRAINT: FOREIGN KEY constraint failed).
+    const attachments = messages.flatMap((message, index) => {
+      const parsedMessage = parsed[index]
+      const messageKey = parsedMessage
+        ? parsedMessage.messageId ??
+          `synthetic:${parsedMessage.date?.getTime() ?? 0}`
+        : message.id
+
+      return toAttachmentRefs(message).map((ref) => ({
+        gmailMessageId: messageKey,
         gmailAttachmentId: ref.attachmentId,
         filename: ref.filename,
         mimeType: ref.mimeType,
         sizeBytes: ref.sizeBytes,
         isInline: ref.isInline,
         contentId: ref.contentId,
-      })),
-    )
+      }))
+    })
 
-    const conversation = buildConversation(parsed, {
+    const built = buildConversation(parsed, {
       ownerEmail: accountId,
       gmailThreadId: thread.id,
       attachments,
       ...profileContext,
     })
 
+    // The decision pipeline runs here, in the sync path, once per changed thread:
+    // rules first, then the decision model (Jev) and the topic generator (an LLM)
+    // when they are configured in the UI. With no keys this is the rule-based
+    // default, so the result is identical to what `buildConversation` already
+    // derived. `decideAndSave` owns the persist, so the manual re-analyse action
+    // takes the same path.
+    //
     // Bytes are not downloaded here — only metadata is recorded. The attachment
     // cache fetches on demand when something actually needs the file.
-    await saveConversation(accountId, conversation)
+    await decideAndSave(accountId, built)
 
     onProgress?.({
       type: 'thread',
@@ -153,7 +232,7 @@ export async function syncThread(
     onProgress?.({
       type: 'error',
       threadId: thread.id,
-      message: error instanceof Error ? error.message : 'unknown error',
+      message: reasonOf(error),
     })
     return 'error'
   }
@@ -215,7 +294,7 @@ export async function backfill(
         onProgress?.({
           type: 'error',
           threadId,
-          message: error instanceof Error ? error.message : 'unknown error',
+          message: reasonOf(error),
         })
         return 'error'
       }
@@ -283,7 +362,7 @@ export async function syncIncremental(
         onProgress?.({
           type: 'error',
           threadId,
-          message: error instanceof Error ? error.message : 'unknown error',
+          message: reasonOf(error),
         })
         return 'error'
       }

@@ -11,23 +11,28 @@ import { createFileRoute, useRouter } from '@tanstack/react-router'
 
 import { ConversationView } from '#/components/conversation'
 import { getSession } from '#/lib/auth/index.ts'
-import { describeActionFailure, loadConversation } from '#/lib/gmail/service.ts'
+import {
+  describeActionFailure,
+  loadConversation,
+  reanalyseConversation,
+} from '#/lib/gmail/service.ts'
 import type { ActionFailure } from '#/lib/gmail/service.ts'
 import {
   refreshThread,
-  requireConversation,
+  requireConversationByThreadId,
   sendReply,
 } from '#/lib/gmail/send.ts'
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import {
   getParsingProfileContext,
+  replyAccountsFor,
   saveParsingProfile,
   setConversationDetails,
 } from '#/lib/conversation/index.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import { syncThread } from '#/lib/gmail/sync.ts'
 import { createGmailClient } from '#/lib/auth/google.ts'
-import { getAccountEnvelope } from '#/lib/auth/accounts.ts'
+import { getAccountEnvelope, listAccounts } from '#/lib/auth/accounts.ts'
 import { createGmailApiClient } from '#/lib/gmail/client.ts'
 
 const saveParsingProfileAction = createServerFn({ method: 'POST' })
@@ -45,8 +50,9 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
-    const conversation = await requireConversation(
-      session.accountId,
+    // The thread's own mailbox, not the session's: accounts are global and the
+    // row came from whichever account owns it.
+    const { accountId, conversation } = await requireConversationByThreadId(
       data.gmailThreadId,
     )
     const sender = [...conversation.messages]
@@ -83,7 +89,7 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       }
     }
     await saveParsingProfile(
-      session.accountId,
+      accountId,
       senderEmail,
       {
         greeting: data.defaultReplyGreeting.trim() || null,
@@ -102,19 +108,19 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
     )
 
     try {
-      const envelope = await getAccountEnvelope(session.accountId)
+      const envelope = await getAccountEnvelope(accountId)
       if (!envelope)
         return {
           error: 'Preferences saved, but no Google account is connected.',
         }
       const client = createGmailApiClient(
         await createGmailClient(envelope),
-        session.accountId,
+        accountId,
       )
       const thread = await client.getThread(conversation.gmailThreadId)
-      const profileContext = await getParsingProfileContext(session.accountId)
+      const profileContext = await getParsingProfileContext(accountId)
       const synced = await syncThread(
-        session.accountId,
+        accountId,
         thread,
         undefined,
         profileContext,
@@ -149,10 +155,7 @@ const fetchConversation = createServerFn({ method: 'GET' })
       const session = await getSession()
       if (!session) return { found: false }
 
-      const detail = await loadConversation(
-        session.accountId,
-        data.gmailThreadId,
-      )
+      const detail = await loadConversation(data.gmailThreadId)
       if (!detail) return { found: false }
 
       return { found: true, detail }
@@ -179,15 +182,13 @@ const saveConversationDetailsAction = createServerFn({ method: 'POST' })
     if (goal.error) return { error: goal.error }
 
     try {
-      const conversation = await requireConversation(
-        session.accountId,
+      const { accountId, conversation } = await requireConversationByThreadId(
         data.gmailThreadId,
       )
-      await setConversationDetails(
-        session.accountId,
-        conversation.gmailThreadId,
-        { topic: topic.value, goal: goal.value },
-      )
+      await setConversationDetails(accountId, conversation.gmailThreadId, {
+        topic: topic.value,
+        goal: goal.value,
+      })
       return { error: null }
     } catch (error) {
       return {
@@ -230,6 +231,8 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       gmailThreadId: string
       body: string
       attachments: ReplyAttachmentUpload[]
+      /** Which of the user's addresses to send from; validated below. */
+      fromAccountId: string | null
     }) => data,
   )
   .handler(async ({ data }): Promise<ActionFailure> => {
@@ -238,12 +241,24 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       return { error: 'You are not signed in.', authRequired: false }
 
     try {
-      const conversation = await requireConversation(
-        session.accountId,
-        data.gmailThreadId,
-      )
+      const { accountId: ownerAccountId, conversation } =
+        await requireConversationByThreadId(data.gmailThreadId)
 
-      const envelope = await getAccountEnvelope(session.accountId)
+      // Never trust the client's choice of sender: recompute the addresses that
+      // are actually on this thread and fall back to the owning mailbox.
+      const accounts = (await listAccounts()).map((account) => ({
+        id: account.id,
+        email: account.email,
+      }))
+      const allowed = new Set(
+        replyAccountsFor(conversation.messages, accounts, ownerAccountId),
+      )
+      const accountId =
+        data.fromAccountId && allowed.has(data.fromAccountId)
+          ? data.fromAccountId
+          : ownerAccountId
+
+      const envelope = await getAccountEnvelope(accountId)
       if (!envelope) {
         return {
           error: 'No Google account is connected.',
@@ -253,10 +268,10 @@ const sendReplyAction = createServerFn({ method: 'POST' })
 
       const client = createGmailApiClient(
         await createGmailClient(envelope),
-        session.accountId,
+        accountId,
       )
 
-      const profileContext = await getParsingProfileContext(session.accountId)
+      const profileContext = await getParsingProfileContext(accountId)
       const incoming = [...conversation.messages]
         .reverse()
         .find((message) => !message.isFromOwner)
@@ -286,7 +301,7 @@ const sendReplyAction = createServerFn({ method: 'POST' })
               null,
           }
 
-      await sendReply(client, session.accountId, conversation, data.body, {
+      await sendReply(client, accountId, conversation, data.body, {
         attachments: data.attachments,
         replyStyle,
       })
@@ -294,12 +309,38 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       // Sending does not touch our database, and the sync cursor has already
       // moved past this thread. Re-fetching is what makes the sent reply appear
       // immediately instead of whenever the next sync happens to run.
-      await refreshThread(client, session.accountId, data.gmailThreadId)
+      await refreshThread(client, accountId, data.gmailThreadId)
 
       return { error: null, authRequired: false }
     } catch (error) {
       console.error('[send] reply failed:', error)
       return describeActionFailure(error, 'Could not send the reply.')
+    }
+  })
+
+/**
+ * Re-run the classification for one thread on demand.
+ *
+ * Sync only revisits threads Gmail reports as changed, so a thread classified
+ * before Jev or the topic LLM was configured would keep its old answer. This
+ * runs the same pipeline over the stored conversation — no Gmail call, so there
+ * is no auth failure to report.
+ */
+const reanalyseAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: { gmailThreadId: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      await reanalyseConversation(data.gmailThreadId)
+      return { error: null }
+    } catch (error) {
+      console.error('[reanalyse] failed:', error)
+      return {
+        error: describeActionFailure(error, 'Could not re-analyse this conversation.')
+          .error,
+      }
     }
   })
 
@@ -362,9 +403,25 @@ function ConversationRoute() {
         if (!saved.error) await router.invalidate()
         return saved
       }}
-      onSend={async (body: string, attachments: ReplyAttachmentUpload[]) => {
+      onReanalyse={async () => {
+        const result = await reanalyseAction({
+          data: { gmailThreadId: detail.gmailThreadId },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSend={async (
+        body: string,
+        attachments: ReplyAttachmentUpload[],
+        fromAccountId: string,
+      ) => {
         const sent = await sendReplyAction({
-          data: { gmailThreadId: detail.gmailThreadId, body, attachments },
+          data: {
+            gmailThreadId: detail.gmailThreadId,
+            body,
+            attachments,
+            fromAccountId,
+          },
         })
 
         if (!sent.error) {

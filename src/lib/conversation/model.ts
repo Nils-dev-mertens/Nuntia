@@ -100,6 +100,11 @@ export type Conversation = {
    * failed build is still `needs-action`. See `automated.ts`.
    */
   isAutomated: boolean
+  /**
+   * Whether the conversation can be replied to. Deterministic machine mail is
+   * settled first; the decision model decides the rest. False hides the reply box.
+   */
+  replyable: boolean
   awaitingReply: boolean
   requiresReply: boolean
   importance: number
@@ -164,7 +169,7 @@ export type BuildContext = {
 }
 
 /** Normalise an address for comparison: case-insensitive, no whitespace. */
-function normaliseEmail(email: string): string {
+export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase()
 }
 
@@ -363,7 +368,7 @@ function lastDetectedOwnerStyle(
 }
 
 /** Remove duplicate participants, preserving first-seen order. */
-function dedupeParticipants(participants: Participant[]): Participant[] {
+export function dedupeParticipants(participants: Participant[]): Participant[] {
   const seen = new Set<string>()
   const out: Participant[] = []
 
@@ -448,6 +453,10 @@ export function buildConversation(
     now: new Date(),
   })
 
+  // Step 1 of replyability: machine mail is not replyable. The decision model
+  // fills in the rest (a letter from a person that still expects no answer).
+  const isAutomated = isAutomatedThread(cleaned, context.ownerEmail)
+
   return {
     id: conversationId(context.ownerEmail, context.gmailThreadId),
     gmailThreadId: context.gmailThreadId,
@@ -463,7 +472,8 @@ export function buildConversation(
     urgency: decision.urgency,
     intent: decision.intent,
 
-    isAutomated: isAutomatedThread(cleaned, context.ownerEmail),
+    isAutomated,
+    replyable: !isAutomated,
 
     messageCount: cleaned.length,
     attachmentCount: attachments.length,

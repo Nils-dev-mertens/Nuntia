@@ -121,16 +121,70 @@ export interface GmailClient {
  * responses small and matches the schema's nullable `localPath` — an attachment
  * with no cached file is simply not downloaded yet.
  */
+/**
+ * How the client reacts to a rate-limited request.
+ *
+ * Injectable so tests can drive the retry loop without real timers.
+ */
+export type GmailRetryPolicy = {
+  /** Attempts to make _after_ the first failure. */
+  maxRetries: number
+  /** Milliseconds to wait before retrying attempt `attempt` (0-indexed). */
+  backoffMs: (attempt: number, retryAfterMs: number | null) => number
+}
+
+/** Base for the exponential backoff; doubled per attempt, then jittered. */
+const BASE_BACKOFF_MS = 1_500
+/** Ceiling for a single backoff, so a bad retry cannot hang a request. */
+const MAX_BACKOFF_MS = 30_000
+
+const DEFAULT_RETRY: GmailRetryPolicy = {
+  maxRetries: 4,
+  backoffMs: (attempt, retryAfterMs) => {
+    // Google's own guidance wins when it sends `Retry-After`.
+    if (retryAfterMs !== null) return Math.min(retryAfterMs, MAX_BACKOFF_MS)
+
+    const capped = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS)
+    // Full jitter, so concurrent retries do not re-collide on the same tick.
+    return Math.round(capped * (0.5 + Math.random() * 0.5))
+  },
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export function createGmailApiClient(
   gmail: GmailApi,
   userEmail: string,
+  retry: GmailRetryPolicy = DEFAULT_RETRY,
 ): GmailClient {
+  /**
+   * Run one request, retrying while Gmail is rate-limiting us.
+   *
+   * Every call goes through here, so a quota spike on any endpoint — the
+   * backfill listing, a thread fetch, the history cursor — backs off and retries
+   * rather than failing the whole sync. Only `GmailRateLimitError` is retried;
+   * auth, 404 and real 5xx errors keep their own behaviour.
+   */
   const req = async <T>(fn: () => Promise<{ data: T }>): Promise<T> => {
-    try {
-      const { data } = await fn()
-      return data
-    } catch (error) {
-      throw wrapGmailError(error)
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const { data } = await fn()
+        return data
+      } catch (error) {
+        const wrapped = wrapGmailError(error)
+
+        if (
+          wrapped instanceof GmailRateLimitError &&
+          attempt < retry.maxRetries
+        ) {
+          await sleep(retry.backoffMs(attempt, wrapped.retryAfterMs))
+          continue
+        }
+
+        throw wrapped
+      }
     }
   }
 
@@ -305,6 +359,7 @@ export function wrapGmailError(error: unknown): Error {
         errors?: Array<{ reason?: string }>
         response?: {
           status?: number
+          headers?: Record<string, unknown>
           data?: { error?: { errors?: Array<{ reason?: string }> } }
         }
       }
@@ -325,9 +380,23 @@ export function wrapGmailError(error: unknown): Error {
     )
   }
 
-  if (status === 429) {
+  // Gmail reports an exhausted per-user rate limit or daily quota as **403**, not
+  // 429, with a reason of `rateLimitExceeded`/`quotaExceeded` — or, on the newer
+  // quota model, only a message naming the metric. Treating only 429 as a rate
+  // limit meant the real Gmail response surfaced as a hard "Sync failed" instead
+  // of being retried.
+  const message = anyErr?.message ?? ''
+  const isQuota =
+    reason === 'rateLimitExceeded' ||
+    reason === 'quotaExceeded' ||
+    /quota exceeded|rate limit exceeded|user rate limit|too many requests/i.test(
+      message,
+    )
+
+  if (status === 429 || (status === 403 && isQuota)) {
     return new GmailRateLimitError(
-      'Gmail rate limit hit. Sync should back off and retry later.',
+      'Gmail is rate-limiting requests (quota exceeded). Lumen will retry on the next sync.',
+      retryAfterMsOf(anyErr?.response?.headers),
     )
   }
 
@@ -352,11 +421,33 @@ export class GmailAuthError extends Error {
   }
 }
 
+/**
+ * Parse a `Retry-After` header, which may be a number of seconds or an HTTP
+ * date. Returns null when absent or unrecognisable.
+ */
+function retryAfterMsOf(headers: Record<string, unknown> | undefined): number | null {
+  // Header names are case-insensitive; gaxios lowercases them, but be defensive.
+  const raw = headers?.['retry-after'] ?? headers?.['Retry-After']
+
+  if (typeof raw === 'number') return Math.max(0, raw * 1000)
+  if (typeof raw !== 'string') return null
+
+  const seconds = Number(raw)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000)
+
+  const date = Date.parse(raw)
+  return Number.isNaN(date) ? null : Math.max(0, date - Date.now())
+}
+
 /** Rate limited — callers should back off, not retry immediately. */
 export class GmailRateLimitError extends Error {
-  constructor(message: string) {
+  /** Google's `Retry-After`, if it sent one, in milliseconds. */
+  readonly retryAfterMs: number | null
+
+  constructor(message: string, retryAfterMs: number | null = null) {
     super(message)
     this.name = 'GmailRateLimitError'
+    this.retryAfterMs = retryAfterMs
   }
 }
 

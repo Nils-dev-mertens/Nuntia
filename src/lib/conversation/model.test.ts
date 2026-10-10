@@ -11,8 +11,10 @@ import {
 } from './model.ts'
 import {
   applyDecision,
-  NoopDecisionLayer,
-  RuleBasedDecisionLayer,
+  decideConversation,
+  HeuristicRuleClassifier,
+  NoTopicGenerator,
+  PlaceholderDecisionModel,
 } from './decision.ts'
 import { parseRawMessage } from '#/lib/mail/index.ts'
 import type { ParsedMessage } from '#/lib/mail/index.ts'
@@ -448,9 +450,8 @@ describe('inferIntent', () => {
 })
 
 describe('decision layer', () => {
-  test('rule-based layer returns a decision without throwing', async () => {
-    const layer = new RuleBasedDecisionLayer()
-    const decision = await layer.decide({
+  test('the default pipeline classifies a question as needs-action', async () => {
+    const decision = await decideConversation({
       subject: 'Project launch',
       messages: [
         {
@@ -474,13 +475,18 @@ describe('decision layer', () => {
       decidedAt: null,
     })
 
-    expect(decision.provider).toBe('rules')
     expect(decision.state).toBe('needs-action')
     expect(decision.reasoning).toBeTruthy()
+    // A human wrote it, so it is replyable by default.
+    expect(decision.replyable).toBe(true)
+    // Rules + placeholder model + no topic generator.
+    expect(decision.providers).toEqual(['rules', 'rules', 'none'])
+    // No topic generator is configured, so none is invented.
+    expect(decision.topic).toBeNull()
   })
 
-  test('noop layer returns a neutral decision', async () => {
-    const decision = await new NoopDecisionLayer().decide({
+  test('with nothing to classify the state falls back to informational', async () => {
+    const decision = await decideConversation({
       subject: 'x',
       messages: [],
       ownerEmail: OWNER,
@@ -488,11 +494,58 @@ describe('decision layer', () => {
       decidedAt: null,
     })
 
-    expect(decision.provider).toBe('noop')
     expect(decision.state).toBe('informational')
   })
 
-  test('applyDecision never overwrites a user goal', async () => {
+  test('a confident rule is never overridden by the decision model', async () => {
+    const decision = await decideConversation(
+      {
+        subject: 'x',
+        messages: [
+          {
+            gmailMessageId: 'm1',
+            internetMessageId: null,
+            from: { email: OWNER, name: null },
+            to: [],
+            cc: [],
+            subject: 'x',
+            snippet: null,
+            body: 'Done.',
+            bodyHtml: null,
+            greeting: null,
+            signature: null,
+            isFromOwner: true,
+            sentAt: new Date('2024-01-15T10:00:00Z'),
+          },
+        ],
+        ownerEmail: OWNER,
+        goal: null,
+        decidedAt: null,
+      },
+      {
+        rules: new HeuristicRuleClassifier(),
+        model: {
+          name: 'jev',
+          decide: async () => ({
+            state: 'needs-action',
+            importance: 9,
+            urgency: 9,
+            replyable: null,
+            reasoning: 'model says so',
+          }),
+        },
+        topics: new NoTopicGenerator(),
+      },
+    )
+
+    // The rules spoke last, so the model's conflicting state is ignored...
+    expect(decision.state).toBe('waiting-for-reply')
+    // ...but its scores are used, and it is recorded as having run.
+    expect(decision.importance).toBe(9)
+    expect(decision.providers).toEqual(['rules', 'jev', 'none'])
+  })
+
+  test('applyDecision never overwrites the user goal or intent', async () => {
     const messages = await Promise.all([
       msg(
         rawMessage({
@@ -510,23 +563,98 @@ describe('decision layer', () => {
       gmailThreadId: 't',
     })
     conversation.goal = 'Confirm Tuesday works'
+    conversation.intent = 'scheduling'
 
     const updated = applyDecision(conversation, {
       state: 'needs-action',
+      awaitingReply: false,
+      requiresReply: true,
+      replyable: true,
       importance: 8,
       urgency: 7,
-      requiresReply: true,
-      intent: 'request',
-      currentTopic: 'Launch date',
+      topic: 'Launch date',
       reasoning: 'test',
-      provider: 'test',
+      providers: ['test'],
     })
 
-    // The layer's fields apply...
+    // The decision's fields apply...
     expect(updated.state).toBe('needs-action')
     expect(updated.topic).toBe('Launch date')
-    // ...but the user's goal survives untouched.
+    // ...but the user's goal and intent survive untouched.
     expect(updated.goal).toBe('Confirm Tuesday works')
+    expect(updated.intent).toBe('scheduling')
+  })
+
+  // The AI stages are optional, and the conversation is persisted around this
+  // call. A failed request must therefore degrade to the rules rather than
+  // reject — otherwise a misconfigured model stops a synced thread being saved
+  // and the inbox silently goes stale.
+  test('a failed decision model degrades to the rules instead of throwing', async () => {
+    const decision = await decideConversation(
+      {
+        subject: 'Project launch',
+        messages: [
+          {
+            gmailMessageId: 'm1',
+            internetMessageId: null,
+            from: { email: 'sarah@example.com', name: 'Sarah' },
+            to: [],
+            cc: [],
+            subject: 'Project launch',
+            snippet: null,
+            body: 'Can you confirm Tuesday?',
+            bodyHtml: null,
+            greeting: null,
+            signature: null,
+            isFromOwner: false,
+            sentAt: new Date('2024-01-15T10:00:00Z'),
+          },
+        ],
+        ownerEmail: OWNER,
+        goal: null,
+        decidedAt: null,
+      },
+      {
+        rules: new HeuristicRuleClassifier(),
+        model: {
+          name: 'jev',
+          decide: async () => {
+            throw new Error('AI service request failed (400)')
+          },
+        },
+        topics: new NoTopicGenerator(),
+      },
+    )
+
+    // The rules' answer stands, so the thread is still classified and replyable.
+    expect(decision.state).toBe('needs-action')
+    expect(decision.replyable).toBe(true)
+    expect(decision.importance).toBeGreaterThan(0)
+    expect(decision.urgency).toBeGreaterThan(0)
+  })
+
+  test('a failed topic generator leaves the topic null instead of throwing', async () => {
+    const decision = await decideConversation(
+      {
+        subject: 'Project launch',
+        messages: [],
+        ownerEmail: OWNER,
+        goal: null,
+        decidedAt: null,
+      },
+      {
+        rules: new HeuristicRuleClassifier(),
+        model: new PlaceholderDecisionModel(),
+        topics: {
+          name: 'llm:openai',
+          generate: async () => {
+            throw new Error('AI service request failed (400)')
+          },
+        },
+      },
+    )
+
+    expect(decision.topic).toBeNull()
   })
 })
 describe('html bodies', () => {

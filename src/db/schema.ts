@@ -146,6 +146,17 @@ export const conversations = sqliteTable(
     isAutomated: integer('is_automated', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * Whether this conversation can be replied to at all.
+     *
+     * Two steps. The deterministic machine-mail marker settles it first — an
+     * address that marks itself no-reply is not replyable. The decision model
+     * (Jev) then decides the rest, for "letters" a human sent that still have
+     * nobody to answer. False hides the composer and shows the "No reply" tag.
+     */
+    replyable: integer('replyable', { mode: 'boolean' })
+      .notNull()
+      .default(true),
 
     lastMessageAt: integer('last_message_at', {
       mode: 'timestamp_ms',
@@ -365,7 +376,31 @@ export const historyCursors = sqliteTable(
   (t) => [index('history_cursors_updated_idx').on(t.updatedAt)],
 )
 
+/**
+ * Install-wide settings. A single row, id `app`.
+ *
+ * The AI service credentials live here rather than in `.env`: they are secrets
+ * the user sets in the UI, they are per-install, and they are encrypted at rest
+ * with the same key as the OAuth refresh tokens. Keeping them out of the
+ * environment also means the app can be configured without a redeploy.
+ */
+export const appSettings = sqliteTable('app_settings', {
+  id: text('id').primaryKey(),
+  /** AES-256-GCM ciphertext of the Jev API key. Never store plaintext. */
+  jevApiKeyEncrypted: text('jev_api_key_encrypted'),
+  jevModel: text('jev_model'),
+  /** One of `anthropic` | `openai` | `gemini`, or null when topics are off. */
+  llmProvider: text('llm_provider'),
+  llmModel: text('llm_model'),
+  /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
+  llmApiKeyEncrypted: text('llm_api_key_encrypted'),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+})
+
 export type Account = typeof accounts.$inferSelect
+export type AppSettings = typeof appSettings.$inferSelect
 export type Conversation = typeof conversations.$inferSelect
 export type Message = typeof messages.$inferSelect
 export type Attachment = typeof attachments.$inferSelect

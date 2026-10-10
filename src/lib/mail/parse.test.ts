@@ -50,6 +50,44 @@ describe('stripQuotedText', () => {
     expect(quote).toContain('Here are the updated numbers.')
   })
 
+  test('removes an Outlook web quote separated by a long underscore rule', () => {
+    // The rule sits well before the midpoint on a short reply, so a positional
+    // marker cannot see it; without this the whole history stayed in the body
+    // and its trailing signature was stripped as if it were the sender's.
+    const { body, quote } = stripQuotedText(
+      'Sorry voor het delay.\n' +
+        '\n' +
+        'Best regards / Met vriendelijke groeten,\n' +
+        '\n' +
+        'Guillaume\n' +
+        'CTO @ saply.ai\n' +
+        '\n' +
+        '[cid:logo]\n' +
+        '________________________________\n' +
+        'From: Nils Mertens <nils@example.com>\n' +
+        'Sent: 05 October 2026 10:00 AM\n' +
+        'To: Guillaume <g@example.com>\n' +
+        'Subject: Interview\n' +
+        '\n' +
+        'Dag Guillaume,\n' +
+        '\n' +
+        'Alvast bedankt!',
+    )
+
+    expect(body).toContain('Sorry voor het delay.')
+    expect(body).not.toContain('Dag Guillaume')
+    expect(quote).toContain('Dag Guillaume')
+  })
+
+  test('finds an Outlook header block near the top, where the weak marker cannot', () => {
+    const { body, quote } = stripQuotedText(
+      'Done.\nFrom: Alex Doe\nSent: Monday\nTo: Me\nSubject: RE: numbers\n\nHere are the numbers.',
+    )
+
+    expect(body).toBe('Done.')
+    expect(quote).toContain('Here are the numbers.')
+  })
+
   test('keeps a message with no quote intact', () => {
     const { body, quote } = stripQuotedText(
       'Just a plain message with no quotes.',
@@ -82,6 +120,24 @@ describe('stripSignature', () => {
     )
     expect(body).toBe('Sounds good.')
     expect(signature).toContain('Priya Raman')
+  })
+
+  test('removes a closing written in several languages on one line', () => {
+    // `Best regards / Met vriendelijke groeten / Cordialement,` — no single
+    // language's pattern matches the line, so the signature survived.
+    const { body, signature } = stripSignature(
+      'Sorry voor het delay.\n\nBest regards / Met vriendelijke groeten / Cordialement,\n\nGuillaume Lameyse\nCTO @ saply.ai',
+    )
+
+    expect(body).toBe('Sorry voor het delay.')
+    expect(signature).toContain('Guillaume Lameyse')
+  })
+
+  test('does not read a sentence with a slash as a closing', () => {
+    const { signature } = stripSignature(
+      'Fixed the parser / debugger issue.\n\nLet me know what you think.',
+    )
+    expect(signature).toBeNull()
   })
 
   test('removes a salutation-led signature', () => {

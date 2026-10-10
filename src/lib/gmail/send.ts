@@ -19,8 +19,11 @@ import type {
 import { buildMimeMessage, composeReply } from '#/lib/mail/index.ts'
 import {
   getConversation,
+  getConversationClusterByThreadId,
   getParsingProfileContext,
+  mergeAccountConversations,
 } from '#/lib/conversation/index.ts'
+import { listAccounts } from '#/lib/auth/accounts.ts'
 import { MAX_ATTACHMENT_BYTES, safeFilename } from './attachments.ts'
 import type { GmailClient } from './client.ts'
 
@@ -130,9 +133,11 @@ export async function sendReply(
     throw new ReplyNotPossibleError('Cannot send an empty reply.')
   }
 
-  if (conversation.isAutomated) {
+  if (!conversation.replyable) {
     throw new ReplyNotPossibleError(
-      'This thread has no reply address — it is an automated notification.',
+      conversation.isAutomated
+        ? 'This thread has no reply address — it is an automated notification.'
+        : 'This conversation has no address to reply to.',
     )
   }
 
@@ -320,4 +325,37 @@ export async function requireConversation(
     throw new ReplyNotPossibleError('That conversation no longer exists.')
   }
   return conversation
+}
+
+/**
+ * Load a conversation by thread id, whichever mailbox owns it.
+ *
+ * The inbox spans several accounts, so an action triggered from the conversation
+ * view cannot assume the session's account — the reply must leave from the
+ * mailbox the thread actually belongs to. The account id comes back with the
+ * conversation for exactly that reason.
+ *
+ * Resolves the same Message-ID-connected cluster the detail view renders, not
+ * one mailbox's fragment. A reply must quote and address the whole conversation:
+ * the stored thread this id names can be a single message when Gmail split the
+ * thread differently across two of the user's mailboxes.
+ */
+export async function requireConversationByThreadId(
+  gmailThreadId: string,
+): Promise<{ accountId: string; conversation: Conversation }> {
+  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  if (!cluster || cluster.length === 0) {
+    throw new ReplyNotPossibleError('That conversation no longer exists.')
+  }
+
+  const accounts = (await listAccounts()).map((account) => ({
+    id: account.id,
+    email: account.email,
+  }))
+  const merged = mergeAccountConversations(cluster, accounts).at(0)
+  if (!merged) {
+    throw new ReplyNotPossibleError('That conversation no longer exists.')
+  }
+
+  return { accountId: merged.ownerAccountId, conversation: merged.conversation }
 }

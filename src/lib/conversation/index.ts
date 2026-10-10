@@ -23,11 +23,23 @@ export {
   toParticipant,
 } from './model.ts'
 
-export type { Decision, DecisionInput, DecisionLayer } from './decision.ts'
+export type {
+  Decision,
+  DecisionInput,
+  DecisionModel,
+  DecisionPipeline,
+  ModelVerdict,
+  RuleClassifier,
+  RuleFacts,
+  TopicGenerator,
+} from './decision.ts'
 export {
   applyDecision,
-  NoopDecisionLayer,
-  RuleBasedDecisionLayer,
+  decideConversation,
+  defaultDecisionPipeline,
+  HeuristicRuleClassifier,
+  NoTopicGenerator,
+  PlaceholderDecisionModel,
 } from './decision.ts'
 
 export {
@@ -37,6 +49,8 @@ export {
   DERIVED_VERSION,
   getByThreadIds,
   getConversation,
+  getConversationByThreadId,
+  getConversationClusterByThreadId,
   listByState,
   listConversations,
   recordDecision,
@@ -53,3 +67,16 @@ export type {
   SenderProfileSettings,
 } from './repository.ts'
 export type { ParsingPreferences } from './model.ts'
+
+export {
+  mergeAccountConversations,
+  relationForRoles,
+  relationOf,
+  replyAccountsFor,
+} from './merge.ts'
+export type {
+  AccountConversation,
+  ConnectedAccount,
+  MergedConversation,
+  MergeRelation,
+} from './merge.ts'

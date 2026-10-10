@@ -17,20 +17,26 @@ import {
   getDerivedVersion,
   getHistoryId,
   getLastSyncedAt,
+  listAccounts,
   setDerivedVersion,
 } from '#/lib/auth/accounts.ts'
 import { createGmailClient } from '#/lib/auth/google.ts'
 import {
   backfillDerivedFields,
   DERIVED_VERSION,
-  getConversation,
+  getConversationClusterByThreadId,
   getParsingProfileContext,
   listConversations,
+  mergeAccountConversations,
   reparseStoredMessages,
+} from '#/lib/conversation/index.ts'
+import type {
+  MergedConversation,
+  MergeRelation,
 } from '#/lib/conversation/index.ts'
 import { createGmailApiClient, GmailAuthError } from './client.ts'
 import { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
-import { sync } from './sync.ts'
+import { decideAndSave, sync } from './sync.ts'
 
 /**
  * The first backfill is bounded.
@@ -50,6 +56,18 @@ export type ConversationSummary = {
   state: ConversationState
   /** No human on the other side — rendered as a compact non-interactive card. */
   isAutomated: boolean
+  /** Whether a reply could leave from here — drives the "No reply" tag. */
+  replyable: boolean
+  /** Which connected mailbox this row belongs to. */
+  accountId: string
+  accountEmail: string
+  /**
+   * How the user's accounts stand relative to the thread. A `cc-only` row is
+   * someone else's conversation they happen to be copied on.
+   */
+  relation: MergeRelation
+  /** Their other addresses that hold this thread only as a copy. */
+  ccAccountEmails: string[]
   participants: Array<{ name: string | null; email: string }>
   messageCount: number
   attachmentCount: number
@@ -67,21 +85,23 @@ export type InboxPayload =
   | { signedIn: false }
   | {
       signedIn: true
-      email: string
+      /** Every connected mailbox, in connection order. */
+      accounts: Array<{ id: string; email: string }>
       conversations: ConversationSummary[]
       /** Every state is present, including zeroes, so the UI can render headers. */
       counts: Record<ConversationState, number>
-      /** ISO string of the last completed sync, or null if never. */
+      /** ISO string of the most recent completed sync, or null if never. */
       lastSyncedAt: string | null
-      /** True when this call actually talked to Gmail. */
+      /** True when this call actually talked to any mailbox. */
       syncedNow: boolean
       /** Set when a sync was attempted and failed; the list is still usable. */
       syncError: string | null
       /**
-       * Google rejected or revoked the stored credentials, so no sync can
-       * succeed until the user signs in again. Drives the "Reconnect" action.
+       * The mailboxes whose Google grant was rejected or revoked. Only these
+       * need the "Reconnect" action — one broken mailbox must not blank the
+       * others.
        */
-      authRequired: boolean
+      authRequiredAccounts: Array<{ id: string; email: string }>
     }
 
 type SyncOutcome = { error: string | null; authRequired: boolean }
@@ -118,9 +138,25 @@ export type ConversationMessageView = {
 /** Everything the chat view needs for one thread. */
 export type ConversationDetail = {
   gmailThreadId: string
+  /** The mailbox that owns this thread — where a reply leaves from by default. */
+  accountId: string
+  accountEmail: string
+  /**
+   * Every address a reply could leave from, best first. More than one when the
+   * thread carries several of the user's connected addresses.
+   */
+  replyAccounts: Array<{ id: string; email: string }>
+  /**
+   * Every connected address. A message from one of these is "yours", even when
+   * it is not the owning mailbox — the chat view labels those bubbles with the
+   * address so a thread between two of the user's own accounts stays readable.
+   */
+  ownerEmails: string[]
   subject: string
   state: ConversationState
   isAutomated: boolean
+  /** False hides the composer — there is nobody to send a reply to. */
+  replyable: boolean
   topic: string | null
   goal: string | null
   awaitingReply: boolean
@@ -158,18 +194,56 @@ export type ConversationDetail = {
  * thread.
  */
 export async function loadConversation(
-  accountId: string,
   gmailThreadId: string,
 ): Promise<ConversationDetail | null> {
-  const [conversation, profileContext] = await Promise.all([
-    getConversation(accountId, gmailThreadId),
-    getParsingProfileContext(accountId),
-  ])
-  if (!conversation) return null
+  // Resolve the *cluster*, not just the one stored conversation this thread id
+  // names. A thread id is mailbox-scoped, and the mailbox it points at may hold
+  // only a fragment of the conversation — Gmail does not always group a message
+  // the same way in the sender's and recipient's mailboxes. The inbox merges the
+  // Message-ID-connected component; the detail view must render the same one, or
+  // clicking a merged row shows one account's fragment and hides the rest.
+  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  if (!cluster || cluster.length === 0) return null
 
-  const otherSender = [...conversation.messages]
+  const accountRows = await listAccounts()
+  const accounts = accountRows.map((account) => ({
+    id: account.id,
+    email: account.email,
+  }))
+
+  // The cluster is one connected component, so it folds into a single row.
+  const merged = mergeAccountConversations(cluster, accounts).at(0)
+  if (!merged) return null
+
+  const accountId = merged.ownerAccountId
+  const conversation = merged.conversation
+  const messages = conversation.messages
+
+  // "Mine" is the whole connected set, so a message from another of the user's
+  // own addresses is theirs rather than a stranger's.
+  const owners = new Set(
+    accountRows.map((account) => account.email.trim().toLowerCase()),
+  )
+
+  const profileContext = await getParsingProfileContext(accountId)
+
+  // Ordered by the merge, not by `accounts`: the composer defaults to the first
+  // entry, and that has to be the owning mailbox rather than whichever account
+  // happens to have been inserted first.
+  const accountById = new Map(accounts.map((account) => [account.id, account]))
+  const replyAccounts = merged.replyAccountIds
+    .map((id) => accountById.get(id))
+    .filter((account): account is { id: string; email: string } =>
+      Boolean(account),
+    )
+
+  // The sender profile is for the *other* party. One of the user's own addresses
+  // is not a sender to tune for, even when it is not the owning mailbox, so those
+  // are excluded rather than treated as a correspondent.
+  const otherSender = [...messages]
     .reverse()
-    .find((message) => !message.isFromOwner)?.from.email
+    .find((message) => !owners.has(message.from.email.trim().toLowerCase()))
+    ?.from.email
   const senderEmail = otherSender?.trim().toLowerCase() ?? null
   const senderParsing = senderEmail
     ? profileContext.parsingProfiles[senderEmail]
@@ -180,9 +254,15 @@ export async function loadConversation(
 
   return {
     gmailThreadId: conversation.gmailThreadId,
+    accountId,
+    accountEmail:
+      accounts.find((account) => account.id === accountId)?.email ?? accountId,
+    replyAccounts,
+    ownerEmails: [...owners],
     subject: conversation.subject,
     state: conversation.state,
     isAutomated: conversation.isAutomated,
+    replyable: conversation.replyable,
     topic: conversation.topic,
     goal: conversation.goal,
     awaitingReply: conversation.awaitingReply,
@@ -190,7 +270,7 @@ export async function loadConversation(
       name: p.name ?? null,
       email: p.email,
     })),
-    messages: conversation.messages.map((m) => ({
+    messages: messages.map((m) => ({
       gmailMessageId: m.gmailMessageId,
       from: { name: m.from.name ?? null, email: m.from.email },
       body: m.body,
@@ -238,6 +318,46 @@ export async function loadConversation(
         }
       : null,
   }
+}
+
+/**
+ * Re-run the decision layer for one thread, on demand.
+ *
+ * Incremental sync only revisits threads Gmail reports as changed, so a
+ * conversation that was classified before Jev (or the topic LLM) was configured
+ * keeps its old answer indefinitely. This runs the same pipeline a sync would,
+ * over the conversation already in the database, with no Gmail round trip.
+ *
+ * It re-decides the owning mailbox's *own* row — the copy the merge treats as
+ * canonical — rather than the merged union, so a multi-mailbox thread's extra
+ * messages are never written into one account's row.
+ */
+export async function reanalyseConversation(
+  gmailThreadId: string,
+): Promise<void> {
+  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  if (!cluster || cluster.length === 0) {
+    throw new Error('That conversation no longer exists.')
+  }
+
+  const accounts = (await listAccounts()).map((account) => ({
+    id: account.id,
+    email: account.email,
+  }))
+  const merged = mergeAccountConversations(cluster, accounts).at(0)
+  if (!merged) throw new Error('That conversation no longer exists.')
+
+  const ownerRow =
+    cluster.find(
+      (entry) =>
+        entry.accountId === merged.ownerAccountId &&
+        entry.conversation.gmailThreadId ===
+          merged.conversation.gmailThreadId,
+    ) ??
+    cluster.find((entry) => entry.accountId === merged.ownerAccountId) ??
+    cluster[0]
+
+  await decideAndSave(ownerRow.accountId, ownerRow.conversation)
 }
 
 /**
@@ -302,7 +422,10 @@ export function describeActionFailure(
   }
 }
 
-async function runSync(accountId: string): Promise<SyncOutcome> {
+async function runSync(
+  accountId: string,
+  full = false,
+): Promise<SyncOutcome> {
   const existing = inFlight.get(accountId)
   if (existing) return existing
 
@@ -322,8 +445,19 @@ async function runSync(accountId: string): Promise<SyncOutcome> {
       const client = createGmailApiClient(gmail, accountId)
 
       await sync(client, accountId, {
-        startHistoryId: await getHistoryId(accountId),
+        // A null cursor forces a backfill; otherwise resume incrementally.
+        startHistoryId: full ? null : await getHistoryId(accountId),
         query: BACKFILL_QUERY,
+        // A thread that fails to save is counted and skipped, never thrown, so
+        // without this a sync that quietly drops mail looks like a clean run.
+        // `message` is the underlying cause (a constraint, not the SQL).
+        onProgress: (event) => {
+          if (event.type === 'error') {
+            console.error(
+              `[sync] thread ${event.threadId} not saved: ${event.message}`,
+            )
+          }
+        },
       })
 
       return { error: null, authRequired: false }
@@ -356,14 +490,22 @@ function previewOf(conversation: {
 }
 
 function toSummary(
-  conversation: Awaited<ReturnType<typeof listConversations>>[number],
+  merged: MergedConversation,
+  emailById: Map<string, string>,
 ): ConversationSummary {
+  const conversation = merged.conversation
+
   return {
     id: conversation.id,
     gmailThreadId: conversation.gmailThreadId,
     subject: conversation.subject,
     state: conversation.state,
     isAutomated: conversation.isAutomated,
+    replyable: conversation.replyable,
+    accountId: merged.ownerAccountId,
+    accountEmail: emailById.get(merged.ownerAccountId) ?? merged.ownerAccountId,
+    relation: merged.relation,
+    ccAccountEmails: merged.ccAccountIds.map((id) => emailById.get(id) ?? id),
     participants: conversation.participants.map((p) => ({
       name: p.name ?? null,
       email: p.email,
@@ -382,6 +524,14 @@ function toSummary(
 export type LoadInboxOptions = {
   /** Sync even if the cursor is fresh. */
   force?: boolean
+  /**
+   * Ignore the stored history cursor and rebuild from `threads.list`.
+   *
+   * This is what recovers mail a failed sync never persisted: incremental sync
+   * only reports changes *after* the cursor, so a thread whose save failed while
+   * the cursor still advanced is invisible to it forever.
+   */
+  full?: boolean
   staleAfterMs?: number
 }
 
@@ -421,26 +571,67 @@ async function ensureDerivedFields(accountId: string): Promise<void> {
  * inbox.
  */
 export async function loadInbox(
-  accountId: string,
   opts: LoadInboxOptions = {},
 ): Promise<InboxPayload> {
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS
 
-  await ensureDerivedFields(accountId)
-
-  const lastSyncedAt = await getLastSyncedAt(accountId)
-  const isStale =
-    opts.force === true || isCursorStale(lastSyncedAt, staleAfterMs)
+  const accounts = (await listAccounts()).map((account) => ({
+    id: account.id,
+    email: account.email,
+  }))
+  const emailById = new Map(
+    accounts.map((account) => [account.id, account.email]),
+  )
 
   let syncError: string | null = null
-  let authRequired = false
-  if (isStale) {
-    const outcome = await runSync(accountId)
-    syncError = outcome.error
-    authRequired = outcome.authRequired
+  let syncedNow = false
+  let latestSyncedAt: Date | null = null
+  const authRequiredAccounts: Array<{ id: string; email: string }> = []
+
+  // Each mailbox is synced and freshness-checked on its own: one revoked grant
+  // or one stale cursor must not stop the others from appearing.
+  for (const account of accounts) {
+    await ensureDerivedFields(account.id)
+
+    const lastSyncedAt = await getLastSyncedAt(account.id)
+    if (lastSyncedAt && (!latestSyncedAt || lastSyncedAt > latestSyncedAt)) {
+      latestSyncedAt = lastSyncedAt
+    }
+
+    const isStale =
+      opts.force === true || isCursorStale(lastSyncedAt, staleAfterMs)
+    if (!isStale) continue
+
+    const outcome = await runSync(account.id, opts.full === true)
+    if (outcome.authRequired) authRequiredAccounts.push(account)
+    if (outcome.error) {
+      syncError = syncError ?? outcome.error
+      continue
+    }
+
+    syncedNow = true
+
+    const afterSync = await getLastSyncedAt(account.id)
+    if (afterSync && (!latestSyncedAt || afterSync > latestSyncedAt)) {
+      latestSyncedAt = afterSync
+    }
   }
 
-  const conversations = await listConversations(accountId)
+  // Read every mailbox, then fold them into one row per thread. The merge is
+  // what collapses a conversation two of the addresses are both on, and what
+  // makes "mine" mean any connected address rather than one.
+  const perAccount = await Promise.all(
+    accounts.map(async (account) => ({
+      accountId: account.id,
+      conversations: await listConversations(account.id),
+    })),
+  )
+  const merged = mergeAccountConversations(
+    perAccount.flatMap(({ accountId, conversations }) =>
+      conversations.map((conversation) => ({ accountId, conversation })),
+    ),
+    accounts,
+  )
 
   const counts: Record<ConversationState, number> = {
     'needs-action': 0,
@@ -448,23 +639,24 @@ export async function loadInbox(
     informational: 0,
     'low-priority': 0,
   }
-  for (const conversation of conversations) {
-    counts[conversation.state] += 1
-  }
+  for (const row of merged) counts[row.conversation.state] += 1
 
-  const syncedAt =
-    syncError === null && isStale
-      ? await getLastSyncedAt(accountId)
-      : lastSyncedAt
+  // The list is grouped by state in the UI, but ordering within a group is by
+  // activity, and the union is not sorted by construction.
+  merged.sort(
+    (a, b) =>
+      b.conversation.lastMessageAt.getTime() -
+      a.conversation.lastMessageAt.getTime(),
+  )
 
   return {
     signedIn: true,
-    email: accountId,
-    conversations: conversations.map(toSummary),
+    accounts,
+    conversations: merged.map((row) => toSummary(row, emailById)),
     counts,
-    lastSyncedAt: syncedAt ? syncedAt.toISOString() : null,
-    syncedNow: isStale && syncError === null,
+    lastSyncedAt: latestSyncedAt ? latestSyncedAt.toISOString() : null,
+    syncedNow,
     syncError,
-    authRequired,
+    authRequiredAccounts,
   }
 }

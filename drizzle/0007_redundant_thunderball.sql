@@ -1,0 +1,1 @@
+ALTER TABLE `conversations` ADD `replyable` integer DEFAULT true NOT NULL;
