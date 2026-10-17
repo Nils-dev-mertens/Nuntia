@@ -7,6 +7,7 @@ import {
   GmailRateLimitError,
   wrapGmailError,
 } from './client.ts'
+import { toAttachmentRefs } from './message.ts'
 
 /**
  * The shape Google actually throws for an exhausted quota.
@@ -65,7 +66,10 @@ describe('wrapGmailError', () => {
     const error = wrapGmailError({
       code: 403,
       message: 'Forbidden',
-      response: { status: 403, data: { error: { errors: [{ reason: 'forbidden' }] } } },
+      response: {
+        status: 403,
+        data: { error: { errors: [{ reason: 'forbidden' }] } },
+      },
     })
 
     expect(error).not.toBeInstanceOf(GmailRateLimitError)
@@ -73,9 +77,9 @@ describe('wrapGmailError', () => {
   })
 
   test('still maps 429 to a rate limit', () => {
-    expect(wrapGmailError({ code: 429, message: 'Too many requests' })).toBeInstanceOf(
-      GmailRateLimitError,
-    )
+    expect(
+      wrapGmailError({ code: 429, message: 'Too many requests' }),
+    ).toBeInstanceOf(GmailRateLimitError)
   })
 
   test('keeps the existing auth and not-found mappings', () => {
@@ -160,5 +164,81 @@ describe('createGmailApiClient rate-limit retry', () => {
 
     await client.getProfileHistoryId()
     expect(waits).toEqual([{ attempt: 0, retryAfterMs: 5000 }])
+  })
+})
+
+describe('createGmailApiClient payload conversion', () => {
+  /** A `threads.get` response with one text part and one attachment part. */
+  function gmailWithThread(attachmentSize: number) {
+    return {
+      users: {
+        threads: {
+          get: async () => ({
+            data: {
+              id: 't1',
+              historyId: '7',
+              messages: [
+                {
+                  id: 'm1',
+                  threadId: 't1',
+                  labelIds: ['INBOX'],
+                  internalDate: '1700000000000',
+                  snippet: 'See attached.',
+                  payload: {
+                    partId: '',
+                    mimeType: 'multipart/mixed',
+                    filename: null,
+                    // Gmail reports a multipart container as size 0.
+                    body: { size: 0 },
+                    headers: [],
+                    parts: [
+                      {
+                        partId: '0',
+                        mimeType: 'text/plain',
+                        filename: null,
+                        body: { data: '', size: 21 },
+                        headers: [],
+                      },
+                      {
+                        partId: '1',
+                        mimeType: 'application/pdf',
+                        filename: 'report.pdf',
+                        body: {
+                          attachmentId: 'ANGjdJ_synthetic',
+                          size: attachmentSize,
+                        },
+                        headers: [],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          }),
+        },
+      },
+    } as unknown as Parameters<typeof createGmailApiClient>[0]
+  }
+
+  test('carries the byte size Gmail reports for an attachment part', async () => {
+    // The size only exists on `body.size`, but the app reads attachment metadata
+    // off the header tree, so dropping it made every stored attachment 0 bytes
+    // (and every chip in the chat view read "0 B").
+    const client = createGmailApiClient(gmailWithThread(4096), 'me@example.com')
+
+    const thread = await client.getThread('t1')
+    const refs = toAttachmentRefs(thread.messages[0])
+
+    expect(refs).toHaveLength(1)
+    expect(refs[0].filename).toBe('report.pdf')
+    expect(refs[0].sizeBytes).toBe(4096)
+  })
+
+  test('reports no size rather than a bogus one when the part has none', async () => {
+    const client = createGmailApiClient(gmailWithThread(0), 'me@example.com')
+
+    const refs = toAttachmentRefs((await client.getThread('t1')).messages[0])
+
+    expect(refs[0].sizeBytes).toBe(0)
   })
 })

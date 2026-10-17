@@ -6,17 +6,25 @@
  * in a REST route, so the same auth and error handling covers both.
  */
 
+import { useEffect } from 'react'
 import { createServerFn } from '@tanstack/react-start'
 import { createFileRoute, useRouter } from '@tanstack/react-router'
 
 import { ConversationView } from '#/components/conversation'
 import { getSession } from '#/lib/auth/index.ts'
 import {
+  applyUserStateOverride,
   describeActionFailure,
+  draftReply,
   loadConversation,
+  markConversationSeen,
+  markThreadSenderUnreplyable,
   reanalyseConversation,
+  setConversationDone,
 } from '#/lib/gmail/service.ts'
-import type { ActionFailure } from '#/lib/gmail/service.ts'
+import { CONVERSATION_STATES } from '#/db/schema.ts'
+import type { ConversationState } from '#/db/schema.ts'
+import type { ActionFailure, ReplyDraftOutcome } from '#/lib/gmail/service.ts'
 import {
   refreshThread,
   requireConversationByThreadId,
@@ -26,6 +34,7 @@ import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import {
   getParsingProfileContext,
   replyAccountsFor,
+  resolveReplyStyle,
   saveParsingProfile,
   setConversationDetails,
 } from '#/lib/conversation/index.ts'
@@ -34,6 +43,14 @@ import { syncThread } from '#/lib/gmail/sync.ts'
 import { createGmailClient } from '#/lib/auth/google.ts'
 import { getAccountEnvelope, listAccounts } from '#/lib/auth/accounts.ts'
 import { createGmailApiClient } from '#/lib/gmail/client.ts'
+
+/**
+ * How long a draft instruction may be.
+ *
+ * The prompt carries it as one line, and a cap here means the length is refused
+ * with a sentence rather than silently truncated inside `buildReplyDraftPrompt`.
+ */
+const MAX_DRAFT_INSTRUCTION_CHARS = 500
 
 const saveParsingProfileAction = createServerFn({ method: 'POST' })
   .inputValidator(
@@ -275,31 +292,23 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       const incoming = [...conversation.messages]
         .reverse()
         .find((message) => !message.isFromOwner)
-      const senderProfile = incoming
-        ? profileContext.replyStyles.senders[
-            incoming.from.email.trim().toLowerCase()
-          ]
-        : undefined
       const lastOwnerMessage = [...conversation.messages]
         .reverse()
         .find((message) => message.isFromOwner)
-      const replyStyle = senderProfile?.enabled
-        ? {
-            greeting: senderProfile.greeting,
-            signature: senderProfile.signature,
-          }
-        : {
-            greeting:
-              profileContext.replyStyles.account.greeting ??
-              lastOwnerMessage?.detectedGreeting ??
-              lastOwnerMessage?.greeting ??
-              null,
-            signature:
-              profileContext.replyStyles.account.signature ??
-              lastOwnerMessage?.detectedSignature ??
-              lastOwnerMessage?.signature ??
-              null,
-          }
+      // Shared with the draft path (`service.ts`), which has to reach the same
+      // answer to know whether to tell the model a greeting is arriving anyway.
+      const replyStyle = resolveReplyStyle({
+        account: {
+          greeting: profileContext.replyStyles.account.greeting ?? null,
+          signature: profileContext.replyStyles.account.signature ?? null,
+        },
+        sender: incoming
+          ? (profileContext.replyStyles.senders[
+              incoming.from.email.trim().toLowerCase()
+            ] ?? null)
+          : null,
+        lastOwnerMessage,
+      })
 
       await sendReply(client, accountId, conversation, data.body, {
         attachments: data.attachments,
@@ -344,6 +353,152 @@ const reanalyseAction = createServerFn({ method: 'POST' })
     }
   })
 
+/**
+ * Store the user's own call on where this thread belongs, or take one back.
+ *
+ * The state is validated here rather than trusted: it is written straight to the
+ * column the whole inbox groups by, so anything that is not one of the states
+ * the app knows would put a thread in a group that does not exist.
+ */
+const setStateOverrideAction = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: { gmailThreadId: string; state: ConversationState | null }) => data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (data.state !== null && !CONVERSATION_STATES.includes(data.state)) {
+      return { error: 'That is not a state a conversation can be in.' }
+    }
+
+    try {
+      await applyUserStateOverride(data.gmailThreadId, data.state)
+      return { error: null }
+    } catch (error) {
+      console.error('[state] override failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not update this conversation.',
+      }
+    }
+  })
+
+/**
+ * Mark a thread done, or take the mark back.
+ *
+ * The user's own call, and the only thing that sets it — not a sync, not the
+ * decision layer, and deliberately not opening the thread, which is what
+ * `markSeenAction` below records separately. No Gmail call and no AI call, so
+ * there is no auth failure to report.
+ */
+const setDoneAction = createServerFn({ method: 'POST' })
+  .validator((data: { gmailThreadId: string; done: boolean }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.done !== 'boolean') {
+      return { error: 'Done has to be true or false.' }
+    }
+
+    try {
+      await setConversationDone(data.gmailThreadId, data.done)
+      return { error: null }
+    } catch (error) {
+      console.error('[done] marking the thread failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not update this conversation.',
+      }
+    }
+  })
+
+/**
+ * Mark this thread's sender as one a reply cannot reach.
+ *
+ * The quick-add half of the can't-reply list. It names a *thread* rather than an
+ * address, which is the whole point: the mailbox and the sender are both already
+ * known here, so nothing is picked and nothing is typed. The mark is taken back
+ * from Settings, where the list lives — this is a second way to *add* an entry,
+ * not a second place it is managed.
+ */
+const markSenderUnreplyableAction = createServerFn({ method: 'POST' })
+  .validator((data: { gmailThreadId: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      return await markThreadSenderUnreplyable(data.gmailThreadId)
+    } catch (error) {
+      console.error('[replyability] marking the sender failed:', error)
+      return {
+        error:
+          error instanceof Error ? error.message : 'Could not mark this sender.',
+      }
+    }
+  })
+
+/**
+ * Generate a draft reply for this thread, on demand.
+ *
+ * No `router.invalidate()` on success: nothing was stored. The draft lives in
+ * the composer, where the user can edit it, and only Send writes anything — the
+ * server re-applies the same conditions the view used, so a button left from an
+ * older render cannot spend a call on a thread that no longer qualifies.
+ */
+const draftReplyAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { gmailThreadId: string; instructions: string | null }) => data,
+  )
+  .handler(async ({ data }): Promise<ReplyDraftOutcome> => {
+    const session = await getSession()
+    if (!session) return { draft: null, error: 'You are not signed in.' }
+
+    if (data.instructions !== null && typeof data.instructions !== 'string') {
+      return { draft: null, error: 'That instruction is not text.' }
+    }
+    if (
+      typeof data.instructions === 'string' &&
+      data.instructions.length > MAX_DRAFT_INSTRUCTION_CHARS
+    ) {
+      return {
+        draft: null,
+        error: `Keep the instruction under ${MAX_DRAFT_INSTRUCTION_CHARS} characters.`,
+      }
+    }
+
+    return await draftReply(data.gmailThreadId, data.instructions)
+  })
+
+/**
+ * Record that the user has opened this thread, so it stops reading as new mail.
+ *
+ * Fired by the view, with the timestamp of the newest message it actually had on
+ * screen — the row's own newest message may include mail that synced in after the
+ * page was rendered, and marking that seen would lose it. Best-effort: a failure
+ * costs the unread dot and nothing else, so it is not surfaced to the user.
+ */
+const markSeenAction = createServerFn({ method: 'POST' })
+  .validator((data: { gmailThreadId: string; seenThrough: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      await markConversationSeen(data.gmailThreadId, data.seenThrough)
+      return { error: null }
+    } catch (error) {
+      console.error('[seen] marking the thread read failed:', error)
+      return { error: 'Could not record that this thread was opened.' }
+    }
+  })
+
 export const Route = createFileRoute('/conversations/$gmailThreadId')({
   loader: ({ params }) =>
     fetchConversation({ data: { gmailThreadId: params.gmailThreadId } }),
@@ -367,6 +522,25 @@ function ConversationRoute() {
   // narrowing a destructured binding is what loses the `detail` here.
   const result = Route.useLoaderData()
   const router = useRouter()
+
+  // Opening the thread *is* "viewed", and this is the only place that knows it
+  // happened. Declared before the `found` branch so the hook is unconditional.
+  //
+  // Deliberately not followed by `router.invalidate()`: the "New messages"
+  // divider the view is drawing comes from the loader's `seenAt`, and re-running
+  // the loader the instant the mark lands would erase it as it appeared. The next
+  // load of this thread is the one that shows it as read.
+  const openedThreadId = result.found ? result.detail.gmailThreadId : null
+  const seenThrough = result.found
+    ? (result.detail.messages.at(-1)?.sentAt ?? null)
+    : null
+
+  useEffect(() => {
+    if (!openedThreadId || !seenThrough) return
+    void markSeenAction({
+      data: { gmailThreadId: openedThreadId, seenThrough },
+    })
+  }, [openedThreadId, seenThrough])
 
   if (!result.found) {
     return <ConversationMissing />
@@ -409,6 +583,32 @@ function ConversationRoute() {
         })
         if (!result.error) await router.invalidate()
         return result
+      }}
+      onSetStateOverride={async (state) => {
+        const saved = await setStateOverrideAction({
+          data: { gmailThreadId: detail.gmailThreadId, state },
+        })
+        if (!saved.error) await router.invalidate()
+        return saved
+      }}
+      onDraft={async (instructions: string | null) =>
+        draftReplyAction({
+          data: { gmailThreadId: detail.gmailThreadId, instructions },
+        })
+      }
+      onMarkSenderUnreplyable={async () => {
+        const marked = await markSenderUnreplyableAction({
+          data: { gmailThreadId: detail.gmailThreadId },
+        })
+        if (!marked.error) await router.invalidate()
+        return marked
+      }}
+      onSetDone={async (done) => {
+        const saved = await setDoneAction({
+          data: { gmailThreadId: detail.gmailThreadId, done },
+        })
+        if (!saved.error) await router.invalidate()
+        return saved
       }}
       onSend={async (
         body: string,

@@ -26,6 +26,15 @@ import { loadInbox } from '#/lib/gmail/service.ts'
  */
 const REVALIDATE_MS = 2 * 60_000
 
+/**
+ * How often an open tab re-checks while a sync is still running.
+ *
+ * A first backfill writes threads as it goes, so a fast poll is what turns the
+ * progress banner into mail appearing in the list. It only applies while a sync
+ * is in flight; once it finishes the slow cadence takes over again.
+ */
+const SYNCING_REVALIDATE_MS = 3_000
+
 const fetchInbox = createServerFn({ method: 'GET' }).handler(async () => {
   const session = await getSession()
 
@@ -72,12 +81,19 @@ function Home() {
   const payload = Route.useLoaderData()
   const router = useRouter()
 
+  // A boolean rather than the list itself: the effect below should restart when
+  // a sync starts or ends, not on every progress tick within one.
+  const syncing = payload.signedIn && payload.syncing.length > 0
+
   useEffect(() => {
     // Invalidate re-runs the loader, which re-runs the server function, which
     // re-reads the database and syncs only if the cursor has gone stale.
-    const timer = setInterval(() => {
-      void router.invalidate()
-    }, REVALIDATE_MS)
+    const timer = setInterval(
+      () => {
+        void router.invalidate()
+      },
+      syncing ? SYNCING_REVALIDATE_MS : REVALIDATE_MS,
+    )
 
     // A backgrounded tab's timer is throttled or paused, so a tab left open in
     // another window would otherwise come back minutes stale.
@@ -90,7 +106,7 @@ function Home() {
       clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisibility)
     }
-  }, [router])
+  }, [router, syncing])
 
   return (
     <Inbox

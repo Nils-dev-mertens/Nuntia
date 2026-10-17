@@ -27,8 +27,15 @@ import type {
   ConversationAttachment,
   ConversationMessage,
 } from './model.ts'
-import { dedupeParticipants, deriveState, normaliseEmail } from './model.ts'
+import {
+  activeDone,
+  activeStateOverride,
+  dedupeParticipants,
+  deriveState,
+  normaliseEmail,
+} from './model.ts'
 import { isAutomatedThread } from './automated.ts'
+import type { ConversationState } from '#/db/schema.ts'
 
 /** A connected mailbox, as the inbox knows it. */
 export type ConnectedAccount = {
@@ -363,10 +370,9 @@ function rebuildConversation(
   const ccOnly = relation === 'cc-only'
 
   // Rebuilt from the union, so the deterministic replyability marker is
-  // recomputed the same way `isAutomated` is. The decision model's contribution
-  // is not re-run here (that needs the pipeline, which is async and configured
-  // elsewhere) — a merged thread keeps the deterministic answer until the next
-  // sync or a manual re-analyse.
+  // recomputed the same way `isAutomated` is. The model is not re-run here (that
+  // needs the pipeline, which is async and configured elsewhere), so `decided`
+  // below is where a merged thread's state, importance and urgency come from.
   const rebuiltIsAutomated = isAutomatedThread(messages, ownerEmails)
 
   // With nothing to merge — one mailbox holding the thread, and the connected
@@ -379,6 +385,54 @@ function rebuildConversation(
     (message, index) => message.isFromOwner !== union[index].isFromOwner,
   )
   const stored = owner.conversation
+
+  // The decision layer's output (state, importance, urgency) lives on the row it
+  // was written to, so a merge reuses it instead of re-deriving it with
+  // `deriveState` — which is the *rules*, and using it here threw away whatever
+  // Jev had answered. The row holding the cluster's newest message is the one
+  // whose thread looks like the merged view.
+  const decided = cluster.reduce((best, source) => {
+    const sourceAt = source.conversation.lastMessageAt.getTime()
+    const bestAt = best.conversation.lastMessageAt.getTime()
+    if (sourceAt > bestAt) return source
+    // A tie is the common case — both mailboxes hold the same newest message —
+    // and the owner's own row is the one replies and details edits point at.
+    if (sourceAt === bestAt && source.accountId === ownerAccountId) return source
+    return best
+  }, owner).conversation
+
+  // A certain rule still outranks the stored answer: if the union says we spoke
+  // last, the row's older `needs-action` cannot stand. An `informational` union
+  // says nothing the stored decision did not already account for, so the model's
+  // verdict is kept there.
+  const flowedState =
+    decision.state === 'needs-action' || decision.state === 'waiting-for-reply'
+      ? decision.state
+      : decided.state
+
+  // The user's own call is the one thing a merge cannot overrule, and it is
+  // re-checked against the *union's* newest message: a message from another
+  // mailbox that the owning row never saw outruns the call just as one in the
+  // same mailbox would, and the thread comes back for a fresh look.
+  const override =
+    decided.stateOverride &&
+    activeStateOverride({
+      stateOverride: decided.stateOverride,
+      lastMessageAt,
+    })
+
+  // A no-reply verdict is carried for the same reason `state` and the scores are:
+  // it came from the user's own mark on the sender, or from Jev reading the
+  // thread, and the union is a second mailbox's copy of the same mail rather than
+  // new evidence. Recomputing it here would put a reply box back on a thread the
+  // user said cannot be answered.
+  //
+  // Machine mail is the exception, and `isAutomated` on the row is what tells the
+  // two apart: that verdict *is* re-derived from the union, because
+  // `isAutomatedThread` is designed to let a thread a human finally answers
+  // become a conversation again.
+  const decidedNoReply = decided.replyable === false && !decided.isAutomated
+
   const derived =
     cluster.length === 1 && !ownershipChanged
       ? {
@@ -392,12 +446,15 @@ function rebuildConversation(
           replyable: stored.replyable,
         }
       : {
-          state: decision.state,
+          state: flowedState,
+          // The message-flow facts are re-read from the union: with a second
+          // mailbox in play, who spoke last and whether a question is still
+          // outstanding genuinely change, and those are the rules' own.
           awaitingReply: decision.awaitingReply,
           requiresReply: decision.requiresReply,
-          importance: decision.importance,
-          urgency: decision.urgency,
           intent: decision.intent,
+          importance: decided.importance,
+          urgency: decided.urgency,
           isAutomated: rebuiltIsAutomated,
           replyable: !rebuiltIsAutomated,
         }
@@ -411,6 +468,28 @@ function rebuildConversation(
     cluster.find((source) => source.conversation.goal)?.conversation.goal ??
     null
 
+  // The Done mark is carried the way the state override is, and re-checked the
+  // same way: the union's newest message is the test, so mail from the *other*
+  // mailbox that this row never saw brings the thread back too.
+  const done =
+    decided.done && activeDone({ done: decided.done, lastMessageAt }) !== null
+      ? decided.done
+      : null
+
+  // Reading is the one field a merge has to *union* rather than pick: the two
+  // mailboxes hold overlapping copies of the same thread, and reading it in
+  // either means the user has read the mail. Taking the newest mark is that
+  // union; taking the owning row's alone would show the whole thread unread again
+  // after reading it in the other mailbox.
+  // `readIn` rather than `seen`: the merge has a `seen` of its own further up, and
+  // shadowing it here is how the wrong timestamp gets compared.
+  const seenAt = cluster.reduce<Date | null>((newest, source) => {
+    const readIn = source.conversation.seenAt
+    if (!readIn) return newest
+    if (!newest || readIn.getTime() > newest.getTime()) return readIn
+    return newest
+  }, null)
+
   return {
     id: owner.conversation.id,
     gmailThreadId: owner.conversation.gmailThreadId,
@@ -419,7 +498,7 @@ function rebuildConversation(
     messages,
     attachments,
 
-    state: ccOnly ? 'low-priority' : derived.state,
+    state: ccOnly ? 'low-priority' : (override ?? derived.state),
     awaitingReply: ccOnly ? false : derived.awaitingReply,
     requiresReply: ccOnly ? false : derived.requiresReply,
     importance: derived.importance,
@@ -427,7 +506,7 @@ function rebuildConversation(
     intent: derived.intent,
 
     isAutomated: derived.isAutomated,
-    replyable: derived.replyable,
+    replyable: rebuiltIsAutomated || decidedNoReply ? false : derived.replyable,
 
     messageCount: messages.length,
     attachmentCount: attachments.length,
@@ -435,7 +514,53 @@ function rebuildConversation(
 
     topic,
     goal,
+
+    // Carried rather than re-derived, and nulled here when the union has moved
+    // past it, so a reader of the merged row sees the same call (or the same
+    // absence of one) the owning row holds.
+    stateOverride: override ? decided.stateOverride : null,
+    seenAt,
+    done,
   }
+}
+
+/**
+ * Split the merged rows into the state groups and the done pile.
+ *
+ * A done thread is deliberately *out* of the state groups. The state says what
+ * the mail needs and done says the user has already dealt with it, so leaving a
+ * finished thread among the work is what made the two indistinguishable — the
+ * group heading claimed work that was no longer there. The state itself is kept
+ * on the row (the tag still shows it, faintly), because "done" is not a claim
+ * about the mail, and the decision layer may well file it the same way again.
+ *
+ * Pure, and here rather than in the loader, because it is the rule that decides
+ * what the inbox shows, and it has to be testable without a database.
+ */
+export function partitionByState(rows: MergedConversation[]): {
+  counts: Record<ConversationState, number>
+  doneCount: number
+} {
+  const counts: Record<ConversationState, number> = {
+    'needs-action': 0,
+    'waiting-for-reply': 0,
+    informational: 0,
+    'low-priority': 0,
+  }
+  let doneCount = 0
+
+  for (const row of rows) {
+    // `activeDone` rather than the raw mark: a done thread that has since
+    // received mail is work again, and goes back to its own group by itself.
+    if (activeDone(row.conversation) !== null) {
+      doneCount += 1
+      continue
+    }
+
+    counts[row.conversation.state] += 1
+  }
+
+  return { counts, doneCount }
 }
 
 /** Union attachments across mailboxes, collapsing copies of the same file. */

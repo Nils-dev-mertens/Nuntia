@@ -14,20 +14,26 @@ import type { GmailClient, GmailMessage, GmailThread } from './client.ts'
 import {
   isDraft,
   isTrashed,
-  toAttachmentRefs,
   toParsedMessage,
+  toThreadAttachmentRefs,
 } from './message.ts'
 import {
   applyDecision,
   buildConversation,
   decideConversation,
   getParsingProfileContext,
+  getStoredUserFields,
+  listConversations,
+  listIgnoredSenders,
+  listUnreplyableSenders,
+  otherPartyOf,
   recordDecision,
   saveConversation,
 } from '#/lib/conversation/index.ts'
 import type {
   Conversation,
   Decision,
+  DecisionPipeline,
   ParsingProfileContext,
 } from '#/lib/conversation/index.ts'
 import { setHistoryId } from '#/lib/auth/accounts.ts'
@@ -38,6 +44,13 @@ export type SyncProgress = (event: SyncEvent) => void
 
 export type SyncEvent =
   | { type: 'start'; mode: 'backfill' | 'incremental'; total?: number }
+  /**
+   * The work ahead, once the id listing is done. Emitted separately from
+   * `start` because the count is not known until `threads.list` has finished
+   * paging — the first backfill of a large mailbox is exactly the run that needs
+   * to say how far along it is, and it cannot say so when it begins.
+   */
+  | { type: 'listed'; total: number }
   | { type: 'thread'; threadId: string; messages: number }
   | { type: 'skipped'; threadId: string; reason: string }
   | { type: 'error'; threadId: string; message: string }
@@ -48,6 +61,31 @@ export type SyncEvent =
       skipped: number
     }
 
+/**
+ * What the user has told the app about senders, as the decision layer consumes
+ * it.
+ *
+ * The two sets travel together because the same decision reads both, and both are
+ * per *sender* rather than per thread: `ignored` is a sender whose notices have
+ * been filed away before, `unreplyable` one the user has marked as unreachable.
+ * Loading them once per batch and passing them down is what keeps a sync from
+ * asking the same two questions per thread.
+ */
+export type SenderFacts = {
+  ignored: ReadonlySet<string>
+  unreplyable: ReadonlySet<string>
+}
+
+/** Read both sets for one account. Private: callers get them through a batch. */
+async function loadSenderFacts(accountId: string): Promise<SenderFacts> {
+  const [ignored, unreplyable] = await Promise.all([
+    listIgnoredSenders(accountId),
+    listUnreplyableSenders(accountId),
+  ])
+
+  return { ignored, unreplyable }
+}
+
 export type SyncOptions = {
   /** Cursor for incremental sync. Absent triggers a backfill. */
   startHistoryId?: string | null
@@ -57,8 +95,6 @@ export type SyncOptions = {
   query?: string
   /** Stop after this many threads (testing / partial sync). */
   limit?: number
-  /** Skip attachment downloads entirely. */
-  downloadAttachments?: boolean
   onProgress?: SyncProgress
 }
 
@@ -114,7 +150,9 @@ function relevantMessages(messages: GmailMessage[]): GmailMessage[] {
  * short reason is surfaced so a sync log names the problem instead of the query.
  */
 function reasonOf(error: unknown): string {
-  const cause = (error as { cause?: unknown })?.cause
+  // Nullable in the cast as well as optional: a thrown `null` is legal, and the
+  // optional chain is what keeps that from throwing inside the error handler.
+  const cause = (error as { cause?: unknown } | null | undefined)?.cause
   if (cause instanceof Error && cause.message) return cause.message
   if (error instanceof Error && error.message) return error.message
   return 'unknown error'
@@ -131,23 +169,107 @@ function reasonOf(error: unknown): string {
 export async function decideAndSave(
   accountId: string,
   conversation: Conversation,
+  opts: {
+    /**
+     * Reused across a batch. Omitted means "read the settings now", which is
+     * what the single-thread callers want; a batch must not decrypt and rebuild
+     * per row.
+     */
+    pipeline?: DecisionPipeline
+    /**
+     * What the user has taught the app about senders, reused across a batch.
+     *
+     * Omitted means "read them now" — two queries, for the single-thread
+     * callers. A sync reads its mail in a loop, so it loads them once and passes
+     * them down rather than asking the same questions per thread.
+     */
+    senderFacts?: SenderFacts
+  } = {},
 ): Promise<{ decision: Decision; conversation: Conversation }> {
+  // A thread rebuilt from Gmail carries no memory of the user's own calls — that
+  // lives on the stored row — so it is read back and put on before the decision
+  // is applied, which is what makes `applyDecision` able to keep it. Assigned
+  // rather than merged: the caller's copy can be older than the row (a restore
+  // clears the call *and* re-decides the conversation it was loaded from), and
+  // trusting it there would put back the call the user just took away.
+  //
+  // All three user-owned fields travel together: the same reason applies to what
+  // the user has read and to the Done mark, and reading them in one query means a
+  // rebuild cannot carry one and silently reset another.
+  const storedUserFields = await getStoredUserFields(
+    accountId,
+    conversation.gmailThreadId,
+  )
+  const withCall: Conversation = { ...conversation, ...storedUserFields }
+
+  const senderFacts = opts.senderFacts ?? (await loadSenderFacts(accountId))
+  const otherParty = otherPartyOf(withCall)
+
   const decision = await decideConversation(
     {
-      subject: conversation.subject,
-      messages: conversation.messages,
+      subject: withCall.subject,
+      messages: withCall.messages,
       ownerEmail: accountId,
-      goal: conversation.goal,
+      goal: withCall.goal,
       decidedAt: null,
+      ignoredSender: senderFacts.ignored.has(otherParty),
+      // The user's own mark on this sender, which settles replyability before
+      // the model is asked — and which a re-decide must therefore read from the
+      // stored preference rather than infer.
+      unreplyableSender: senderFacts.unreplyable.has(otherParty),
     },
-    await loadDecisionPipeline(),
+    opts.pipeline ?? (await loadDecisionPipeline()),
   )
-  const updated = applyDecision(conversation, decision)
+  const updated = applyDecision(withCall, decision)
 
   await saveConversation(accountId, updated)
   await recordDecision(updated, decision)
 
   return { decision, conversation: updated }
+}
+
+/**
+ * Re-run the decision pipeline over every conversation already stored.
+ *
+ * Incremental sync only revisits threads Gmail reports as changed, so a change
+ * to *how* a thread is classified — a rule, a Jev question — otherwise reaches
+ * only mail that happens to change afterwards. This applies it to what is
+ * already in the database, from the stored messages, with no Gmail round trip.
+ *
+ * The alternative is forgetting the mailbox and syncing again, which also wipes
+ * the user's own topics and goals (the account row cascades) and re-backfills
+ * only the `newer_than:` window.
+ *
+ * The whole batch shares one pipeline, but each conversation is still a decision
+ * (and, with an LLM configured, a topic call). A failure on one row is reported
+ * and skipped rather than thrown: this runs from a load path, and one bad
+ * conversation must not blank the inbox.
+ */
+export async function redecideStoredConversations(
+  accountId: string,
+): Promise<number> {
+  const conversations = await listConversations(accountId, {
+    includeArchived: true,
+  })
+  if (conversations.length === 0) return 0
+
+  const pipeline = await loadDecisionPipeline()
+  const senderFacts = await loadSenderFacts(accountId)
+
+  let redecided = 0
+  for (const conversation of conversations) {
+    try {
+      await decideAndSave(accountId, conversation, { pipeline, senderFacts })
+      redecided++
+    } catch (error) {
+      console.error(
+        `[derived] could not re-decide ${conversation.gmailThreadId}:`,
+        reasonOf(error),
+      )
+    }
+  }
+
+  return redecided
 }
 
 /**
@@ -161,6 +283,12 @@ export async function syncThread(
   thread: GmailThread,
   onProgress?: SyncProgress,
   profileContext?: ParsingProfileContext,
+  /**
+   * What the user has taught the app about senders. A batch loads this once and
+   * passes it to every thread; omitted means `decideAndSave` reads it for this
+   * one.
+   */
+  senderFacts?: SenderFacts,
 ): Promise<'synced' | 'skipped' | 'error'> {
   const messages = relevantMessages(thread.messages)
 
@@ -177,30 +305,9 @@ export async function syncThread(
     const parsed = messages.map(toParsedMessage)
 
     // Gmail's structured payload carries attachment metadata in the MIME tree
-    // rather than in the decoded parts, so it is collected separately.
-    //
-    // Each ref is tagged with the identity the *message row* is keyed by — the
-    // parsed `messageId`, which is the RFC 5322 Message-ID — not Gmail's own
-    // message id. The messages table and the attachment's `message_id` foreign
-    // key have to agree, or every thread that carries an attachment fails to
-    // save as a whole (SQLITE_CONSTRAINT: FOREIGN KEY constraint failed).
-    const attachments = messages.flatMap((message, index) => {
-      const parsedMessage = parsed[index]
-      const messageKey = parsedMessage
-        ? parsedMessage.messageId ??
-          `synthetic:${parsedMessage.date?.getTime() ?? 0}`
-        : message.id
-
-      return toAttachmentRefs(message).map((ref) => ({
-        gmailMessageId: messageKey,
-        gmailAttachmentId: ref.attachmentId,
-        filename: ref.filename,
-        mimeType: ref.mimeType,
-        sizeBytes: ref.sizeBytes,
-        isInline: ref.isInline,
-        contentId: ref.contentId,
-      }))
-    })
+    // rather than in the decoded parts, so it is collected separately — and by
+    // a shared helper, because the send path rebuilds a thread the same way.
+    const attachments = toThreadAttachmentRefs(messages, parsed)
 
     const built = buildConversation(parsed, {
       ownerEmail: accountId,
@@ -218,7 +325,7 @@ export async function syncThread(
     //
     // Bytes are not downloaded here — only metadata is recorded. The attachment
     // cache fetches on demand when something actually needs the file.
-    await decideAndSave(accountId, built)
+    await decideAndSave(accountId, built, { senderFacts })
 
     onProgress?.({
       type: 'thread',
@@ -280,6 +387,9 @@ export async function backfill(
 
   const targets = opts.limit ? threadIds.slice(0, opts.limit) : threadIds
   const profileContext = await getParsingProfileContext(accountId)
+  const senderFacts = await loadSenderFacts(accountId)
+
+  onProgress?.({ type: 'listed', total: targets.length })
 
   const results = await mapWithConcurrency(
     targets,
@@ -289,7 +399,13 @@ export async function backfill(
       // remaining threads — report it and carry on.
       try {
         const thread = await client.getThread(threadId)
-        return syncThread(accountId, thread, onProgress, profileContext)
+        return syncThread(
+          accountId,
+          thread,
+          onProgress,
+          profileContext,
+          senderFacts,
+        )
       } catch (error) {
         onProgress?.({
           type: 'error',
@@ -350,6 +466,9 @@ export async function syncIncremental(
     ? [...threadIds].slice(0, opts.limit)
     : [...threadIds]
   const profileContext = await getParsingProfileContext(accountId)
+  const senderFacts = await loadSenderFacts(accountId)
+
+  onProgress?.({ type: 'listed', total: targets.length })
 
   const results = await mapWithConcurrency(
     targets,
@@ -357,7 +476,13 @@ export async function syncIncremental(
     async (threadId) => {
       try {
         const thread = await client.getThread(threadId)
-        return syncThread(accountId, thread, onProgress, profileContext)
+        return syncThread(
+          accountId,
+          thread,
+          onProgress,
+          profileContext,
+          senderFacts,
+        )
       } catch (error) {
         onProgress?.({
           type: 'error',

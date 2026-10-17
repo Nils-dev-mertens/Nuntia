@@ -34,7 +34,9 @@ if (process.env.LUMEN_TEST === '1' && url.includes('data/lumen.db')) {
  */
 const client = createClient({
   url,
-  authToken: url.startsWith('file:') ? undefined : process.env.DATABASE_AUTH_TOKEN,
+  authToken: url.startsWith('file:')
+    ? undefined
+    : process.env.DATABASE_AUTH_TOKEN,
 })
 
 export const db = drizzle(client, { schema })
@@ -48,8 +50,12 @@ export { client }
  * and drop mail. WAL lets readers and a writer proceed together, and the busy
  * timeout makes a contended writer wait rather than fail immediately.
  *
- * Runs once at import, and only for local files: a remote libSQL URL manages
- * its own concurrency.
+ * Only for local files: a remote libSQL URL manages its own concurrency.
+ *
+ * Not called at import — it is async, and the app's own entry point (`server.ts`)
+ * awaits it once before serving requests. It used to claim it ran at import
+ * while nothing outside the tests called it, so a running app never applied any
+ * of this.
  */
 export async function initDatabase(): Promise<void> {
   if (!url.startsWith('file:')) return
@@ -61,6 +67,10 @@ export async function initDatabase(): Promise<void> {
     await client.execute('PRAGMA busy_timeout = 5000')
     // Enforce foreign keys so cascading deletes actually fire.
     await client.execute('PRAGMA foreign_keys = ON')
+    // Logged rather than assumed: nothing else in the app can report whether
+    // these settings took effect, and their absence is silent until a sync drops
+    // mail.
+    console.log('[db] SQLite prepared: WAL, busy_timeout=5000, foreign_keys=ON')
   } catch (error) {
     // A read-only database or an already-locked file should not crash startup;
     // the first real query will surface the problem with better context.

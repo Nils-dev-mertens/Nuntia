@@ -300,19 +300,50 @@ export async function refreshThread(
 
   if (relevant.length === 0) return
 
-  const { buildConversation, saveConversation } =
-    await import('#/lib/conversation/index.ts')
+  const {
+    buildConversation,
+    getStoredUserFields,
+    listUnreplyableSenders,
+    otherPartyOf,
+    saveConversation,
+  } = await import('#/lib/conversation/index.ts')
 
-  const { toParsedMessage } = await import('./message.ts')
+  const { toParsedMessage, toThreadAttachmentRefs } = await import(
+    './message.ts'
+  )
 
   const profileContext = await getParsingProfileContext(accountId)
-  const conversation = buildConversation(relevant.map(toParsedMessage), {
+  const parsed = relevant.map(toParsedMessage)
+  const conversation = buildConversation(parsed, {
     ownerEmail: accountId,
     gmailThreadId,
+    // Rebuilt without these, the conversation claimed to have no attachments —
+    // and since saving replaces the messages wholesale, the attachment rows
+    // went with them and the chips vanished until a later sync restored them.
+    attachments: toThreadAttachmentRefs(relevant, parsed),
     ...profileContext,
   })
 
-  await saveConversation(accountId, conversation)
+  // `buildConversation` derives replyability from the machine-mail marker alone,
+  // and this path deliberately does not run the decision layer (a send must not
+  // cost a Jev call). The user's own answer about this sender is read back and
+  // kept for that reason: the column is partly theirs now, and re-deriving it
+  // here would put a composer back on a thread they marked.
+  const sender = otherPartyOf(conversation)
+  const marked =
+    sender !== '' && (await listUnreplyableSenders(accountId)).has(sender)
+
+  // Reading and the Done mark are the user's too, and this is the quietest place
+  // they could be lost: the reply just sent is a new message, so saving without
+  // them would reset `seen_at` and hand back a thread the user had finished with
+  // — seconds after they sent the message that finished it.
+  const storedUserFields = await getStoredUserFields(accountId, gmailThreadId)
+
+  await saveConversation(accountId, {
+    ...conversation,
+    ...storedUserFields,
+    replyable: marked ? false : conversation.replyable,
+  })
 }
 
 /** Load a conversation or fail with a message the UI can show. */

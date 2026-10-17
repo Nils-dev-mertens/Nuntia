@@ -1,0 +1,1 @@
+ALTER TABLE `app_settings` ADD `suggest_reply_min_importance` integer DEFAULT 6 NOT NULL;

@@ -1,13 +1,17 @@
 /**
  * The LLM side: prose, not decisions.
  *
- * This is the `TopicGenerator` seam — the topic label today, and the natural
- * place for Phase 2's suggested replies and drafts. It is deliberately *not* the
- * decision layer: Jev makes decisions, an LLM writes text. See `decision.ts`.
+ * This is the `TopicGenerator` seam — the topic label — plus `completeLlm`, the
+ * shared transport the reply drafter in `draft.ts` also uses. It is deliberately
+ * *not* the decision layer: Jev makes decisions, an LLM writes text. See
+ * `decision.ts`.
  *
  * Three providers are supported behind one interface (Anthropic, OpenAI, Gemini),
  * each with a bring-your-own key. Adding a fourth means one more `complete`
  * function and one more case in the factory — nothing upstream changes.
+ *
+ * Every provider call carries a `log` label, so a failure names the service and
+ * the model in the AI log rather than only appearing in a terminal.
  */
 
 import type { DecisionInput, TopicGenerator } from '#/lib/conversation/index.ts'
@@ -67,19 +71,40 @@ export class LlmTopicGenerator implements TopicGenerator {
   }
 
   async generate(input: DecisionInput): Promise<string | null> {
-    const text = await this.complete(topicPrompt(input))
+    const text = await completeLlm(
+      this.config,
+      topicPrompt(input),
+      // A label is a handful of tokens — except on a reasoning model, where the
+      // budget also has to pay for the hidden thinking that precedes it.
+      isReasoningModel(this.config.model)
+        ? MAX_REASONING_TOPIC_TOKENS
+        : MAX_TOPIC_TOKENS,
+    )
     return sanitizeTopic(text)
   }
+}
 
-  private complete(prompt: string): Promise<string> {
-    switch (this.config.provider) {
-      case 'anthropic':
-        return anthropicComplete(this.config, prompt)
-      case 'openai':
-        return openaiComplete(this.config, prompt)
-      case 'gemini':
-        return geminiComplete(this.config, prompt)
-    }
+/**
+ * One prompt in, one completion out, for whichever provider is configured.
+ *
+ * Shared with `draft.ts`, because the providers differ only in transport and a
+ * second caller should not mean a second copy of three request shapes. The budget
+ * stays with the caller: a short label and a reply want very different ones, and
+ * on OpenAI it has to cover hidden reasoning as well as output.
+ */
+export async function completeLlm(
+  config: LlmConfig,
+  prompt: string,
+  maxTokens: number,
+): Promise<string> {
+  switch (config.provider) {
+    case 'anthropic':
+      return anthropicComplete(config, prompt, maxTokens)
+    case 'openai':
+      return openaiComplete(config, prompt, maxTokens)
+    case 'gemini':
+      // Deliberately no output cap on this one — see `geminiComplete`.
+      return geminiComplete(config, prompt)
   }
 }
 
@@ -108,6 +133,7 @@ function topicPrompt(input: DecisionInput): string {
 async function anthropicComplete(
   config: LlmConfig,
   prompt: string,
+  maxTokens: number,
 ): Promise<string> {
   const json = asRecord(
     await postJson({
@@ -118,17 +144,22 @@ async function anthropicComplete(
       },
       body: {
         model: config.model,
-        max_tokens: 64,
+        max_tokens: maxTokens,
         messages: [{ role: 'user', content: prompt }],
       },
       fetchImpl: config.fetchImpl,
+      log: { service: `llm:${config.provider}`, model: config.model },
     }),
     'Anthropic response',
   )
 
   if (Array.isArray(json.content)) {
     for (const part of json.content) {
-      if (isRecord(part) && part.type === 'text' && typeof part.text === 'string') {
+      if (
+        isRecord(part) &&
+        part.type === 'text' &&
+        typeof part.text === 'string'
+      ) {
         return part.text
       }
     }
@@ -139,6 +170,7 @@ async function anthropicComplete(
 async function openaiComplete(
   config: LlmConfig,
   prompt: string,
+  maxTokens: number,
 ): Promise<string> {
   const json = asRecord(
     await postJson({
@@ -148,15 +180,14 @@ async function openaiComplete(
         model: config.model,
         // OpenAI names this `max_completion_tokens`; the older `max_tokens` is
         // rejected outright by the reasoning models (o-series, gpt-5).
-        max_completion_tokens: isReasoningModel(config.model)
-          ? MAX_REASONING_TOPIC_TOKENS
-          : MAX_TOPIC_TOKENS,
+        max_completion_tokens: maxTokens,
         // Those same models accept only the default temperature, so the
         // low-temperature hint is sent only where it is valid.
         ...(isReasoningModel(config.model) ? {} : { temperature: 0.2 }),
         messages: [{ role: 'user', content: prompt }],
       },
       fetchImpl: config.fetchImpl,
+      log: { service: `llm:${config.provider}`, model: config.model },
     }),
     'OpenAI response',
   )
@@ -174,13 +205,22 @@ async function openaiComplete(
  *
  * Two differences matter here: they reject sampling parameters such as
  * `temperature`, and they spend `max_completion_tokens` on hidden reasoning
- * before producing any output.
+ * before producing any output. Both callers (the topic generator and the reply
+ * drafter) have to size their budget accordingly rather than for the text alone.
  */
-function isReasoningModel(model: string): boolean {
+export function isReasoningModel(model: string): boolean {
   const id = model.toLowerCase()
   return /^o\d/.test(id) || id.startsWith('gpt-5')
 }
 
+/**
+ * Gemini, with no output cap on purpose.
+ *
+ * Gemini 2.5 counts *thinking* tokens against `maxOutputTokens`, so capping it
+ * the way the other two providers are capped would spend a label's budget on
+ * hidden reasoning and return no text at all. The prompt asks for something
+ * short and `sanitizeTopic` enforces it, which is the cheaper guard here.
+ */
 async function geminiComplete(
   config: LlmConfig,
   prompt: string,
@@ -193,11 +233,14 @@ async function geminiComplete(
       headers: { 'x-goog-api-key': config.apiKey },
       body: { contents: [{ parts: [{ text: prompt }] }] },
       fetchImpl: config.fetchImpl,
+      log: { service: `llm:${config.provider}`, model: config.model },
     }),
     'Gemini response',
   )
 
-  const candidate = Array.isArray(json.candidates) ? json.candidates[0] : undefined
+  const candidate = Array.isArray(json.candidates)
+    ? json.candidates[0]
+    : undefined
   if (isRecord(candidate) && isRecord(candidate.content)) {
     const parts = candidate.content.parts
     if (Array.isArray(parts)) {
@@ -221,12 +264,18 @@ export function sanitizeTopic(raw: string): string | null {
   let text = raw.trim()
 
   // A fenced block, optionally with a language tag.
-  text = text.replace(/^```[^\n]*\n?/, '').replace(/```\s*$/, '').trim()
+  text = text
+    .replace(/^```[^\n]*\n?/, '')
+    .replace(/```\s*$/, '')
+    .trim()
   // Take the first non-empty line: a label is one line.
   text = text.split('\n').find((line) => line.trim()) ?? ''
   text = text.trim()
   // Surrounding quotes of any common style.
-  text = text.replace(/^["'“”‘’]+/, '').replace(/["'“”‘’]+$/, '').trim()
+  text = text
+    .replace(/^["'“”‘’]+/, '')
+    .replace(/["'“”‘’]+$/, '')
+    .trim()
   // Trailing sentence punctuation, then collapse internal whitespace.
   text = text.replace(/[.!?,;:]+$/, '').trim()
   text = text.replace(/\s+/g, ' ')

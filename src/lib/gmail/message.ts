@@ -8,6 +8,7 @@
  */
 
 import type { ParsedMessage } from '#/lib/mail/index.ts'
+import type { AttachmentRef } from '#/lib/conversation/model.ts'
 
 import type { GmailMessage, GmailPart } from './client.ts'
 
@@ -86,12 +87,11 @@ function collectAttachments(
   out: GmailAttachmentRef[] = [],
 ): GmailAttachmentRef[] {
   const contentDisposition = part.headers?.['content-disposition'] ?? ''
-  const hasFilename = typeof part.filename === 'string' && part.filename.length > 0
-  const isAttachment =
-    /attachment/i.test(contentDisposition) || hasFilename
+  const hasFilename =
+    typeof part.filename === 'string' && part.filename.length > 0
+  const isAttachment = /attachment/i.test(contentDisposition) || hasFilename
   const isInlineImage =
-    /inline/i.test(contentDisposition) &&
-    part.mimeType.startsWith('image/')
+    /inline/i.test(contentDisposition) && part.mimeType.startsWith('image/')
 
   if ((isAttachment || isInlineImage) && part.partId) {
     const attachmentId = part.headers?.['x-attachment-id']
@@ -103,7 +103,8 @@ function collectAttachments(
         attachmentId,
         filename: part.filename || fallbackFilename(part.mimeType),
         mimeType: part.mimeType,
-        sizeBytes: parseInt(part.headers?.['x-attachment-size'] ?? '0', 10) || 0,
+        sizeBytes:
+          parseInt(part.headers?.['x-attachment-size'] ?? '0', 10) || 0,
         contentId: contentId ? stripAngleBrackets(contentId) : null,
         isInline: /inline/i.test(contentDisposition),
       })
@@ -211,7 +212,9 @@ export function toParsedMessage(message: GmailMessage): ParsedMessage {
     to: addressesFrom(headerOf('to')),
     cc: addressesFrom(headerOf('cc')),
     date: date && !Number.isNaN(date.getTime()) ? date : undefined,
-    messageId: messageIdHeader ? stripAngleBrackets(messageIdHeader) : message.id,
+    messageId: messageIdHeader
+      ? stripAngleBrackets(messageIdHeader)
+      : message.id,
     inReplyTo: headerOf('in-reply-to')
       ? stripAngleBrackets(headerOf('in-reply-to') as string)
       : undefined,
@@ -225,6 +228,117 @@ export function toParsedMessage(message: GmailMessage): ParsedMessage {
 /** Attachment metadata for a message, without downloading anything. */
 export function toAttachmentRefs(message: GmailMessage): GmailAttachmentRef[] {
   return message.payload ? collectAttachments(message.payload) : []
+}
+
+/** The traits of a stored attachment that can be matched against a payload. */
+export type AttachmentTraits = {
+  /** The id recorded when the attachment was synced; often, but not always, current. */
+  gmailAttachmentId: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+  isInline: boolean
+  contentId: string | null
+}
+
+/**
+ * Find the part in a freshly fetched thread that a stored attachment refers to.
+ *
+ * Gmail does not promise that an attachment id is stable — it changes as Gmail
+ * reprocesses a message — so an id recorded at sync time can be stale by the
+ * time someone opens the file, and asking for that id returns nothing. Refetching
+ * the thread and matching on the traits that do survive the MIME tree (the
+ * filename, the type, the Content-ID for an inline image) recovers the *current*
+ * id, which is what the download needs.
+ *
+ * Returns null when the thread no longer carries the part at all: a deleted
+ * message, or a forward whose attachment was stripped in between.
+ */
+export function findAttachmentPart(
+  messages: GmailMessage[],
+  wanted: AttachmentTraits,
+): { messageId: string; ref: GmailAttachmentRef } | null {
+  const candidates = messages.flatMap((message) =>
+    toAttachmentRefs(message).map((ref) => ({ messageId: message.id, ref })),
+  )
+
+  // Exact when the recorded id is still the current one — the common case, and
+  // the only one that needs no guessing.
+  const byId = candidates.find(
+    (candidate) => candidate.ref.attachmentId === wanted.gmailAttachmentId,
+  )
+  if (byId) return byId
+
+  const sameName = candidates.filter(
+    (candidate) =>
+      candidate.ref.filename === wanted.filename &&
+      candidate.ref.mimeType === wanted.mimeType,
+  )
+
+  // Ordered from most to least specific, and each step only decides anything
+  // when it actually narrows the field. Identical filenames in one thread are
+  // real (two copies of the same photo), so the Content-ID and then the size are
+  // what tell them apart.
+  const pools = [
+    wanted.contentId
+      ? sameName.filter((c) => c.ref.contentId === wanted.contentId)
+      : [],
+    wanted.sizeBytes > 0
+      ? sameName.filter((c) => c.ref.sizeBytes === wanted.sizeBytes)
+      : [],
+    sameName,
+    // Inline parts are named "inline" by Gmail, so a Content-ID is the only
+    // thing identifying them: match on it even when the name disagrees.
+    wanted.contentId
+      ? candidates.filter((c) => c.ref.contentId === wanted.contentId)
+      : [],
+  ]
+
+  for (const pool of pools) {
+    const found = pool.at(0)
+    if (found) return found
+  }
+
+  return null
+}
+
+/**
+ * Attachment metadata for a whole thread, keyed to the message it belongs to.
+ *
+ * The key is the identity the *message row* is keyed by — the parsed
+ * `messageId`, which is the RFC 5322 Message-ID — not Gmail's own message id.
+ * The messages table and the attachment's `message_id` foreign key have to
+ * agree, or every thread carrying an attachment fails to save as a whole
+ * (SQLITE_CONSTRAINT: FOREIGN KEY constraint failed). `cleanMessage` derives
+ * the same key for the message itself, which is what makes the two meet.
+ *
+ * This lives here rather than in the sync path because a send re-reads one
+ * thread and rebuilds it; rebuilding without these refs deleted the thread's
+ * attachment rows and wrote none back.
+ */
+export function toThreadAttachmentRefs(
+  messages: GmailMessage[],
+  parsed: ParsedMessage[],
+): AttachmentRef[] {
+  return messages.flatMap((message, index) => {
+    // `.at(index)` rather than `[index]`: the index form is typed as
+    // always-present, which hides the case where the two lists have drifted.
+    const parsedMessage = parsed.at(index)
+    const messageKey = parsedMessage
+      ? (parsedMessage.messageId ??
+        `synthetic:${parsedMessage.date?.getTime() ?? 0}`)
+      : message.id
+
+    return toAttachmentRefs(message).map((ref) => ({
+      gmailMessageId: messageKey,
+      gmailAttachmentId: ref.attachmentId,
+      filename: ref.filename,
+      mimeType: ref.mimeType,
+      sizeBytes: ref.sizeBytes,
+      isInline: ref.isInline,
+      contentId: ref.contentId,
+    }))
+  })
 }
 
 /**

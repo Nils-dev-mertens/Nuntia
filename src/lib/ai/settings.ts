@@ -15,6 +15,11 @@ import { eq } from 'drizzle-orm'
 import { db } from '#/db/index.ts'
 import { appSettings } from '#/db/schema.ts'
 import { encrypt, tryDecrypt } from '#/lib/auth/crypto.ts'
+import {
+  REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+  REPLY_DRAFT_MIN_IMPORTANCE_MAX,
+  REPLY_DRAFT_MIN_IMPORTANCE_MIN,
+} from '#/lib/conversation/draft.ts'
 
 import { DEFAULT_LLM_MODELS, LLM_PROVIDERS } from './llm.ts'
 import type { LlmProvider } from './llm.ts'
@@ -29,6 +34,14 @@ export type AiSettingsSummary = {
   llmConfigured: boolean
   llmProvider: LlmProvider | null
   llmModel: string | null
+  /**
+   * Importance at or above which a reply draft is offered, 1–10.
+   *
+   * Part of the summary rather than of the decrypted config because it is not a
+   * secret and the conversation view needs it: the draft control explains itself
+   * with the number it was compared against.
+   */
+  suggestReplyMinImportance: number
 }
 
 export type AiSettingsInput = {
@@ -41,12 +54,35 @@ export type AiSettingsInput = {
    */
   jevApiKey?: string | null
   llmApiKey?: string | null
+  suggestReplyMinImportance: number
 }
 
 /** Everything needed to build the pipeline, with keys decrypted in memory. */
 export type AiPipelineConfig = {
   jev: { apiKey: string; model: string } | null
   llm: { provider: LlmProvider; apiKey: string; model: string } | null
+  /** Same row, same read: the reply draft threshold travels with the keys. */
+  suggestReplyMinImportance: number
+}
+
+/**
+ * Clamp a stored threshold into the range the score it compares against uses.
+ *
+ * Read defensively: a row written by an older build, a hand-edited database or a
+ * bad import should never be able to make every draft eligible (0) or none of
+ * them (11+).
+ */
+export function normaliseMinImportance(
+  value: number | null | undefined,
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT
+  }
+  const rounded = Math.round(value)
+  return Math.min(
+    REPLY_DRAFT_MIN_IMPORTANCE_MAX,
+    Math.max(REPLY_DRAFT_MIN_IMPORTANCE_MIN, rounded),
+  )
 }
 
 type SettingsRow = typeof appSettings.$inferSelect
@@ -76,19 +112,31 @@ export async function getAiSettings(): Promise<AiSettingsSummary> {
     llmModel: row?.llmModel ?? null,
     // A provider with no key, or a key with no provider, is not configured.
     llmConfigured: Boolean(row?.llmApiKeyEncrypted && provider),
+    suggestReplyMinImportance: normaliseMinImportance(
+      row?.suggestReplyMinImportance,
+    ),
   }
 }
 
 /** Decrypted config for building the pipeline. Server-only. */
 export async function getAiPipelineConfig(): Promise<AiPipelineConfig> {
   const row = await settingsRow()
-  if (!row) return { jev: null, llm: null }
+  if (!row) {
+    return {
+      jev: null,
+      llm: null,
+      suggestReplyMinImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+    }
+  }
 
   const jevKey = tryDecrypt(row.jevApiKeyEncrypted)
   const llmKey = tryDecrypt(row.llmApiKeyEncrypted)
   const provider = normaliseProvider(row.llmProvider)
 
   return {
+    suggestReplyMinImportance: normaliseMinImportance(
+      row.suggestReplyMinImportance,
+    ),
     jev: jevKey
       ? { apiKey: jevKey, model: row.jevModel?.trim() || 'jev-latest' }
       : null,
@@ -124,6 +172,9 @@ export async function saveAiSettings(input: AiSettingsInput): Promise<void> {
     jevModel: input.jevModel,
     llmProvider: input.llmProvider,
     llmModel: input.llmModel,
+    suggestReplyMinImportance: normaliseMinImportance(
+      input.suggestReplyMinImportance,
+    ),
     llmApiKeyEncrypted: applyKey(
       current?.llmApiKeyEncrypted ?? null,
       input.llmApiKey,

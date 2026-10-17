@@ -14,12 +14,23 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
-import type { ActionFailure, ConversationDetail } from '#/lib/gmail/service.ts'
+import type {
+  ActionFailure,
+  ConversationDetail,
+  ReplyDraftOutcome,
+} from '#/lib/gmail/service.ts'
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
+import type { ConversationState } from '#/db/schema.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
 
 import { StateBadge } from '#/components/state-badge'
+import {
+  DONE_META,
+  READ_META,
+  STATE_META,
+  STATE_ORDER,
+} from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
 
 /**
@@ -136,6 +147,225 @@ function NoReplyTag() {
   )
 }
 
+/** The user's own "handled" mark, shown beside the state it did not change. */
+function DoneTag() {
+  return (
+    <span
+      title={DONE_META.description}
+      className="shrink-0 rounded-full border border-success/30 bg-success/15 px-1.5 py-px text-[10px] font-medium tracking-wide text-success uppercase"
+    >
+      {DONE_META.label}
+    </span>
+  )
+}
+
+/**
+ * The user's own "I have dealt with this" mark.
+ *
+ * A button rather than something inferred, because inferring it is the exact
+ * failure it exists to prevent: opening a thread — or even replying into it and
+ * waiting on an answer — is not the same as having finished with it, and a thread
+ * that quietly marks itself done is one nobody comes back to. Two labels, one
+ * control, like the state button; the mark leaves the state alone, so the thread
+ * stays where the decision layer put it.
+ */
+function DoneButton({
+  done,
+  onSet,
+}: {
+  done: boolean
+  onSet: (done: boolean) => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onSet(!done)
+      if (result.error) setError(result.error)
+    } catch {
+      setError('Could not update this conversation.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={busy}
+        title={
+          done
+            ? 'Reopen: this thread counts as work again'
+            : 'Mark done: you have dealt with this thread. New mail brings it back by itself.'
+        }
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
+      >
+        {/* "Mark done" rather than "Done": one is the action, the other is the
+            state, and a button that reads like a label is how a control gets
+            mistaken for a badge. */}
+        {busy
+          ? done
+            ? 'Reopening…'
+            : 'Marking…'
+          : done
+            ? 'Reopen'
+            : 'Mark done'}
+      </button>
+      {error ? (
+        <span
+          role="alert"
+          className="max-w-48 text-right text-xs text-destructive"
+        >
+          {error}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The user's own label for a thread.
+ *
+ * A picker rather than the single "Not important" button it replaces. That button
+ * existed for one case — stop showing me this — and the state it set is the same
+ * four labels the list groups by, so there was never a reason to offer one of
+ * them and not the others: a thread the app filed as informational that is
+ * actually work, or one it called work that is not, are the same correction in
+ * opposite directions.
+ *
+ * **Automatic** is the app's own answer, and the honest default: it is what the
+ * unmarked state means, so a thread the decision layer put where the user would
+ * have put it still reads as unmarked. Choosing it hands the thread back — the
+ * stored label is cleared and the pipeline re-runs — which is also how the "stop
+ * ranking this sender low" lesson is undone.
+ */
+function StateLabelPicker({
+  current,
+  onSet,
+}: {
+  /** The stored label, or null when the app's own answer stands. */
+  current: ConversationState | null
+  onSet: (state: ConversationState | null) => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // `''` is the DOM's "no value" for a select, and it is the identity of
+  // Automatic here rather than a magic string to translate at the edges.
+  const value = current ?? ''
+
+  async function choose(next: string) {
+    if (busy || next === value) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onSet(
+        next === '' ? null : (next as ConversationState),
+      )
+      if (result.error) setError(result.error)
+    } catch {
+      setError('Could not change the label.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <label
+        className="flex items-center gap-2 text-xs text-muted-foreground"
+        title="Where this thread is filed. Automatic is the app's own answer; picking a label overrides it for this thread."
+      >
+        Label
+        <select
+          value={value}
+          onChange={(event) => void choose(event.target.value)}
+          disabled={busy}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          <option value="">Automatic</option>
+          {STATE_ORDER.map((state) => (
+            <option key={state} value={state}>
+              {STATE_META[state].label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {error ? (
+        <span
+          role="alert"
+          className="max-w-48 text-right text-xs text-destructive"
+        >
+          {error}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Mark this thread's sender as one a reply cannot reach.
+ *
+ * The quick end of the can't-reply list: the address and the mailbox are both
+ * already known here, so the whole gesture is one click — and the composer below
+ * is what confirms it, because the reply box is gone the moment the loader comes
+ * back. The undo deliberately lives only in Settings, where the list is managed,
+ * so this stays a second way to *add* an entry rather than a second place the
+ * mark is edited.
+ */
+function CantReplyButton({
+  senderEmail,
+  onMark,
+}: {
+  senderEmail: string
+  onMark: () => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onMark()
+      if (result.error) setError(result.error)
+    } catch {
+      setError('Could not mark this sender.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <button
+        type="button"
+        onClick={() => void run()}
+        disabled={busy}
+        title={`Hide the reply box on every thread from ${senderEmail}. Undo this from the can’t-reply list in Settings.`}
+        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
+      >
+        {busy ? 'Marking…' : 'Can’t reply'}
+      </button>
+      {error ? (
+        <span
+          role="alert"
+          className="max-w-48 text-right text-xs text-destructive"
+        >
+          {error}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
 /** Re-run the decision layer for this thread, without waiting for a sync. */
 function ReanalyseButton({
   onReanalyse,
@@ -207,10 +437,28 @@ function dayLabel(iso: string): string {
 }
 
 function formatBytes(bytes: number): string {
+  // Gmail reports no size for some parts; "0 B" reads like a broken file, while
+  // an unknown size simply says nothing.
+  if (bytes <= 0) return ''
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
 
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * Where the bytes of one attachment are served from.
+ *
+ * The attachment id is only unique inside its thread, and an id is not a path
+ * segment until it is encoded — Gmail's ids are base64url, so they can contain
+ * `-` and `_` but also `/` in the general case.
+ */
+function attachmentHref(
+  gmailThreadId: string,
+  file: ConversationDetail['attachments'][number],
+): string {
+  const thread = new URLSearchParams({ thread: gmailThreadId })
+  return `/attachments/${encodeURIComponent(file.gmailAttachmentId)}?${thread}`
 }
 
 function ParsingProfileEditor({
@@ -616,10 +864,16 @@ function ConversationDetailsEditor({
  */
 function Composer({
   accounts,
+  suggest,
+  onDraft,
   onSend,
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
+  /** Whether a draft can be generated, and why not when it cannot. */
+  suggest: ConversationDetail['suggestReply']
+  /** Generate one draft. Never sends: the result lands in this box. */
+  onDraft: (instructions: string | null) => Promise<ReplyDraftOutcome>
   onSend: (
     body: string,
     attachments: ReplyAttachmentUpload[],
@@ -752,6 +1006,18 @@ function Composer({
         </div>
       ) : null}
 
+      <SuggestedReply
+        suggest={suggest}
+        onDraft={onDraft}
+        // The composer's own state is the destination: a draft is text in the
+        // box the user reviews, which is what keeps "use" from ever meaning
+        // "send".
+        onUseDraft={(draft) => {
+          setBody(draft)
+          textarea.current?.focus()
+        }}
+      />
+
       <textarea
         ref={textarea}
         value={body}
@@ -864,6 +1130,173 @@ function Composer({
   )
 }
 
+/**
+ * The suggested reply: a draft the model wrote, and the two ways to take it.
+ *
+ * Renders nothing at all on an install with no LLM key — the feature is simply
+ * off there, and a line about it above every reply box would be noise. With a
+ * model configured it always accounts for itself: either the button, or the one
+ * condition that failed, using the same facts the server gates on.
+ *
+ * Neither action sends. `Edit` opens the draft for changes in place, `Use draft`
+ * puts the current text into the composer below — where the user's own Send is
+ * still the only thing that sends anything.
+ */
+function SuggestedReply({
+  suggest,
+  onDraft,
+  onUseDraft,
+}: {
+  suggest: ConversationDetail['suggestReply']
+  onDraft: (instructions: string | null) => Promise<ReplyDraftOutcome>
+  onUseDraft: (draft: string) => void
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [instructions, setInstructions] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function generate() {
+    if (busy) return
+
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onDraft(instructions.trim() || null)
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+      setDraft(result.draft)
+      setEditing(false)
+    } catch {
+      setError('Could not draft a reply.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const buttonClass =
+    'rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground disabled:opacity-50'
+
+  // No key stored, and nothing drafted: the feature is off, not failing.
+  if (!suggest.available && !suggest.reason && draft === null) return null
+
+  if (!suggest.available && draft === null) {
+    return (
+      <p className="mb-2 text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">No suggested reply.</span>{' '}
+        {suggest.reason}
+      </p>
+    )
+  }
+
+  return (
+    <div className="mb-2 rounded-md border border-border bg-muted/30 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
+          Suggested reply
+        </h2>
+        {draft !== null ? (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setDraft(null)
+              setEditing(false)
+              setError(null)
+            }}
+            className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+          >
+            Discard
+          </button>
+        ) : null}
+      </div>
+
+      {draft !== null ? (
+        editing ? (
+          <textarea
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            rows={5}
+            aria-label="Edit the suggested reply"
+            className="mt-2 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-foreground/30"
+          />
+        ) : (
+          <p className="mt-2 text-sm whitespace-pre-wrap text-foreground">
+            {draft}
+          </p>
+        )
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          {busy
+            ? 'Writing a draft…'
+            : 'Drafts a reply from this thread for you to edit — nothing is sent until you send it.'}
+        </p>
+      )}
+
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {draft !== null ? (
+          <>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setEditing((current) => !current)}
+              className={buttonClass}
+            >
+              {editing ? 'Done editing' : 'Edit'}
+            </button>
+            <button
+              type="button"
+              disabled={busy || draft.trim().length === 0}
+              onClick={() => {
+                onUseDraft(draft.trim())
+                setDraft(null)
+                setEditing(false)
+              }}
+              className={cn(
+                'rounded-md bg-primary px-2 py-1 text-xs font-medium',
+                'text-primary-foreground disabled:opacity-50',
+              )}
+            >
+              Use draft
+            </button>
+          </>
+        ) : null}
+
+        {/*
+         * The instruction arrives *after* the first draft on purpose: asking for
+         * one should be a single click, and "make it shorter" is something you
+         * only know you want once you have read what it wrote.
+         */}
+        <input
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+          disabled={busy}
+          maxLength={500}
+          placeholder="Add an instruction (optional)"
+          className="min-w-48 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-foreground/30"
+        />
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void generate()}
+          className={buttonClass}
+        >
+          {busy ? 'Drafting…' : draft !== null ? 'Regenerate' : 'Draft a reply'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** Base64-encode bytes in chunks without overflowing argument limits. */
 function encodeFileBytes(bytes: Uint8Array): string {
   let binary = ''
@@ -883,10 +1316,29 @@ export function ConversationView({
   onSaveDetails,
   onSaveParsingProfile,
   onSend,
+  onDraft,
   onReanalyse,
+  onSetStateOverride,
+  onSetDone,
+  onMarkSenderUnreplyable,
 }: {
   detail: ConversationDetail
   onReanalyse: () => Promise<{ error: string | null }>
+  /**
+   * Generate a draft reply for this thread. The draft is returned, not stored,
+   * and puts text in the composer — sending stays a separate, deliberate act.
+   */
+  onDraft: (instructions: string | null) => Promise<ReplyDraftOutcome>
+  onSetStateOverride: (
+    state: ConversationState | null,
+  ) => Promise<{ error: string | null }>
+  onSetDone: (done: boolean) => Promise<{ error: string | null }>
+  /**
+   * Add the thread's other party to the can't-reply list. Takes no arguments on
+   * purpose: the server resolves the mailbox and the address from the thread, so
+   * the caller cannot name a sender the thread is not.
+   */
+  onMarkSenderUnreplyable: () => Promise<{ error: string | null }>
   onSaveParsingProfile: (
     profile: SenderProfileSettings,
     defaults: {
@@ -934,6 +1386,13 @@ export function ConversationView({
   }
 
   let lastDay = ''
+  // `New messages` is drawn from the mark the loader sent, not from a fresh read:
+  // the server records the same instant this page renders, and re-loading to see
+  // it would erase the divider the moment it appeared.
+  const seenAtMs = detail.seenAt ? Date.parse(detail.seenAt) : 0
+  const isUnseen = (message: ConversationDetail['messages'][number]): boolean =>
+    !message.isFromOwner && Date.parse(message.sentAt) > seenAtMs
+  let shownUnseenBoundary = false
 
   return (
     <div className="flex h-dvh flex-col">
@@ -961,11 +1420,54 @@ export function ConversationView({
         <div className="flex shrink-0 flex-col items-end gap-2">
           <div className="flex items-center gap-2">
             {!detail.replyable ? <NoReplyTag /> : null}
+            {detail.done ? <DoneTag /> : null}
             <StateBadge state={detail.state} />
           </div>
-          <ReanalyseButton onReanalyse={onReanalyse} />
+          <div className="flex items-start gap-2">
+            {/*
+             * Always offered, and it reads as a statement of where the thread is
+             * as well as a control: the picker shows the stored label, or
+             * Automatic when the app's own answer stands — including when a
+             * sender-level call of the user's is what put it there.
+             */}
+            <StateLabelPicker
+              current={detail.stateOverride}
+              onSet={onSetStateOverride}
+            />
+            {/*
+             * Adding to the can't-reply list was Settings-only, which meant
+             * recognising a sender you already had open and then finding the
+             * address again somewhere else to type it. It is offered here too, and
+             * only while a reply box is still on screen: a sender who is already
+             * unanswerable has nothing left to add, which is why the control
+             * disappears rather than becoming an undo.
+             *
+             * Taking the mark back stays in Settings — one list, one place to
+             * manage it. This is a second way in, not a second place it is edited.
+             */}
+            {detail.replyable && detail.senderEmail ? (
+              <CantReplyButton
+                senderEmail={detail.senderEmail}
+                onMark={onMarkSenderUnreplyable}
+              />
+            ) : null}
+            <DoneButton done={detail.done} onSet={onSetDone} />
+            <ReanalyseButton onReanalyse={onReanalyse} />
+          </div>
         </div>
       </header>
+
+      {/*
+       * Says what the tag above means, in the one place with room for it: the two
+       * marks are easy to confuse, and "you handled this, so it is out of the open
+       * groups" is the difference in a sentence.
+       */}
+      {detail.done ? (
+        <p className="border-y border-border bg-success/5 px-6 py-2 text-xs text-muted-foreground">
+          <span className="font-medium text-success">{DONE_META.label}</span> —{' '}
+          {DONE_META.detail}
+        </p>
+      ) : null}
 
       <div className="flex-1 space-y-1 overflow-y-auto px-6 py-6">
         {detail.messages.map((message) => {
@@ -984,8 +1486,27 @@ export function ConversationView({
               : (message.from.name ?? message.from.email)
           const files = attachmentsByMessage.get(message.gmailMessageId) ?? []
 
+          const unseen = isUnseen(message)
+          const showUnseenBoundary = unseen && !shownUnseenBoundary
+          if (unseen) shownUnseenBoundary = true
+
           return (
             <div key={message.gmailMessageId}>
+              {showUnseenBoundary ? (
+                <div className="my-6 flex items-center gap-3">
+                  <span className="h-px flex-1 bg-border" />
+                  {/* The one place the read mark is visible in here, and it is a
+                      divider rather than a tag on purpose: it marks *where* new
+                      mail starts, not that the thread is new. */}
+                  <span
+                    title={READ_META.description}
+                    className="text-xs font-medium text-foreground"
+                  >
+                    {READ_META.label} messages
+                  </span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+              ) : null}
               {showDay ? (
                 <div className="my-6 flex items-center gap-3">
                   <span className="h-px flex-1 bg-border" />
@@ -1008,9 +1529,7 @@ export function ConversationView({
                     mine && 'flex-row-reverse',
                   )}
                 >
-                  <span className="font-medium text-foreground">
-                    {speaker}
-                  </span>
+                  <span className="font-medium text-foreground">{speaker}</span>
                   <time dateTime={message.sentAt}>
                     {formatTime(message.sentAt)}
                   </time>
@@ -1026,11 +1545,26 @@ export function ConversationView({
                 {files.length > 0 ? (
                   <ul className="flex max-w-[80%] flex-wrap gap-2">
                     {files.map((file) => (
-                      <li
-                        key={file.gmailAttachmentId}
-                        className="rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground"
-                      >
-                        {file.filename} · {formatBytes(file.sizeBytes)}
+                      <li key={file.gmailAttachmentId}>
+                        {/* A link rather than a button: the bytes are served from
+                            a real URL, so the browser opens or saves the file
+                            itself and the app never handles the download. */}
+                        <a
+                          href={attachmentHref(detail.gmailThreadId, file)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`Open ${file.filename}`}
+                          className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+                        >
+                          <span className="max-w-56 truncate underline decoration-dotted underline-offset-2">
+                            {file.filename}
+                          </span>
+                          {formatBytes(file.sizeBytes) ? (
+                            <span className="text-muted-foreground/70">
+                              {formatBytes(file.sizeBytes)}
+                            </span>
+                          ) : null}
+                        </a>
                       </li>
                     ))}
                   </ul>
@@ -1044,12 +1578,24 @@ export function ConversationView({
       </div>
 
       {detail.replyable ? (
-        <Composer accounts={detail.replyAccounts} onSend={onSend} />
+        <Composer
+          accounts={detail.replyAccounts}
+          suggest={detail.suggestReply}
+          onDraft={onDraft}
+          onSend={onSend}
+        />
       ) : (
         <div className="border-t border-border bg-muted/30 px-6 py-3 text-center text-xs text-muted-foreground">
-          {detail.isAutomated
-            ? 'This is an automated notification — there is nobody to reply to.'
-            : 'This conversation has no address to reply to.'}
+          {/*
+           * The user's own mark is named first, because it is the reason the
+           * composer is gone that is not a guess — and the one that lives
+           * somewhere they can change.
+           */}
+          {detail.senderUnreplyable
+            ? 'This sender is on your can’t-reply list — remove the address in Settings to bring the reply box back on all their mail.'
+            : detail.isAutomated
+              ? 'This is an automated notification — there is nobody to reply to.'
+              : 'This conversation has no address to reply to.'}
         </div>
       )}
     </div>

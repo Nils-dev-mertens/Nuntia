@@ -1,7 +1,14 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { eq } from 'drizzle-orm'
+
+// Type-only, so it is erased and does not evaluate `sync.ts` before the database
+// environment is set up the way the value imports below are careful to.
+import type { SyncEvent } from './sync.ts'
 
 /**
  * Sync writes to the database, so each run needs its own SQLite file.
@@ -20,21 +27,33 @@ const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 
 const { db, initDatabase } = await import('#/db/index.ts')
-const { accounts, appSettings, conversations, decisions, messages } =
-  await import('#/db/schema.ts')
+const {
+  accounts,
+  appSettings,
+  attachments: attachmentsTable,
+  conversations,
+  decisions,
+  messages,
+  senderProfiles,
+} = await import('#/db/schema.ts')
 const { FakeGmailClient } = await import('./fake.ts')
 const { backfill, syncIncremental, sync } = await import('./sync.ts')
+const { refreshThread } = await import('./send.ts')
 const { toParsedMessage, toAttachmentRefs } = await import('./message.ts')
 const { decodeGmailData } = await import('./message.ts')
 const { safeFilename, MAX_ATTACHMENT_BYTES } = await import('./attachments.ts')
 const {
   getConversation,
   getParsingProfileContext,
+  getStoredAttachment,
   listConversations,
   saveConversation,
   saveParsingProfile,
   setConversationDetails,
 } = await import('#/lib/conversation/index.ts')
+const { draftReply, forgetAccount, loadAttachment, loadInbox } =
+  await import('./service.ts')
+const { removeAttachmentCache } = await import('./attachments.ts')
 
 const { migrate } = await import('drizzle-orm/libsql/migrator')
 await initDatabase()
@@ -56,6 +75,9 @@ beforeEach(async () => {
   await db.delete(messages)
   await db.delete(conversations)
   await db.delete(appSettings)
+  // Cleared here too: these rows are another form of stored user preference, and
+  // a sender marked in one test would otherwise decide the next one's outcome.
+  await db.delete(senderProfiles)
   await db.delete(accounts)
 
   await db.insert(accounts).values({
@@ -656,6 +678,899 @@ describe('replyability', () => {
   })
 })
 
+/**
+ * Reading a thread and finishing with it — the two different questions.
+ *
+ * Opening a thread records that it was read; only the user's own Done mark says
+ * they have dealt with it. A design that conflated the two would mark a thread
+ * handled the moment it was opened, which is exactly when a reply is most likely
+ * to be forgotten.
+ */
+describe('reading a thread and marking it done', () => {
+  /** A human thread from an ordinary address — the case that needs both marks. */
+  function humanThread(id: string, messageId: string, date: string): any {
+    return {
+      id,
+      historyId: '900',
+      messages: [
+        message({
+          id: messageId,
+          threadId: id,
+          from: 'alice@example.com',
+          subject: 'Project launch',
+          date,
+          body: 'Can you confirm Tuesday?',
+        }),
+      ],
+    }
+  }
+
+  test('opening records the read mark, moves nothing else, and never goes backwards', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        humanThread('read-thread', 'm1', 'Mon, 15 Jan 2024 10:00:00 +0000'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { loadConversation, markConversationSeen } = await import(
+      './service.ts'
+    )
+
+    const before = await loadConversation('read-thread')
+    expect(before?.seenAt).toBeNull()
+    expect(before?.done).toBe(false)
+
+    // The instant the view had on screen, reported back verbatim.
+    const onScreen = before?.messages.at(-1)?.sentAt ?? ''
+    await markConversationSeen('read-thread', onScreen)
+
+    const after = await loadConversation('read-thread')
+    expect(after?.seenAt).toBe(onScreen)
+    // Read is not done — the whole reason the two are stored separately.
+    expect(after?.done).toBe(false)
+    // And reading never moves the state the decision layer put the thread in.
+    expect(after?.state).toBe('needs-action')
+
+    // An older mark — a stale tab, or a thread opened before this one — must not
+    // un-read newer mail.
+    await markConversationSeen('read-thread', '2024-01-01T00:00:00.000Z')
+    const [row] = await listConversations(ACCOUNT)
+    expect(row.seenAt?.toISOString()).toBe(onScreen)
+
+    // A time that does not parse is refused rather than guessed at.
+    await expect(
+      markConversationSeen('read-thread', 'yesterday'),
+    ).rejects.toThrow(/not a valid time/i)
+  })
+
+  test('the done mark survives every rebuild and comes back when new mail arrives', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        humanThread('done-thread', 'm1', 'Mon, 15 Jan 2024 10:00:00 +0000'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { loadConversation, setConversationDone } = await import(
+      './service.ts'
+    )
+    await setConversationDone('done-thread', true)
+
+    const marked = await loadConversation('done-thread')
+    expect(marked?.done).toBe(true)
+    // "Done" is the user's answer about whether they have dealt with the mail,
+    // not a claim about what it needs, so the state stays where it was.
+    expect(marked?.state).toBe('needs-action')
+
+    // Every path that rebuilds a thread from Gmail knows nothing about the mark,
+    // so these are the places it would be lost: a re-sync, a re-decide, and the
+    // send path's own rebuild (`refreshThread`).
+    await backfill(client, ACCOUNT)
+    expect((await loadConversation('done-thread'))?.done).toBe(true)
+
+    const { redecideStoredConversations } = await import('./sync.ts')
+    await redecideStoredConversations(ACCOUNT)
+    expect((await loadConversation('done-thread'))?.done).toBe(true)
+
+    await refreshThread(client, ACCOUNT, 'done-thread')
+    expect((await loadConversation('done-thread'))?.done).toBe(true)
+
+    // New mail is precisely what the mark must not swallow: the thread comes back
+    // on its own, and the user does not have to notice that it did.
+    client.setThread(
+      humanThread('done-thread', 'm2', 'Tue, 16 Jan 2024 10:00:00 +0000'),
+    )
+    await backfill(client, ACCOUNT)
+    expect((await loadConversation('done-thread'))?.done).toBe(false)
+
+    // Saying so again works, and so does taking it back.
+    await setConversationDone('done-thread', true)
+    expect((await loadConversation('done-thread'))?.done).toBe(true)
+    await setConversationDone('done-thread', false)
+    expect((await loadConversation('done-thread'))?.done).toBe(false)
+  })
+})
+
+/**
+ * Answering "I cannot reply to this sender" once, for all of their mail.
+ *
+ * The case this is for is a company writing from an ordinary address —
+ * `updates@`, `account@` — with mail there is nothing to answer: a view-only
+ * notice, an invoice, a statement. The marker does not fire on those addresses
+ * and Jev can only guess from the writing, so the user is the only one who knows
+ * — and the answer has to hold for every thread from that sender, not just the
+ * one they clicked.
+ */
+describe('marking a sender as one you cannot reply to', () => {
+  /** A view-only notice from an address no marker recognises. */
+  function notice(threadId: string, messageId: string, from: string): any {
+    return {
+      id: threadId,
+      historyId: '900',
+      messages: [
+        message({
+          id: messageId,
+          threadId,
+          from,
+          subject: 'Your invoice is ready',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body: 'View your invoice online.',
+        }),
+      ],
+    }
+  }
+
+  test('covers every stored thread from that sender, and the mail that arrives later', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        notice('invoice-1', 'm1', 'updates@acme.example'),
+        notice('invoice-2', 'm2', 'updates@acme.example'),
+        notice('other-1', 'm3', 'billing@other.example'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    // Nothing here is machine mail: an ordinary address, and nothing in the body
+    // the rules read as "nobody to answer".
+    const before = await listConversations(ACCOUNT)
+    expect(before.every((c) => c.replyable)).toBe(true)
+
+    const { applySenderReplyabilityToSender } = await import('./service.ts')
+    await applySenderReplyabilityToSender(ACCOUNT, 'updates@acme.example', false)
+
+    const marked = await listConversations(ACCOUNT)
+    const one = (id: string) => marked.find((c) => c.gmailThreadId === id)
+    expect(one('invoice-1')?.replyable).toBe(false)
+    // The sweep covers threads the decision layer will not revisit — it only
+    // runs on mail Gmail reports as changed.
+    expect(one('invoice-2')?.replyable).toBe(false)
+    // Another sender is untouched.
+    expect(one('other-1')?.replyable).toBe(true)
+    // The state is left where the user found it: "hide the composer only".
+    expect(one('invoice-1')?.state).toBe('informational')
+
+    // Mail from the sender that arrives afterwards reads the stored answer
+    // instead of guessing from the address again.
+    client.setThread(notice('invoice-3', 'm4', 'updates@acme.example'))
+    await backfill(client, ACCOUNT)
+    expect(
+      (await listConversations(ACCOUNT)).find(
+        (c) => c.gmailThreadId === 'invoice-3',
+      )?.replyable,
+    ).toBe(false)
+
+    // A rebuild from Gmail knows nothing about the mark, so these are the places
+    // it would be lost. The send path is the quietest one: it rebuilds the thread
+    // and saves it without running the decision layer at all.
+    // `refreshThread` is imported at the top of this file already.
+    await refreshThread(client, ACCOUNT, 'invoice-2')
+    expect(
+      (await listConversations(ACCOUNT)).find(
+        (c) => c.gmailThreadId === 'invoice-2',
+      )?.replyable,
+    ).toBe(false)
+
+    await backfill(client, ACCOUNT)
+    const { redecideStoredConversations } = await import('./sync.ts')
+    await redecideStoredConversations(ACCOUNT)
+    expect(
+      (await listConversations(ACCOUNT)).find(
+        (c) => c.gmailThreadId === 'invoice-2',
+      )?.replyable,
+    ).toBe(false)
+
+    // Taking the mark back brings the composer back on all of them.
+    await applySenderReplyabilityToSender(ACCOUNT, 'updates@acme.example', true)
+    expect((await listConversations(ACCOUNT)).every((c) => c.replyable)).toBe(
+      true,
+    )
+  })
+
+  test('marks an address that has no mail yet, and the thread that arrives reads it', async () => {
+    // The list lives in Settings, where there is no thread to pick a sender from,
+    // so an entry has to be able to exist before its mail does — and the mail
+    // that follows is the part that must still be covered.
+    const client = new FakeGmailClient({
+      threads: [notice('invoice-1', 'm1', 'updates@acme.example')],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { applySenderReplyabilityToSender } = await import('./service.ts')
+    const { listUnreplyableSenders } = await import(
+      '#/lib/conversation/index.ts'
+    )
+
+    await applySenderReplyabilityToSender(ACCOUNT, 'alerts@acme.example', false)
+    expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([
+      'alerts@acme.example',
+    ])
+
+    // Nothing was stored from that sender, so the sweep had nothing to change.
+    // The next sync is where the entry has to do its work.
+    client.setThread(notice('alert-1', 'm2', 'alerts@acme.example'))
+    await backfill(client, ACCOUNT)
+
+    const stored = await listConversations(ACCOUNT)
+    expect(
+      stored.find((c) => c.gmailThreadId === 'alert-1')?.replyable,
+    ).toBe(false)
+    // The entry is per sender, not a blanket: other senders keep their composer.
+    expect(
+      stored.find((c) => c.gmailThreadId === 'invoice-1')?.replyable,
+    ).toBe(true)
+  })
+
+  test('taking a mark back does not hand a composer to a no-reply address', async () => {
+    // Undo is the user lifting their own answer. The machine-mail marker is not
+    // theirs to lift, and `isAutomatedThread` stays the authority on it.
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'robot-thread',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'robot-thread',
+              from: 'GitHub <noreply@github.com>',
+              subject: 'Build failed',
+              date: 'Mon, 15 Jan 2024 11:00:00 +0000',
+              body: 'Build #881 failed.',
+            }),
+          ],
+        },
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { applySenderReplyabilityToSender } = await import('./service.ts')
+    await applySenderReplyabilityToSender(ACCOUNT, 'noreply@github.com', false)
+    await applySenderReplyabilityToSender(ACCOUNT, 'noreply@github.com', true)
+
+    const [thread] = await listConversations(ACCOUNT)
+    expect(thread.replyable).toBe(false)
+  })
+
+  test('adding and lifting a sender refuses what the list cannot mean', async () => {
+    // The list is typed, not picked, so every way the input can be wrong is a
+    // branch the settings form can reach — checked here rather than through the
+    // router, which is all this needs.
+    const client = new FakeGmailClient({
+      threads: [notice('invoice-1', 'm1', 'updates@acme.example')],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { addUnreplyableSender, removeUnreplyableSender } = await import(
+      './service.ts'
+    )
+
+    // A mailbox that is not connected cannot own the preference.
+    expect(
+      await addUnreplyableSender('other@elsewhere.example', 'a@b.example'),
+    ).toEqual({ added: null, error: 'That mailbox is not connected.' })
+
+    // Shape only: what could never be an address is refused ...
+    for (const bad of ['nope', 'updates@', 'a@b.example c@d.example']) {
+      expect((await addUnreplyableSender(ACCOUNT, bad)).added).toBeNull()
+    }
+    // ... while an unusual one is stored: the list is a preference, not a
+    // delivery, and `invoice@localhost` is a real address without a dot.
+    expect(await addUnreplyableSender(ACCOUNT, 'invoice@localhost')).toEqual({
+      added: 'invoice@localhost',
+      error: null,
+    })
+
+    // The user's own address would hide the composer on their own mail.
+    expect((await addUnreplyableSender(ACCOUNT, ACCOUNT)).error).toBe(
+      `${ACCOUNT} is this mailbox's own address.`,
+    )
+
+    // Stored in its normalised form, and only once.
+    expect(
+      await addUnreplyableSender(ACCOUNT, '  Alerts@Acme.Example '),
+    ).toEqual({ added: 'alerts@acme.example', error: null })
+    expect(
+      (await addUnreplyableSender(ACCOUNT, 'alerts@acme.example')).error,
+    ).toBe('alerts@acme.example is already on the list.')
+
+    // Undo refuses an entry that is not there, lifts one that is, and cannot
+    // lift the same one twice.
+    expect(
+      (await removeUnreplyableSender(ACCOUNT, 'never@acme.example')).error,
+    ).toBe('That sender is not marked as one you cannot reply to.')
+    expect(
+      await removeUnreplyableSender(ACCOUNT, 'alerts@acme.example'),
+    ).toEqual({ error: null })
+    expect(
+      (await removeUnreplyableSender(ACCOUNT, 'alerts@acme.example')).error,
+    ).toBe('That sender is not marked as one you cannot reply to.')
+  })
+
+  test('marks the sender of the thread the user is looking at', async () => {
+    // The one-click path. It names a *thread* rather than an address, so the
+    // mailbox and the address both come from the mail on screen — nothing is
+    // picked and nothing is typed.
+    const client = new FakeGmailClient({
+      threads: [
+        notice('invoice-1', 'm1', 'updates@acme.example'),
+        notice('invoice-2', 'm2', 'updates@acme.example'),
+        notice('other-1', 'm3', 'billing@other.example'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { markThreadSenderUnreplyable } = await import('./service.ts')
+    const { listUnreplyableSenders } = await import(
+      '#/lib/conversation/index.ts'
+    )
+
+    expect(await markThreadSenderUnreplyable('invoice-2')).toEqual({
+      error: null,
+    })
+
+    const stored = await listConversations(ACCOUNT)
+    // Per sender rather than per thread: the sibling thread loses its reply box
+    // too, which is the whole reason the mark is stored against the address.
+    expect(
+      stored.find((c) => c.gmailThreadId === 'invoice-1')?.replyable,
+    ).toBe(false)
+    expect(
+      stored.find((c) => c.gmailThreadId === 'invoice-2')?.replyable,
+    ).toBe(false)
+    // And it lands on the one list, so Settings can take it back.
+    expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([
+      'updates@acme.example',
+    ])
+    // Another sender is untouched.
+    expect(
+      stored.find((c) => c.gmailThreadId === 'other-1')?.replyable,
+    ).toBe(true)
+  })
+
+  test('refuses a thread with nobody on the other side', async () => {
+    // A thread made only of the user's own messages has no sender, and writing the
+    // owner's own address here would hide the composer on their own mail — so it
+    // is refused rather than stored.
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'self-thread',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'self-thread',
+              from: ACCOUNT,
+              subject: 'Note to self',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'Remember this.',
+            }),
+          ],
+        },
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { markThreadSenderUnreplyable } = await import('./service.ts')
+    const { listUnreplyableSenders } = await import(
+      '#/lib/conversation/index.ts'
+    )
+
+    expect(await markThreadSenderUnreplyable('self-thread')).toEqual({
+      error: 'This conversation has no sender to mark.',
+    })
+    expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([])
+  })
+
+  test('offers senders you can actually mark, newest first', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        notice('invoice-1', 'm1', 'updates@acme.example'),
+        // A later message from the same address, this time with a display name.
+        {
+          id: 'invoice-2',
+          historyId: '901',
+          messages: [
+            message({
+              id: 'm2',
+              threadId: 'invoice-2',
+              from: 'Acme Updates <updates@acme.example>',
+              subject: 'Your invoice is ready',
+              date: 'Wed, 17 Jan 2024 10:00:00 +0000',
+              body: 'View your invoice online.',
+            }),
+          ],
+        },
+        // Older, so it sorts below.
+        {
+          id: 'other-1',
+          historyId: '903',
+          messages: [
+            message({
+              id: 'm4',
+              threadId: 'other-1',
+              from: 'billing@other.example',
+              subject: 'Your statement',
+              date: 'Mon, 15 Jan 2024 09:00:00 +0000',
+              body: 'View your statement online.',
+            }),
+          ],
+        },
+        // A machine sender: already unanswerable without anyone being asked, so
+        // there is nothing a mark could add.
+        {
+          id: 'robot-1',
+          historyId: '902',
+          messages: [
+            message({
+              id: 'm3',
+              threadId: 'robot-1',
+              from: 'GitHub <noreply@github.com>',
+              subject: 'Build failed',
+              date: 'Thu, 18 Jan 2024 10:00:00 +0000',
+              body: 'Build #881 failed.',
+            }),
+          ],
+        },
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { listIncomingSenders } = await import('#/lib/conversation/index.ts')
+    const owners = new Set([ACCOUNT])
+
+    const senders = await listIncomingSenders(ACCOUNT, owners)
+    expect(senders.map((sender) => sender.email)).toEqual([
+      'updates@acme.example',
+      'billing@other.example',
+    ])
+    // The name comes from the newer sighting, even though the first had none.
+    expect(senders[0].name).toBe('Acme Updates')
+
+    // The user's own address is never offered, even from the other side of a
+    // thread between two of their mailboxes.
+    expect(
+      await listIncomingSenders(
+        ACCOUNT,
+        new Set([ACCOUNT, 'billing@other.example']),
+      ),
+    ).toEqual([senders[0]])
+
+    // Marking one leaves nothing to offer: the list only names senders whose
+    // stored threads still show a reply box.
+    const { markThreadSenderUnreplyable } = await import('./service.ts')
+    await markThreadSenderUnreplyable('invoice-1')
+    expect(
+      (await listIncomingSenders(ACCOUNT, owners)).map((s) => s.email),
+    ).toEqual(['billing@other.example'])
+  })
+})
+
+/**
+ * Drafts, and the gate in front of them.
+ *
+ * The expensive part of this feature is the API call, so what is worth testing
+ * at this level is that ineligible threads never make one. Each case asserts the
+ * *gate's own sentence*: if a call had gone out with the fake key stored here it
+ * would have failed at the provider and produced a different message, so the
+ * message is the proof that nothing was sent.
+ */
+describe('reply drafts', () => {
+  /** A human asking a question — the thread a draft is actually for. */
+  function questionThread(id: string): any {
+    return {
+      id,
+      historyId: '900',
+      messages: [
+        message({
+          id: `${id}-m1`,
+          threadId: id,
+          from: 'sarah@example.com',
+          subject: 'Project launch',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body: 'Can we move the launch to Tuesday?',
+        }),
+      ],
+    }
+  }
+
+  async function storeLlmKey(minImportance: number) {
+    process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
+    const { saveAiSettings } = await import('#/lib/ai/settings.ts')
+    await saveAiSettings({
+      jevModel: null,
+      llmProvider: 'gemini',
+      llmModel: null,
+      suggestReplyMinImportance: minImportance,
+      llmApiKey: 'llm-secret',
+    })
+  }
+
+  test('with no LLM key there is nothing to draft with, and nothing is called', async () => {
+    const client = new FakeGmailClient({ threads: [questionThread('q1')] })
+    await backfill(client, ACCOUNT)
+
+    expect(await draftReply('q1', null)).toEqual({
+      draft: null,
+      error: 'No LLM key is configured, so there is nothing to draft with.',
+    })
+  })
+
+  test('a sender a reply cannot reach is refused even with a key stored', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'robot-thread',
+          historyId: '901',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'robot-thread',
+              from: 'GitHub <noreply@github.com>',
+              subject: 'Build failed',
+              date: 'Mon, 15 Jan 2024 11:00:00 +0000',
+              body: 'Build #881 failed.',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+    await storeLlmKey(1)
+
+    expect(await draftReply('robot-thread', null)).toEqual({
+      draft: null,
+      error: 'There is nobody on this thread a reply can reach.',
+    })
+  })
+
+  test('a thread below the threshold is left alone and names both numbers', async () => {
+    const client = new FakeGmailClient({ threads: [questionThread('q2')] })
+    await backfill(client, ACCOUNT)
+    await storeLlmKey(8)
+
+    // One unanswered message scores importance 4 in the rules, and the threshold
+    // this test stored is 8.
+    const result = await draftReply('q2', null)
+    expect(result.draft).toBeNull()
+    expect(result.error).toBe('Importance 4/10 — drafts start at 8.')
+  })
+
+  test('the detail payload offers the control only where the server would draft', async () => {
+    const client = new FakeGmailClient({ threads: [questionThread('q3')] })
+    await backfill(client, ACCOUNT)
+
+    const { loadConversation } = await import('./service.ts')
+
+    // No key: the feature is off, and there is nothing to explain about a thread.
+    const before = await loadConversation('q3')
+    expect(before?.suggestReply.available).toBe(false)
+    expect(before?.suggestReply.reason).toBeNull()
+
+    await storeLlmKey(8)
+    const gated = await loadConversation('q3')
+    expect(gated?.suggestReply).toEqual({
+      available: false,
+      reason: 'Importance 4/10 — drafts start at 8.',
+      minImportance: 8,
+    })
+
+    // Low enough that this thread qualifies: the view and the action agree.
+    await storeLlmKey(1)
+    const offered = await loadConversation('q3')
+    expect(offered?.suggestReply.available).toBe(true)
+    expect(offered?.suggestReply.reason).toBeNull()
+  })
+})
+
+/**
+ * Re-classifying mail that is already stored.
+ *
+ * A classifier change cannot reach a thread incremental sync never revisits, and
+ * the alternative — forgetting the mailbox and syncing again — throws away the
+ * user's own topics and goals. This is the local pass that closes that gap.
+ */
+describe('redecideStoredConversations', () => {
+  test('re-decides stored mail locally and keeps what the user set', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 'bulk-thread',
+          historyId: '900',
+          messages: [
+            message({
+              id: 'm1',
+              threadId: 'bulk-thread',
+              from: 'news@example.com',
+              subject: 'Big sale',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: "Big sale this week!\n\nCan't see this email? View it in your browser.",
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+
+    // A decision written by the old classifier, plus a topic the user typed.
+    await db
+      .update(conversations)
+      .set({
+        state: 'needs-action',
+        requiresReply: true,
+        topic: 'Sale I care about',
+      })
+      .where(eq(conversations.gmailThreadId, 'bulk-thread'))
+
+    client.calls.length = 0
+
+    const { redecideStoredConversations } = await import('./sync.ts')
+    const redecided = await redecideStoredConversations(ACCOUNT)
+
+    expect(redecided).toBe(1)
+    const [conversation] = await listConversations(ACCOUNT)
+    // Bulk mail no longer claims action...
+    expect(conversation.state).toBe('low-priority')
+    expect(conversation.requiresReply).toBe(false)
+    // ...and the user's own topic survives being re-decided.
+    expect(conversation.topic).toBe('Sale I care about')
+    // Local only: the whole point is that no mail is re-fetched.
+    expect(client.calls.some((c) => c.startsWith('getThread'))).toBe(false)
+  })
+})
+
+/**
+ * What the user says about a thread, and what the app learns from it.
+ *
+ * Classification is a guess about someone else's mail; the user's own answer is
+ * not a guess, and it has to outlive everything that recomputes a thread — the
+ * next sync, a re-decide, a version bump. The other half is learning: the same
+ * sender writes the same kind of notice every time, so filing one away should
+ * be enough to stop the next one being filed as work.
+ */
+describe('the user’s own call on a thread', () => {
+  const NOTICE_SENDER = 'notify@shop.example'
+
+  /** A one-off notice: one message, nobody asking the reader anything. */
+  function notice(
+    threadId: string,
+    gmailMessageId: string,
+    body: string,
+    from = NOTICE_SENDER,
+  ): any {
+    return {
+      id: threadId,
+      historyId: '900',
+      messages: [
+        message({
+          id: gmailMessageId,
+          threadId,
+          from,
+          subject: 'Notice',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body,
+        }),
+      ],
+    }
+  }
+
+  /** A human asking for something, which the rules file as needs-action. */
+  function question(threadId: string, body: string): any {
+    return {
+      id: threadId,
+      historyId: '900',
+      messages: [
+        message({
+          id: `${threadId}-m1`,
+          threadId,
+          from: 'sarah@example.com',
+          subject: 'Project',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body,
+        }),
+      ],
+    }
+  }
+
+  test('a thread filed away stays filed away through a sync and a re-decide', async () => {
+    const client = new FakeGmailClient({
+      threads: [question('ask-thread', 'Can you confirm Tuesday?')],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { applyUserStateOverride } = await import('./service.ts')
+    await applyUserStateOverride('ask-thread', 'low-priority')
+
+    const filed = await listConversations(ACCOUNT)
+    expect(filed[0].state).toBe('low-priority')
+    // Stored as well as applied: the row is what a later rebuild has to read.
+    expect(filed[0].stateOverride?.state).toBe('low-priority')
+
+    // A later sync rebuilds the thread from Gmail and knows nothing about the
+    // user's call, so this is where it would be lost.
+    await backfill(client, ACCOUNT)
+    expect((await listConversations(ACCOUNT))[0].state).toBe('low-priority')
+
+    // The same argument for the local pass a version bump runs.
+    const { redecideStoredConversations } = await import('./sync.ts')
+    await redecideStoredConversations(ACCOUNT)
+    expect((await listConversations(ACCOUNT))[0].state).toBe('low-priority')
+  })
+
+  test('a new message re-opens a thread the user filed away', async () => {
+    const client = new FakeGmailClient({
+      threads: [question('ask-thread', 'Can you confirm Tuesday?')],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { applyUserStateOverride } = await import('./service.ts')
+    await applyUserStateOverride('ask-thread', 'low-priority')
+
+    // The call was a judgement about the mail that existed when it was made, so
+    // a later message deserves a fresh look rather than inheriting it.
+    client.setThread({
+      id: 'ask-thread',
+      historyId: '901',
+      messages: [
+        ...question('ask-thread', 'Can you confirm Tuesday?').messages,
+        message({
+          id: 'ask-thread-m2',
+          threadId: 'ask-thread',
+          from: 'sarah@example.com',
+          subject: 'Re: Project',
+          date: 'Wed, 17 Jan 2024 10:00:00 +0000',
+          body: 'Can you send the new figures?',
+        }),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const reopened = (await listConversations(ACCOUNT))[0]
+    expect(reopened.state).toBe('needs-action')
+    // The expired call is dropped rather than left looking current.
+    expect(reopened.stateOverride).toBeNull()
+  })
+
+  test('filing a notice away ranks the next one from that sender low, until one is brought back', async () => {
+    const client = new FakeGmailClient({
+      threads: [
+        notice('notice-1', 'm1', 'Your order has shipped.'),
+        notice('notice-2', 'm2', 'A new device signed in.'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    // Neither asks for anything, and neither is machine-marked, so both are
+    // informational until the user says otherwise.
+    const before = await listConversations(ACCOUNT)
+    expect(before.every((c) => c.state === 'informational')).toBe(true)
+
+    const { applyUserStateOverride } = await import('./service.ts')
+    await applyUserStateOverride('notice-1', 'low-priority')
+
+    const filed = await listConversations(ACCOUNT)
+    expect(filed.find((c) => c.gmailThreadId === 'notice-1')?.state).toBe(
+      'low-priority',
+    )
+
+    // The sender is learned now, so the next notice is ranked low on sight —
+    // one dismissal covering the same mail every time it arrives.
+    client.setThread(notice('notice-3', 'm3', 'Your subscription renews soon.'))
+    await backfill(client, ACCOUNT)
+
+    const learned = await listConversations(ACCOUNT)
+    expect(learned.find((c) => c.gmailThreadId === 'notice-3')?.state).toBe(
+      'low-priority',
+    )
+
+    // The local re-decide a version bump runs applies the same lesson to mail
+    // already stored, rather than only to what arrives next.
+    const { redecideStoredConversations } = await import('./sync.ts')
+    await redecideStoredConversations(ACCOUNT)
+    expect(
+      (await listConversations(ACCOUNT)).find(
+        (c) => c.gmailThreadId === 'notice-2',
+      )?.state,
+    ).toBe('low-priority')
+
+    // Bringing one back says the assumption was wrong for this sender, so the
+    // rest stop being ranked low too — the alternative (a net count) would
+    // leave the button doing nothing for a sender filed away more than once.
+    await applyUserStateOverride('notice-1', null)
+    await redecideStoredConversations(ACCOUNT)
+
+    const restored = await listConversations(ACCOUNT)
+    expect(restored.find((c) => c.gmailThreadId === 'notice-1')?.state).toBe(
+      'informational',
+    )
+    expect(restored.find((c) => c.gmailThreadId === 'notice-2')?.state).toBe(
+      'informational',
+    )
+    expect(
+      restored.find((c) => c.gmailThreadId === 'notice-1')?.stateOverride,
+    ).toBeNull()
+  })
+
+  test('labelling a thread is a call about the thread, not the sender', async () => {
+    // Any of the four labels can be set now, and only "Low priority" says
+    // anything about the sender. The bug this guards: the sender lesson used to
+    // be recorded for whatever the button sent, so relabelling one thread
+    // "Needs action" would quietly start ranking every other notice from that
+    // sender low — the opposite of what the label just said.
+    const client = new FakeGmailClient({
+      threads: [
+        notice('notice-1', 'm1', 'Your order has shipped.'),
+        notice('notice-2', 'm2', 'A new device signed in.'),
+      ],
+    })
+    await backfill(client, ACCOUNT)
+
+    const { applyUserStateOverride } = await import('./service.ts')
+    await applyUserStateOverride('notice-1', 'needs-action')
+
+    const labelled = await listConversations(ACCOUNT)
+    const one = labelled.find((c) => c.gmailThreadId === 'notice-1')
+    expect(one?.state).toBe('needs-action')
+    // Stored, not just applied: a rebuild reads the row.
+    expect(one?.stateOverride?.state).toBe('needs-action')
+
+    // The other thread from the same sender is untouched, and the next one to
+    // arrive is filed on its own merits.
+    expect(
+      labelled.find((c) => c.gmailThreadId === 'notice-2')?.state,
+    ).toBe('informational')
+    client.setThread(notice('notice-3', 'm3', 'Your subscription renews soon.'))
+    await backfill(client, ACCOUNT)
+    expect(
+      (await listConversations(ACCOUNT)).find(
+        (c) => c.gmailThreadId === 'notice-3',
+      )?.state,
+    ).toBe('informational')
+
+    // And it survives the local pass a version bump runs, which is where a label
+    // the decision layer disagrees with would be recomputed away.
+    const { redecideStoredConversations } = await import('./sync.ts')
+    await redecideStoredConversations(ACCOUNT)
+    const after = (await listConversations(ACCOUNT)).find(
+      (c) => c.gmailThreadId === 'notice-1',
+    )
+    expect(after?.state).toBe('needs-action')
+    expect(after?.stateOverride?.state).toBe('needs-action')
+
+    // The picker's "Automatic": the stored label goes and the app's own answer
+    // stands again.
+    await applyUserStateOverride('notice-1', null)
+    const handedBack = (await listConversations(ACCOUNT)).find(
+      (c) => c.gmailThreadId === 'notice-1',
+    )
+    expect(handedBack?.state).toBe('informational')
+    expect(handedBack?.stateOverride).toBeNull()
+  })
+})
+
 describe('fragmented threads across two mailboxes', () => {
   // The bug this guards: Gmail does not always group a message the same way in
   // the sender's and recipient's mailboxes. Here one mailbox holds the whole
@@ -683,9 +1598,8 @@ describe('fragmented threads across two mailboxes', () => {
   }
 
   test('resolves a fragment to the whole merged conversation', async () => {
-    const { buildConversation, saveConversation } = await import(
-      '#/lib/conversation/index.ts'
-    )
+    const { buildConversation, saveConversation } =
+      await import('#/lib/conversation/index.ts')
     await db.insert(accounts).values({
       id: OTHER,
       email: OTHER,
@@ -948,6 +1862,44 @@ describe('backfill', () => {
     expect(result.synced).toBe(3)
   })
 
+  test('announces the total once the listing is done', async () => {
+    // The count is only known after `threads.list` finishes paging, which is why
+    // it is a separate event from `start` — the progress banner has no
+    // denominator until this arrives, and a first backfill is all listing.
+    const threads = Array.from({ length: 5 }, (_, i) => ({
+      id: `t${i}`,
+      historyId: '900',
+      messages: [
+        message({
+          id: `m${i}`,
+          threadId: `t${i}`,
+          from: 's@e.com',
+          subject: `S${i}`,
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body: `Body ${i}`,
+        }),
+      ],
+    }))
+
+    const events: SyncEvent[] = []
+    await backfill(new FakeGmailClient({ threads, pageSize: 2 }), ACCOUNT, {
+      onProgress: (event) => events.push(event),
+    })
+
+    expect(events.filter((e) => e.type === 'listed')).toEqual([
+      { type: 'listed', total: 5 },
+    ])
+
+    // Every thread the listing named is accounted for, so a bar built from these
+    // numbers cannot stall short of its total.
+    const finished = events.filter(
+      (e) => e.type === 'thread' || e.type === 'skipped' || e.type === 'error',
+    )
+    expect(finished).toHaveLength(5)
+
+    expect(events.at(-1)?.type).toBe('done')
+  })
+
   test('one failing thread does not abort the whole sync', async () => {
     const client = new FakeGmailClient({
       threads: [
@@ -1142,6 +2094,62 @@ describe('backfill', () => {
     await expect(saveConversation(ACCOUNT, loaded!)).resolves.toBeUndefined()
   })
 
+  test('a reply keeps the thread attachments it rebuilds', async () => {
+    // Sending re-reads one thread and saves it again. The rebuild supplied no
+    // attachment metadata, so the conversation claimed to have none — and since
+    // saving replaces the messages wholesale, the attachment rows were
+    // cascade-deleted and none were written back. Every chip vanished from the
+    // thread the user had just replied to, until some later sync restored them.
+    const client = new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            {
+              id: 'm1',
+              threadId: 't1',
+              labelIds: ['INBOX'],
+              internalDate: String(Date.now()),
+              snippet: '',
+              payload: normalizePart(
+                multipartPayload({
+                  headers: {
+                    from: 's@e.com',
+                    subject: 'Report',
+                    'Message-ID': '<abc123@mail.example.com>',
+                  },
+                  text: 'See attached.',
+                  attachment: {
+                    filename: 'q1.pdf',
+                    mimeType: 'application/pdf',
+                    attachmentId: 'att-1',
+                    size: 4096,
+                  },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT)
+    expect((await getConversation(ACCOUNT, 't1'))?.attachments).toHaveLength(1)
+
+    await refreshThread(client, ACCOUNT, 't1')
+
+    const afterReply = await getConversation(ACCOUNT, 't1')
+    expect(afterReply?.attachments).toHaveLength(1)
+    expect(afterReply?.attachments[0]?.filename).toBe('q1.pdf')
+    expect(afterReply?.attachmentCount).toBe(1)
+
+    // Still addressable: a chip is matched to its bubble through this value.
+    expect(afterReply?.messages.map((m) => m.gmailMessageId)).toContain(
+      afterReply?.attachments[0]?.gmailMessageId,
+    )
+  })
+
   test('records a decision for every synced conversation', async () => {
     const client = new FakeGmailClient({
       threads: [
@@ -1329,14 +2337,14 @@ describe('sync', () => {
 describe('AI settings', () => {
   test('stores keys encrypted and builds the pipeline config without leaking them', async () => {
     process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
-    const { getAiPipelineConfig, getAiSettings, saveAiSettings } = await import(
-      '#/lib/ai/settings.ts'
-    )
+    const { getAiPipelineConfig, getAiSettings, saveAiSettings } =
+      await import('#/lib/ai/settings.ts')
 
     await saveAiSettings({
       jevModel: 'jev-latest',
       llmProvider: 'gemini',
       llmModel: null,
+      suggestReplyMinImportance: 6,
       jevApiKey: 'jev-secret',
       llmApiKey: 'llm-secret',
     })
@@ -1360,20 +2368,25 @@ describe('AI settings', () => {
 
   test('leaves a key unchanged when omitted and clears it when emptied', async () => {
     process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
-    const { getAiPipelineConfig, getAiSettings, saveAiSettings } = await import(
-      '#/lib/ai/settings.ts'
-    )
+    const { getAiPipelineConfig, getAiSettings, saveAiSettings } =
+      await import('#/lib/ai/settings.ts')
 
     await saveAiSettings({
       jevModel: null,
       llmProvider: null,
       llmModel: null,
+      suggestReplyMinImportance: 6,
       jevApiKey: 'first',
     })
     expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
 
     // Omitting the key leaves it as-is.
-    await saveAiSettings({ jevModel: null, llmProvider: null, llmModel: null })
+    await saveAiSettings({
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      suggestReplyMinImportance: 6,
+    })
     expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
 
     // An empty string clears it.
@@ -1381,10 +2394,35 @@ describe('AI settings', () => {
       jevModel: null,
       llmProvider: null,
       llmModel: null,
+      suggestReplyMinImportance: 6,
       jevApiKey: '',
     })
     expect((await getAiPipelineConfig()).jev).toBeNull()
     expect((await getAiSettings()).jevConfigured).toBe(false)
+  })
+
+  test('the draft threshold round-trips, and a bad one is clamped rather than obeyed', async () => {
+    process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
+    const { getAiSettings, saveAiSettings } = await import('#/lib/ai/settings.ts')
+
+    const base = {
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      jevApiKey: null,
+      llmApiKey: null,
+    }
+
+    await saveAiSettings({ ...base, suggestReplyMinImportance: 3 })
+    expect((await getAiSettings()).suggestReplyMinImportance).toBe(3)
+
+    // Out of range is not stored as given: the score it compares against is 1–10,
+    // so 0 (every thread eligible) and 99 (none) both have to be brought back in.
+    await saveAiSettings({ ...base, suggestReplyMinImportance: 0 })
+    expect((await getAiSettings()).suggestReplyMinImportance).toBe(1)
+
+    await saveAiSettings({ ...base, suggestReplyMinImportance: 99 })
+    expect((await getAiSettings()).suggestReplyMinImportance).toBe(10)
   })
 })
 
@@ -1425,5 +2463,272 @@ describe('safeFilename', () => {
 describe('attachment limits', () => {
   test('the default cap is a sane size', () => {
     expect(MAX_ATTACHMENT_BYTES).toBe(25 * 1024 * 1024)
+  })
+})
+
+/**
+ * Attachments are fetched on demand — sync records metadata only — so this is
+ * the only place the download-and-cache path runs. Nothing else covers it: the
+ * cache helpers existed unused until a chip became clickable.
+ */
+describe('loadAttachment', () => {
+  const ATTACHMENT_BYTES = Buffer.from('the bytes of q1.pdf')
+
+  function clientWithAttachment(args: { size: number }) {
+    return new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            {
+              id: 'm1',
+              threadId: 't1',
+              labelIds: ['INBOX'],
+              internalDate: String(Date.now()),
+              snippet: '',
+              payload: normalizePart(
+                multipartPayload({
+                  headers: {
+                    from: 's@e.com',
+                    subject: 'Report',
+                    'Message-ID': '<abc123@mail.example.com>',
+                  },
+                  text: 'See attached.',
+                  attachment: {
+                    filename: 'q1.pdf',
+                    mimeType: 'application/pdf',
+                    attachmentId: 'att-1',
+                    size: args.size,
+                  },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+      attachments: {
+        'att-1': {
+          data: ATTACHMENT_BYTES.toString('base64'),
+          size: ATTACHMENT_BYTES.byteLength,
+        },
+      },
+    })
+  }
+
+  /** Point the cache at a temp dir, and hand back the previous value. */
+  function useTempCache(): string | undefined {
+    const previous = process.env.ATTACHMENT_CACHE_DIR
+    process.env.ATTACHMENT_CACHE_DIR = join(tmpDir, 'attachments')
+    return previous
+  }
+
+  test('downloads the bytes for a stored attachment and caches them', async () => {
+    const previous = useTempCache()
+    const client = clientWithAttachment({ size: 4096 })
+
+    try {
+      await backfill(client, ACCOUNT)
+
+      const result = await loadAttachment('t1', 'att-1', { client })
+      if (!result.ok) throw new Error(`expected bytes, got ${result.reason}`)
+
+      expect(result.file.filename).toBe('q1.pdf')
+      expect(result.file.mimeType).toBe('application/pdf')
+      expect(result.file.bytes.toString('utf-8')).toBe(
+        ATTACHMENT_BYTES.toString('utf-8'),
+      )
+
+      // The download is recorded, so the next open does not go to Gmail again.
+      const stored = await getStoredAttachment('t1', 'att-1')
+      expect(stored?.localPath).toBeTruthy()
+
+      const second = await loadAttachment('t1', 'att-1', { client })
+      expect(second.ok).toBe(true)
+      expect(
+        client.calls.filter((call) => call.startsWith('getAttachment')),
+      ).toHaveLength(1)
+    } finally {
+      if (previous === undefined) delete process.env.ATTACHMENT_CACHE_DIR
+      else process.env.ATTACHMENT_CACHE_DIR = previous
+    }
+  })
+
+  test('reports an oversized attachment instead of fetching it', async () => {
+    const previous = useTempCache()
+    const tooLarge = MAX_ATTACHMENT_BYTES + 1
+    const client = clientWithAttachment({ size: tooLarge })
+
+    try {
+      await backfill(client, ACCOUNT)
+
+      const result = await loadAttachment('t1', 'att-1', { client })
+
+      expect(result).toEqual({ ok: false, reason: 'too-large' })
+      expect(client.calls.some((c) => c.startsWith('getAttachment'))).toBe(
+        false,
+      )
+    } finally {
+      if (previous === undefined) delete process.env.ATTACHMENT_CACHE_DIR
+      else process.env.ATTACHMENT_CACHE_DIR = previous
+    }
+  })
+
+  test('reports an unknown attachment rather than throwing', async () => {
+    const result = await loadAttachment('t1', 'no-such-attachment')
+
+    expect(result).toEqual({ ok: false, reason: 'not-found' })
+  })
+})
+
+/**
+ * Starting over.
+ *
+ * A library synced by an older version keeps that version's parsing, because the
+ * fixes apply when a message is parsed rather than to rows already written. These
+ * are the checks behind the "delete stored mail" action that makes a fresh sync
+ * possible.
+ */
+describe('forgetAccount', () => {
+  /** Run `fn` with the attachment cache pointed at a temp directory. */
+  async function withTempCache(fn: (cache: string) => Promise<void>) {
+    const previous = process.env.ATTACHMENT_CACHE_DIR
+    const cache = join(tmpDir, `cache-${Math.random().toString(36).slice(2)}`)
+    process.env.ATTACHMENT_CACHE_DIR = cache
+
+    try {
+      await mkdir(cache, { recursive: true })
+      await fn(cache)
+    } finally {
+      if (previous === undefined) delete process.env.ATTACHMENT_CACHE_DIR
+      else process.env.ATTACHMENT_CACHE_DIR = previous
+    }
+  }
+
+  function clientWithSavedThread() {
+    return new FakeGmailClient({
+      threads: [
+        {
+          id: 't1',
+          historyId: '900',
+          messages: [
+            {
+              id: 'm1',
+              threadId: 't1',
+              labelIds: ['INBOX'],
+              internalDate: String(Date.now()),
+              snippet: '',
+              payload: normalizePart(
+                multipartPayload({
+                  headers: { from: 's@e.com', subject: 'Report' },
+                  text: 'See attached.',
+                  attachment: {
+                    filename: 'q1.pdf',
+                    mimeType: 'application/pdf',
+                    attachmentId: 'att-1',
+                    size: 4096,
+                  },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    })
+  }
+
+  test('deletes the mailbox, its stored mail, and only its cached files', async () => {
+    await withTempCache(async (cache) => {
+      await backfill(clientWithSavedThread(), ACCOUNT)
+      expect(await listConversations(ACCOUNT)).toHaveLength(1)
+
+      const mine = join(cache, ACCOUNT, 'a1b2', 'q1.pdf')
+      const other = join(cache, 'someone@example.com', 'a1b2', 'q1.pdf')
+      for (const file of [mine, other]) {
+        await mkdir(join(file, '..'), { recursive: true })
+        await writeFile(file, 'bytes')
+      }
+
+      await forgetAccount(ACCOUNT)
+
+      expect(await listConversations(ACCOUNT)).toHaveLength(0)
+      expect(
+        await db
+          .select()
+          .from(attachmentsTable)
+          .where(eq(attachmentsTable.conversationId, `${ACCOUNT}:t1`)),
+      ).toHaveLength(0)
+      expect(await db.select().from(accounts)).toHaveLength(0)
+
+      // The cached files go with the rows; another mailbox's stay.
+      expect(existsSync(mine)).toBe(false)
+      expect(existsSync(other)).toBe(true)
+    })
+  })
+
+  test('a crafted account id cannot reach outside the cache', async () => {
+    await withTempCache(async () => {
+      const outside = join(tmpDir, 'outside-the-cache')
+      await mkdir(outside, { recursive: true })
+      const kept = join(outside, 'keep.txt')
+      await writeFile(kept, 'keep')
+
+      await removeAttachmentCache('../outside-the-cache')
+
+      expect(existsSync(kept)).toBe(true)
+    })
+  })
+})
+
+describe('loadInbox on a mailbox that has never synced', () => {
+  // The stored envelope is deliberately bogus, so `createGmailClient` fails on
+  // the decryption rather than the network — this exercises the branch without
+  // ever reaching Gmail.
+  test('starts the first sync without waiting for it, then reports its failure', async () => {
+    const started = await loadInbox()
+    if (!started.signedIn) throw new Error('expected a signed-in payload')
+
+    // The load took the background branch and returned while the run was still
+    // going. Awaiting it in line would have failed first and come back with the
+    // error already set, which is the behaviour this replaced.
+    expect(started.syncedNow).toBe(true)
+    expect(started.syncError).toBeNull()
+
+    // The run is fire-and-forget, so poll until it settles rather than racing it —
+    // this account fails instantly, so progress may be gone before the first
+    // response is built. What matters is that a later load explains the still-empty
+    // inbox instead of showing a spinner nobody can clear.
+    let settledError: string | null = null
+    let settledAuth: string[] = []
+    let settledSyncing = -1
+    for (let attempt = 0; attempt < 200 && settledError === null; attempt++) {
+      await Bun.sleep(10)
+      const next = await loadInbox()
+      if (next.signedIn && next.syncError) {
+        settledError = next.syncError
+        settledAuth = next.authRequiredAccounts.map((a) => a.id)
+        settledSyncing = next.syncing.length
+      }
+    }
+
+    expect(settledError).toContain('could not be decrypted')
+    expect(settledAuth).toEqual([ACCOUNT])
+    // Nothing is running any more, and the progress entry went with the run.
+    expect(settledSyncing).toBe(0)
+
+    // And the failure does not restart a run on every load: a retry that began
+    // immediately would overwrite the error before it could ever be rendered.
+    const reloaded = await loadInbox()
+    if (!reloaded.signedIn) throw new Error('expected a signed-in payload')
+    expect(reloaded.syncedNow).toBe(false)
+    expect(reloaded.syncError).toContain('could not be decrypted')
+
+    // Re-sync is the escape hatch. A forced load starts a fresh attempt instead of
+    // re-reporting the failure it exists to clear — otherwise the mailbox the
+    // banner is complaining about could never be recovered from the UI.
+    const forced = await loadInbox({ force: true, full: true })
+    if (!forced.signedIn) throw new Error('expected a signed-in payload')
+    expect(forced.syncedNow).toBe(true)
+    expect(forced.syncError).toBeNull()
   })
 })

@@ -7,7 +7,7 @@
  * something absurdly large without a caller asking.
  */
 
-import { mkdir, writeFile, stat } from 'node:fs/promises'
+import { mkdir, rm, writeFile, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join, resolve, sep } from 'node:path'
 
@@ -24,7 +24,10 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 /** Root for the local cache, alongside the SQLite file. */
 export function cacheRoot(): string {
-  return process.env.ATTACHMENT_CACHE_DIR ?? resolve(process.cwd(), 'data/attachments')
+  return (
+    process.env.ATTACHMENT_CACHE_DIR ??
+    resolve(process.cwd(), 'data/attachments')
+  )
 }
 
 /**
@@ -66,18 +69,55 @@ export function safeFilename(name: string): string {
 }
 
 /**
- * Path an attachment is cached at, if already downloaded.
+ * Directory one attachment's file is cached in.
  *
  * Keyed on the Gmail attachment id rather than the filename, so two different
  * attachments with the same name do not collide and overwrite each other.
+ *
+ * The id is hashed rather than used verbatim because its real length is around a
+ * thousand characters — it is an opaque token, not a name. Used as a path segment
+ * it exceeds what Windows will open (`mkdir` fails with ENOENT on a path past
+ * MAX_PATH, which is what happened on the first real download), and a digest
+ * keeps the key unique, deterministic, and short.
  */
-export function attachmentPath(accountId: string, ref: GmailAttachmentRef): string {
-  return join(cacheRoot(), safeAccountSegment(accountId), ref.attachmentId, safeFilename(ref.filename))
+function attachmentDir(accountId: string, ref: GmailAttachmentRef): string {
+  const key = createHash('sha1')
+    .update(ref.attachmentId)
+    .digest('hex')
+    .slice(0, 20)
+
+  return join(cacheRoot(), safeAccountSegment(accountId), key)
+}
+
+/** Path an attachment is cached at, if already downloaded. */
+export function attachmentPath(
+  accountId: string,
+  ref: GmailAttachmentRef,
+): string {
+  return join(attachmentDir(accountId, ref), safeFilename(ref.filename))
 }
 
 /** Keep account ids from escaping the cache directory. */
 function safeAccountSegment(accountId: string): string {
   return safeFilename(accountId)
+}
+
+/**
+ * Delete every cached file for one account.
+ *
+ * Called when a mailbox is disconnected: the rows are gone with it, and without
+ * this the downloaded files would sit in the cache with nothing referring to
+ * them. Containment is checked the same way as on write, so a crafted account id
+ * cannot point this at another directory.
+ */
+export async function removeAttachmentCache(accountId: string): Promise<void> {
+  const dir = join(cacheRoot(), safeAccountSegment(accountId))
+
+  if (!isInside(dir, cacheRoot())) {
+    throw new Error(`Refusing to delete outside the cache root: ${dir}`)
+  }
+
+  await rm(dir, { recursive: true, force: true })
 }
 
 /** True when the attachment is already on disk. */
@@ -127,7 +167,8 @@ export async function downloadAttachment(
   } catch (error) {
     if (
       error instanceof Error &&
-      (error.name === 'GmailNotFoundError' || error.name === 'GmailRateLimitError')
+      (error.name === 'GmailNotFoundError' ||
+        error.name === 'GmailRateLimitError')
     ) {
       // Transient or gone — not a sync failure. The attachment row simply stays
       // without a local path and can be retried on the next sync.
@@ -145,10 +186,14 @@ export async function downloadAttachment(
 
   // Gmail does not always report size accurately, so re-check after decoding.
   if (bytes.byteLength > maxBytes) {
-    return { status: 'skipped', reason: 'too-large', sizeBytes: bytes.byteLength }
+    return {
+      status: 'skipped',
+      reason: 'too-large',
+      sizeBytes: bytes.byteLength,
+    }
   }
 
-  const dir = join(cacheRoot(), safeAccountSegment(accountId), ref.attachmentId)
+  const dir = attachmentDir(accountId, ref)
 
   // Final containment check before writing anything.
   if (!isInside(dir, cacheRoot())) {

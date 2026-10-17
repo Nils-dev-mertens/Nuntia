@@ -16,7 +16,7 @@ source of truth; Lumen is a presentation + composition layer.
 | DB                | SQLite via **`@libsql/client`** + Drizzle ORM                                                     | Single-user, local-first. **Changed from the original `better-sqlite3`** — see below.                                       |
 | Auth              | Google OAuth 2.0, refresh token AES-encrypted at rest                                             | Gmail is the only provider in MVP.                                                                                          |
 | Mail              | `googleapis` — `threads.get`, `messages.attachments.get`, `history.list`; inbox polling           | Gmail API is the source of truth. Push watch is not implemented in the MVP.                                                 |
-| AI decisions      | Deterministic rules first, then **Jev** for importance / urgency / state-when-unset / replyability | See "Deviations".                                                                                                           |
+| AI decisions      | Deterministic rules first, then **Jev** for importance / urgency / state-when-unset / replyability (a sender the user has marked outranks it) | See "Deviations".                                                                                                           |
 | AI generation     | **LLM** (Gemini, OpenAI or Anthropic, BYO key): topic now, suggested replies / drafts in Phase 2                                                                   | Phase 2. Draft-only, never auto-send.                                                                                       |
 | Runtime / tooling | bun 1.3.10, TypeScript 6.x (`^6.0.2`)                                                             | Matches the `forma` project conventions.                                                                                    |
 
@@ -101,7 +101,8 @@ swap for a structured-output LLM, as this plan originally did, conflates the two
 - **rules** decide the obvious state (e.g. you sent last ⇒ waiting for reply), and always win
   where they apply;
 - **Jev** decides importance, urgency, the state the rules could not, and whether the mail is
-  replyable at all;
+  replyable at all — except for a sender the user has marked, which is an answer rather than a
+  hint and is never put to the model;
 - the **LLM** writes the topic (and later the drafts);
 - **intent** is the user's — never AI-written.
 
@@ -210,9 +211,11 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] **Decision pipeline wired (rules-first)** — split into rules → decision-model (Jev) → topic (LLM) stages, run from `syncThread` and recorded on `decisions`; keyless defaults keep behaviour identical
 - [x] **Jev decision model** behind the `DecisionModel` seam — importance, urgency, and a state to fill the rules' gap; configured in Settings, key encrypted at rest
 - [x] **LLM topic generator** behind the `TopicGenerator` seam — Anthropic, OpenAI or Gemini, provider-agnostic; configured in Settings
-- [ ] **Replyability** — Jev's "can this be replied to" verdict, unified with machine-mail detection, plus the schema column and composer/tag behaviour (the Jev client does not ask it yet)
-- [ ] **Decision trigger** — the sync-time path is in; the manual re-analyse action is not
-- [ ] **Phase 2 generation** — suggested replies / drafts; the `TopicGenerator` seam is the place
+- [x] **Replyability** — Jev asks "can this be replied to" and the answer is unified with machine-mail detection behind the schema column and composer behaviour; the user's own per-address list sits above both, is managed from Settings and can be added to from a thread or a picker of real senders (see "Can't reply to a sender")
+- [x] **Decision trigger** — the sync-time path plus a manual re-analyse action on the conversation, which re-runs the pipeline over the stored row with no Gmail round trip
+- [x] **Read and Done marks** — per-message "viewed" as a forward-only high-water mark set by opening a thread, and a Done mark only the user's own action sets; Done moves the thread out of the state groups into its own section, and both survive every rebuild — newer mail voids Done (see "Read is not doing")
+- [x] **First sync runs in the background** — adding a mailbox no longer blocks the page on a 30-day backfill; the inbox shows per-mailbox progress and polls fast until it lands (see "A first sync is not something to wait for")
+- [x] **Suggested replies** — a draft generated on demand for a thread that asks for a reply and clears an importance threshold, shown in the composer to edit or use; never stored and never sent (see "Suggested replies are drafts, not sends")
 - [x] **Multiple accounts in one merged inbox** — accounts global to the install, `loadInbox` fanning out and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
 - [ ] **A second mailbox service** — the provider seam, `accounts.provider` and the `provider_*` rename (see "A second service")
 
@@ -307,7 +310,11 @@ Two layers, matching how people actually know their contacts:
 `buildConversation` resolves `sender override → account default → strip` per message, so a
 single lookup serves the whole run. The same profile also carries the per-sender reply
 style (greeting/signature restored on send, falling back to the user's own most recent
-message in the thread).
+message in the thread), and `replyable` — the user's own answer to whether a reply can reach
+that sender at all, which is [a third kind of setting](#cant-reply-to-a-sender) on the same row.
+Saving `replyable` writes only that column, and inserting the row for it inherits the account's
+parsing defaults rather than pinning the schema's, so marking a sender never changes how their
+mail is parsed.
 
 What the user can do in the chat header ("Tune parsing & reply style"):
 
@@ -358,6 +365,22 @@ Key rules:
   noise, so it is left to the user and the future decision layer.
 - **`goal` is user-owned and never written by the decision layer.** `applyDecision`
   copies it through untouched; there is a test asserting exactly that.
+- **`state` is user-overridable, and the user wins.** The label is picked on the thread —
+  any of the four, or **Automatic** for the app's own answer — and stored on the row
+  (`state_override`, with the activity it was said against in `state_override_message_at`),
+  and `applyDecision` keeps it through every later re-decide — which is the only way it
+  survives, because a sync rebuilds the thread from Gmail and would otherwise reach its own
+  conclusion. A message newer than the call voids it: the judgement was about the mail that
+  existed at the time.
+
+  Two things the picker distinguishes that the original single button could not. **Only
+  "Low priority" teaches the _sender_** (`sender_signals`), so the next one-off notice from a
+  website is ranked low without being asked — and bringing one back switches that off again.
+  The lesson used to be recorded for whatever the button sent, which was harmless while the
+  button only ever sent "Low priority" and a quiet contradiction the moment it could send
+  "Needs action": labelling one thread as work would have started ranking that sender's other
+  mail low. And **Automatic is what an unmarked thread reads as**, even when the app happens
+  to agree with the user, so the control never claims a call the user did not make.
 
 ### The decision layer is split by owner
 
@@ -367,15 +390,19 @@ have different owners:
 
 | Field        | Owner                                                                                    |
 | ------------ | ---------------------------------------------------------------------------------------- |
-| `state`      | **rules** when determinable (you sent last ⇒ waiting for reply); otherwise **Jev**       |
+| `state`      | the **user** when they have called it; otherwise **rules** when determinable (you sent last ⇒ waiting for reply), otherwise **Jev** |
 | `importance` | **Jev**                                                                                  |
 | `urgency`    | **Jev**                                                                                  |
-| replyability | deterministic machine-mail marker **first**, Jev over everything else                    |
+| replyability | the **user** when they have marked the sender (their per-sender list); otherwise deterministic machine-mail marker **first**, Jev over everything else |
 | `topic`      | **LLM**                                                                                  |
 | `intent`     | the **user** — never AI-written                                                          |
 
-Machine-mail detection is **step 1**: an address that marks itself no-reply is settled, and
-Jev skips it rather than spending a call.
+Replyability is settled in that order of authority, and the user is at the top of it. Machine-mail
+detection is **step 1**: an address that marks itself no-reply is settled, and Jev skips it rather
+than spending a call. The user's own list — Settings → "Can't reply to" — is **step 0**, above
+both; see _"Can't reply to a sender"_. It is the answer to a question the address and the
+writing cannot settle, and it is typed rather than picked from a thread, so it can name a sender
+before their mail exists.
 
 **Built:** `decision.ts` is now the three-stage pipeline (`RuleClassifier` → `DecisionModel`
 → `TopicGenerator`), with `HeuristicRuleClassifier`, `PlaceholderDecisionModel` and
@@ -385,11 +412,13 @@ Jev skips it rather than spending a call.
 layer**. A keyless install is behaviourally identical to before; `intent` and `goal` are
 never written by any stage (`applyDecision` no longer touches `intent`).
 
-A confident rule is never overridden: the classifier reports `null` for its "no strong
-signal" (`informational`) bucket, and that is the only case where the decision model may
-choose the state. One gap still open: `merge.rebuildConversation` re-derives multi-source
-clusters with `deriveState` directly, so a merged thread will not pick up a model's
-importance/urgency until that path runs the pipeline too.
+Where the answer is readable off the message flow the rules keep it: `waiting-for-reply` and
+`low-priority` are never talked out of by the model. Everything else goes to it — a rule that
+abstained (`informational` is reported as `null`), and a rule that claimed `needs-action`,
+which is the claim most worth a second opinion because a false positive is filed as work. A
+`null` verdict means "no opinion" and the rule stands. `merge.rebuildConversation` is the one
+place the pipeline is not re-run: a merged thread reuses the stored decision of the row
+holding the union's newest message, and re-reads only the message-flow facts.
 
 **"You" stays the whole connected set** (see "Multiple accounts"). A thread between two of
 the user's own addresses therefore still reads from the set, so a message from the other
@@ -410,17 +439,23 @@ local-first and single-user — the credentials belong with the data.
   which model — and a stored key is shown as `••••••••`. A blank key field means "leave it as
   it is"; an explicit checkbox clears it. Only `getAiPipelineConfig()` decrypts, and only on
   the server while a client is being built.
-- **Server-only, verified.** `grep` over `dist/client/assets` finds no `app_settings`, no
-  `TOKEN_ENCRYPTION_KEY`, no `drizzle-orm` and no `api.typesafe.ai` — the AI clients stay on
-  the server, the same rule `googleapis` follows.
+- **Server-only, verified — with one caveat worth knowing.** `grep` over `dist/client/assets`
+  finds no `TOKEN_ENCRYPTION_KEY`, no `api.typesafe.ai` and no request body, so no key, no prompt
+  and no call can reach the browser. What it *does* find is the schema module's own metadata:
+  `app_settings` and its column names are in `settings-*.js`, because a route imports
+  `CONVERSATION_STATES` / the settings accessors and `db/schema.ts` is one module, so every table
+  definition travels with it. That is column names, not credentials or queries — but the claim
+  "no `app_settings` in the client bundle" is not what a grep shows. `googleapis` matches only
+  `styles-*.css`, which is the `fonts.googleapis.com` import, not a leak.
 
 | Module        | Role                                                                                         |
 | ------------- | -------------------------------------------------------------------------------------------- |
 | `http.ts`     | shared JSON POST: exponential backoff + jitter, honours `Retry-After`, retries 429/5xx/529    |
 | `jev.ts`      | `JevDecisionModel` — the `DecisionModel` seam                                                |
-| `llm.ts`      | `LlmTopicGenerator` — the `TopicGenerator` seam, Anthropic / OpenAI / Gemini                  |
+| `llm.ts`      | `LlmTopicGenerator` — the `TopicGenerator` seam — plus `completeLlm`, the shared transport    |
+| `draft.ts`    | `LlmReplyDrafter` — the `ReplyDrafter` seam, on demand and never part of a sync              |
 | `settings.ts` | persistence for `app_settings`, encryption at the boundary                                    |
-| `index.ts`    | `pipelineFromConfig` (pure) and `loadDecisionPipeline` (reads settings, never throws)         |
+| `index.ts`    | `pipelineFromConfig` / `loadDecisionPipeline` and `loadReplyDrafter` (both never throw)       |
 
 **Jev's wire shape** (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`
 with `{ state, model, questions }`, where each question is a typed `noul` (yes/no),
@@ -434,10 +469,109 @@ Two consequences shaped the client:
   is already certain.
 
 **The LLM providers differ only in transport.** Anthropic (`x-api-key`), OpenAI (bearer), and
-Gemini (`x-goog-api-key`, model in the path) each have one `complete` function; the prompt and
-the sanitiser are shared. The sanitiser matters more than it sounds: models wrap a short label
+Gemini (`x-goog-api-key`, model in the path) each have one `complete` function, behind
+`completeLlm` so the reply drafter reuses it rather than reimplementing three request shapes;
+the prompt and the sanitiser are shared, and the *budget* stays with the caller — a label and a
+reply want very different ones, and on OpenAI it has to cover hidden reasoning too. The sanitiser
+matters more than it sounds: models wrap a short label
 in quotes, a markdown fence, or a trailing period, and a chatty one adds a whole sentence —
 all of that is stripped, and an empty result becomes `null` rather than an empty topic.
+
+## Suggested replies are drafts, not sends
+
+The spec's Reply Assistance, and the second half of the generation layer. A thread that asks for
+an answer can have one drafted for the user to edit and send; nothing is ever generated for mail
+that does not ask, and nothing generated is ever sent by the app.
+
+Three properties shape the whole design:
+
+- **The gate is one function, on both sides.** `replyDraftEligibility` in
+  `conversation/draft.ts` is pure and answers one question with one sentence explaining itself.
+  `loadConversation` uses it to decide whether to render the control — and, when a model *is*
+  configured, to show *why not* — and `draftReply` re-runs it from the stored row before any API
+  call. A button from a page rendered before the mail arrived cannot spend a call on a thread that
+  no longer qualifies. The spec's four conditions are there (a reply is required, importance
+  clears a threshold, the thread is actionable, a draft would help); so are the two the spec does
+  not name and the app learned: nobody to reach (`replyable === false`) and the user spoke last
+  (`awaitingReply`).
+- **The drafter is a seam, and keyless means no call.** `ReplyDrafter` sits beside
+  `TopicGenerator`, with `NoReplyDrafter` as the default and `replyDrafterFromConfig` returning
+  null rather than a stub that fails. `loadReplyDrafter` reads the settings row once and never
+  throws, so a broken settings read costs drafts and not the conversation being opened.
+- **Nothing is persisted.** A draft is text in the composer. No column, no decision row, and no
+  `router.invalidate()` — the only way it reaches the world is the existing Send, which is the
+  point of "drafts for review".
+
+### The threshold is a setting, not a constant
+
+`app_settings.suggest_reply_min_importance` (migration `0011`), default 6, edited in Settings
+under the LLM section. It is the same 1–10 the decision layer scores importance on, and
+`normaliseMinImportance` clamps anything out of range on both read and write: 0 would make every
+thread eligible and 99 none, and neither is a value the row should be able to hold. It travels on
+the `ConversationDetail` payload as `suggestReply.minImportance` so the sentence the view shows
+("Importance 4/10 — drafts start at 8") names the number it was actually compared against.
+
+### The prompt is the whole conversation state
+
+`buildReplyDraftPrompt` carries what the spec lists: the thread (newest last, capped at 8
+messages and 1,200 characters each, so the newest — the one being answered — always survives),
+the current topic, the user's goal, who the reply is going to, and any instruction the user typed
+for this draft alone. It also carries the one thing the spec does not mention and the app has:
+**the greeting and signature the send path is about to add**, which the model is told not to
+write.
+
+### The sanitiser reuses the parser
+
+`sanitizeDraft` unwraps fences, quotes and a `Draft:` label, and strips a greeting or signature
+the model wrote anyway — using `stripGreeting` / `stripSignature`, the *same* functions that clean
+incoming mail. That is deliberately conditional, not unconditional: `composeReply` adds the
+user's own pair, so a model-written one would be the second of each in the delivered mail, but
+when the send path will add neither, a draft with no salutation is worse than one that repeats
+itself. Hence the request carries the resolved pair, and `resolveReplyStyle` — the same function
+the send path now uses — is what decides it.
+
+### Budgets differ by provider, and Gemini is left uncapped
+
+A draft gets 1,024 tokens, or 8,192 on an OpenAI reasoning model, since its budget also pays for
+hidden thinking (the same reason the topic path sends 4,096 for a label). Gemini is the exception:
+Gemini 2.5 counts thinking against `maxOutputTokens`, so capping it with a reply-sized budget
+would spend it before writing anything. The prompt asks for something short and the sanitiser
+enforces a 4,000-character ceiling, which is the cheaper guard there.
+
+### In the UI
+
+A control in the composer, and a panel once a draft exists. `Draft a reply` generates one;
+`Edit` opens it for changes in place; `Use draft` puts the current text into the composer, which
+refocuses; `Discard` closes the panel. **Neither action sends** — the composer's Send is still
+the only thing that sends, and the draft is in the box to be reviewed before it is.
+
+The instruction field appears *after* the first draft on purpose: asking for one should be a
+single click, and "make it shorter" is something you only know once you have read what it wrote.
+On an install with no LLM key the control is absent entirely; with a model configured but a
+thread that does not qualify, the one-line reason is shown instead, which is what stops a missing
+button from looking like a bug.
+
+### The browser may only import the pure modules
+
+`settings.tsx` takes the two importance limits from `conversation/draft.ts`, not from the
+conversation barrel. The barrel also re-exports the repository and the decision pipeline, and the
+pipeline imports the AI log, so a component that imported it pulled `node:fs/promises` into the
+browser graph — Vite externalises that module and the first `appendFile` access throws. Server
+functions are unaffected: the plugin strips their bodies and the imports only they use, which is
+why every server-only module can still be imported at the top of a route file. Development does
+not tree-shake, though, so anything a *component* names is loaded as written. The rule that
+follows: if the JSX uses it, it must come from a pure module (`draft.ts`, `model.ts`,
+`conversation-state.ts`); everything else belongs inside a handler.
+
+### Verified, and what is not
+
+Four service-level tests assert the gate **by its own sentence**: with a key stored, an
+ineligible thread returns the gate's wording, and a call would have failed at the provider with a
+different message — so the message is the proof no API call was made. The seam has 15 tests
+(gating order, prompt contents, sanitiser edge cases), the drafter 8 against a fake fetch (each
+provider's request shape, and the budget each model gets), and `resolveReplyStyle` 4.
+What is *not* covered: the panel itself has no DOM harness, so its behaviour rests on typecheck
+and on the server functions it calls.
 
 ## Auth
 
@@ -626,8 +760,8 @@ is that missing seam: account id in, list of conversations out.
 | ---------------------- | ----------------------------------------------------------------------------------------------- |
 | `service.ts`           | `loadInbox()` — builds the client, applies the freshness policy, returns a serializable payload |
 | `freshness.ts`         | `isCursorStale()` — the policy, dependency-free so it can be tested on its own                  |
-| `routes/index.tsx`     | `createServerFn` loader + the two-minute revalidation timer                                     |
-| `components/inbox.tsx` | The list, grouped by state                                                                      |
+| `routes/index.tsx`     | `createServerFn` loader + the revalidation timer (two minutes idle, three seconds while syncing) |
+| `components/inbox.tsx` | The list, grouped by state, and the sync-progress banner                                        |
 
 ### Sync is not an action
 
@@ -645,6 +779,37 @@ how often to refresh.
   still worth showing, and a transient 503 should not blank the inbox.
 - **Concurrent syncs are deduplicated per account, not locked.** A slow first backfill
   overlaps the next poll; the second caller waits for and reuses the first one's result.
+
+### A first sync is not something to wait for
+
+Adding a mailbox used to look like a hang. The OAuth callback redirects to `/`, the loader
+called `loadInbox`, and `loadInbox` **awaited** the sync — so the page did not render until a
+30-day backfill, plus a decision (and possibly an LLM topic call) per thread, was finished.
+Minutes of a blank screen, and nothing to say whether it was working.
+
+A first sync is now started in the background and the request returns immediately with
+progress instead of a result:
+
+- **Never-synced is the trigger, not `full`.** The long run is the initial backfill; an
+  incremental sync is a handful of threads and staying in line for it is correct. A
+  deliberate Re-sync still awaits, so its button can report the outcome.
+- **Progress is published, not guessed.** `runSync` keeps a `syncProgress` map — mode,
+  threads processed, and the total — updated from `onProgress`. The total only exists after
+  `threads.list` finishes paging, so the sync emits a `listed` event for it rather than
+  pretending `start` knew.
+- **The banner is fed by the payload, the polling by the sync.** `loadInbox` reports the
+  in-flight runs as `syncing`, and the route drops its poll from two minutes to three
+  seconds while any of them is running — which is also what makes mail appear in the list
+  as it lands, since the backfill writes each thread as it goes.
+- **A fire-and-forget run has no `await` to report a failure on.** So the outcome is kept in
+  a `lastOutcome` map after the run ends, and the next load reports it. It deliberately
+  does **not** restart on that next load: a retry that began immediately would overwrite
+  the error before it was ever rendered, which is the silent hang all over again. The
+  existing **Re-sync** button is the retry, and the existing reconnect banner still covers
+  a revoked grant.
+
+Both maps are process-local, like `inFlight`. The app is local-first and single-user, so
+"the sync this install is running" and "the sync this process is running" are the same.
 
 ### `history_cursors` was dead schema, and it is now the staleness clock
 
@@ -715,7 +880,24 @@ thread.
 
 **Reconnect and staleness are per account.** One revoked mailbox must not blank the merged
 list: `loadInbox`'s `authRequired` becomes a per-account list so the banner can name the
-mailbox that needs it, and `lastSyncedAt` is per account too.### How it is built
+mailbox that needs it, and `lastSyncedAt` is per account too.
+
+**Deleting a mailbox is per account; signing out is per install.** The session cookie is
+the only place that still names one account — everything else resolves its own — so
+`forgetAccountAction` clears it **only when that was the last mailbox**. It used to clear it
+whenever the deleted row was the session's own, which stranded an install that still had
+mail on the "connect a mailbox" screen and made the user re-authorise an account they never
+lost. With one still connected the session is simply re-pointed at it.
+
+The same delete also has to survive the flip it performs. `settings.tsx`'s signed-out branch
+used to sit above the form's twenty-odd `useState` calls in one component; invalidating the
+loader flipped `signedIn` to false **in place**, so the next render called fewer hooks than
+the previous one and React refused it ("Rendered fewer hooks than expected"). The branch is
+now its own component, the way `Inbox` was already written for exactly this reason. Both
+failure modes were reported together — an error, then a connect prompt with a live mailbox
+behind it — and they are two halves of one event: the clear, then the re-render.
+
+### How it is built
 
 `src/lib/conversation/merge.ts` is the whole of it, and it is pure — no database, so the
 rules are testable on their own.
@@ -888,6 +1070,65 @@ from the messages every time.
 still counts there; it just renders as a compact non-interactive card tagged "no reply".
 Same feed, same grouping, different presentation.
 
+### Can't reply to a sender
+
+The markers only catch senders that say so in their address, and Jev can only read what the
+writing shows. A company writing from an ordinary address (`updates@`, `account@`) with mail
+there is nothing to answer — a view-only notice, an invoice, a statement — is invisible to
+both, and the user is the only one who knows.
+
+So replyability has a third owner, above the other two: `sender_profiles.replyable`, per
+mailbox and per sender address, managed in **Settings → "Can't reply to"** and nowhere else —
+the address is typed into a form there, with the mailbox picked when more than one is
+connected, and each entry has an **Allow replies** button to take it back. It is
+stored rather than inferred, for the same reason `state_override` is: a sync rebuilds a thread
+from Gmail and knows nothing about what the user said, so the answer has to live somewhere the
+decision path reads. `decideAndSave` reads it per sender, `HeuristicRuleClassifier` reports it
+as a fact, Jev is **not** asked the replyability question for a marked sender, and
+`isAutomatedThread` stays the authority on machine mail — taking a mark back can never hand a
+composer to a `noreply@` address.
+
+Five deliberate choices:
+
+- **One list, with two ways in.** The list is still the thing the user curates, and still the
+  only place the mark is *managed* — each entry has **Allow replies** to take it back. What it
+  is no longer is the only place one can be *added*. Marking a sender used to mean recognising
+  them in a thread and then finding the address again somewhere else to type it, so there are
+  now two shortcuts and one exit: a **Can't reply** button on the thread, which resolves the
+  mailbox and the address from the mail on screen, and a one-click list of the addresses the
+  mailbox has actually received from, above the form. Undo deliberately stays in Settings alone,
+  so the thread gains a second way to make the mark without becoming a second place it is
+  edited. `applySenderReplyabilityToSender` is still the single write every direction goes
+  through, so an entry made from a thread and one made from the form cannot diverge — and the
+  free-text form stays for what neither shortcut can do: naming a sender **before** any mail
+  from them has arrived.
+- **The picker offers only senders whose threads still show a reply box.** One filter doing
+  three jobs — a sender already marked drops out (the sweep set all of their threads to
+  `replyable = false`), a machine sender drops out (they are already unanswerable without anyone
+  being asked, so a mark would change nothing), and marking one in the list makes it vanish from
+  the list on the reload that confirms it. The user's own addresses are excluded separately,
+  because a thread between two of their mailboxes has a non-owner side that is still theirs.
+- **The mark covers the sender, not the thread.** That is what the user is answering: this
+  company's mail is one-way, not just this one message. Every future thread from them inherits
+  it, and `setReplyableForSender` sweeps the threads already stored at the moment of the entry,
+  because the decision layer only runs on mail Gmail reports as changed.
+- **Only the composer is hidden.** The state is left exactly where the decision layer put it.
+  The user is saying they cannot answer this sender, not that the mail does not matter, so the
+  thread stays listed where they found it — unlike machine mail, which also ranks low.
+- **A merge carries the verdict.** `isAutomated` on the row is what tells a *decision* (the
+  user's mark, or Jev's reading) apart from the *marker*: a decision is reused rather than
+  re-derived, while machine mail is recomputed from the union so a thread a human finally
+  answers becomes replyable again.
+
+Known limits, on purpose: the mark is per **address**, so a company mailing from two addresses
+(`updates@` and `invitations@`) takes two entries; the address is checked for shape only
+(`isSenderAddress` in `model.ts`), so a typo is stored and simply never matches; and nothing
+reads the message body, so a
+signature saying "this address is not monitored" is not detected — a strict phrase list would
+have to reach bodies into `isAutomatedThread`, which risks false positives on quoted text.
+Replyability is also not persisted as a *state*, so a marked thread still counts in
+`needs-action` when the decision layer put it there.
+
 ### Adding a derived column needs a version bump
 
 Caught the hard way: `is_automated` shipped, the migration set every existing row to `false`,
@@ -909,6 +1150,12 @@ load and a local pass once per version bump.
 
 **Bump `DERIVED_VERSION` whenever a derived column is added to `conversations`, or the
 parser changes.** Otherwise the same silent-staleness bug returns.
+
+User-owned columns are the exception: `seen_at`, `done_at` and the can't-reply mark are not
+recomputed by the backfill at all — it writes only `is_automated` and `replyable` — so there is
+nothing to recompute and nothing to bump. What they need instead is the opposite guarantee:
+every path that rebuilds a thread must *carry* them (`getStoredUserFields`), or a sync silently
+resets an answer the user gave.
 
 ## The conversation view
 
@@ -1085,6 +1332,46 @@ send a reply and watch it not appear until some later sync happened to cover it.
 Automated threads render a read-only notice instead of a composer, and `sendReply` refuses
 server-side too — a stale UI cannot send into a void.
 
+### Read is not doing
+
+Open threads and finished threads used to look alike, and the difference that matters is not
+"have I looked at this" but "have I dealt with this". They are now two separate stored answers,
+and keeping them separate is the whole point:
+
+| Mark | Column | Set by | Shows as |
+|---|---|---|---|
+| Read | `conversations.seen_at` | opening the thread | unread dot in the inbox, "New messages" divider in the thread |
+| Done | `conversations.done_at` + `done_message_at` | the **Mark done** button, and nothing else | a Done tag, a line on the thread saying what it means, and a move to the **Done** section at the bottom of the inbox, with **Reopen** to take it back |
+
+- **Viewing never marks a thread done.** That is the failure the mark exists to prevent: a
+  thread that files itself away when it is opened is one nobody comes back to reply to. Neither
+  does a sync, a re-decide, or the send path — only the user says "done".
+- **Read is a high-water mark, not a flag per message.** `saveConversation` replaces a thread's
+  messages wholesale on every sync, so a column on `messages` would be wiped by the next sync of
+  that thread and the user's reading would silently come undone. The mark is also forward-only:
+  the view reports the instant it had on screen, so mail that synced in after the page rendered
+  is not marked read by it.
+- **Done changes where a thread is *listed*, not what it *is*.** The state column is never
+  rewritten — "handled" is not a claim about what the mail needs — but `partitionByState` counts
+  a done thread outside the state groups, so it stops appearing under "Needs action" and sits in
+  its own section. That split is the point: the headings above it are what still wants
+  attention, and a finished thread listed among them was the confusion the marks exist to fix.
+  The tag inside the Done section shows the state it had, faintly, so nothing is hidden.
+- **The words live in one place.** `READ_META`, `DONE_META` and `DONE_GROUP` in
+  `conversation-state.ts`, next to `STATE_META`: one is a fact the app noticed (you have not
+  opened it) and the other is a decision the user made (you have dealt with it), which is a
+  distinction nobody should have to infer from a dot and a tag. The inbox header carries the
+  one-line legend.
+- **Newer mail voids it**, using `activeDone` and the same rule as `activeStateOverride`: the
+  mark was a judgement about the messages that existed then, and a thread that receives a reply
+  comes back on its own.
+- **A rebuild has to carry both.** Gmail knows nothing about either, so `decideAndSave` and
+  `refreshThread` read them back with `getStoredUserFields` before saving — one read for all
+  three user-owned fields (`state_override`, `seen_at`, `done_at`), because reading one and
+  dropping another is exactly the bug that shape invites. A merge carries Done (voided against
+  the union's newest message) and *unions* Read, since reading a thread in either mailbox means
+  the user has read the mail.
+
 ## Tests must never touch the real database
 
 **This went wrong and it cost a real synced mailbox.** Worth reading before adding a test.
@@ -1142,6 +1429,10 @@ once at module load.** The guard is the backstop, not the mechanism.
   missing — `bun run db:migrate` recreates it. Do not `rm -rf data` casually.
 - Never write two rows from concurrent requests without `withWriteLock`. See the Gmail sync
   section for why `busy_timeout` alone does not save you.
+- **A new `app_settings` column needs its migration applied before the dev server restarts.**
+  The settings row is read with `findFirst`, which selects every declared column, so the app does
+  not fail on a *missing* table — it fails on a column that exists in the schema and not in the
+  file. `bun run db:generate && bun run db:migrate` is the whole fix.
 - Bump `DERIVED_VERSION` when adding a derived column to `conversations` or changing the
   parser. Incremental sync will not revisit unchanged threads, so without it the new column
   stays at its migration default forever and nothing reports a problem.

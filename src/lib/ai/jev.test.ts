@@ -18,6 +18,7 @@ const RULES_ABSTAINED: RuleFacts = {
   awaitingReply: false,
   requiresReply: false,
   isAutomated: false,
+  senderUnreplyable: false,
   placeholderImportance: 5,
   placeholderUrgency: 5,
   reasoning: 'Last message was informational.',
@@ -102,6 +103,32 @@ describe('JevDecisionModel', () => {
     expect(verdict.replyable).toBeNull()
   })
 
+  test('skips the replyability question for a sender the user marked', async () => {
+    // The user's own answer about the sender is not a hint to be weighed against
+    // the model's; it is the answer, so the question is never asked.
+    let askedReplyable = true
+    const fetchImpl: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as {
+        questions: Record<string, unknown>
+      }
+      askedReplyable = 'replyable' in body.questions
+      return json(200, { answers: {} })
+    }
+
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
+    const verdict = await model.decide(INPUT, {
+      ...RULES_ABSTAINED,
+      senderUnreplyable: true,
+    })
+
+    expect(askedReplyable).toBe(false)
+    expect(verdict.replyable).toBeNull()
+  })
+
   test('treats the no-reply choice as not replyable', async () => {
     const fetchImpl: FetchLike = async () =>
       json(200, {
@@ -112,6 +139,56 @@ describe('JevDecisionModel', () => {
     const verdict = await model.decide(INPUT, RULES_ABSTAINED)
 
     expect(verdict.replyable).toBe(false)
+  })
+
+  test('asks about state when the rules claimed needs-action, and takes the answer', async () => {
+    let askedState = false
+    const fetchImpl: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as {
+        questions: Record<string, unknown>
+      }
+      askedState = 'state' in body.questions
+      return json(200, {
+        answers: {
+          importance: { type: 'score', score: 3 },
+          urgency: { type: 'score', score: 2 },
+          state: { type: 'choice', choice: 'informational' },
+        },
+      })
+    }
+
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
+    const verdict = await model.decide(INPUT, {
+      ...RULES_ABSTAINED,
+      state: 'needs-action',
+      requiresReply: true,
+    })
+
+    // A rule claiming action is the claim most worth a second opinion...
+    expect(askedState).toBe(true)
+    // ...and the answer is what lets `foldState` drop it.
+    expect(verdict.state).toBe('informational')
+  })
+
+  test('keeps the rule when the model does not answer the state question', async () => {
+    const fetchImpl: FetchLike = async () => json(200, { answers: {} })
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
+    const verdict = await model.decide(INPUT, {
+      ...RULES_ABSTAINED,
+      state: 'needs-action',
+      requiresReply: true,
+    })
+
+    // `null` is "no opinion", so the fold keeps the rule's `needs-action`.
+    expect(verdict.state).toBeNull()
   })
 
   test('does not ask for state when the rules decided, and keeps the placeholders on a sparse reply', async () => {

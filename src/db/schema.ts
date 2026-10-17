@@ -147,6 +147,61 @@ export const conversations = sqliteTable(
       .notNull()
       .default(false),
     /**
+     * The user's own call on the state, or null when they have made none.
+     *
+     * The one derived-looking column a decision layer is not allowed to write.
+     * The user saying "this is not important" has to outlive every re-decide and
+     * every later sync — incremental sync only revisits threads Gmail reports as
+     * changed, so a call that is not stored is a call that gets computed away.
+     */
+    stateOverride: text('state_override').$type<ConversationState>(),
+    /**
+     * The thread's last activity when the call was made.
+     *
+     * The call was a judgement about the messages that existed then, so a newer
+     * message voids it — the thread comes back for a fresh look rather than
+     * staying filed away forever.
+     */
+    stateOverrideMessageAt: integer('state_override_message_at', {
+      mode: 'timestamp_ms',
+    }),
+
+    /**
+     * The sent time of the newest message the user has seen in this thread.
+     *
+     * The per-message "viewed" state, stored as one high-water mark rather than a
+     * flag per message: `saveConversation` replaces a thread's messages wholesale
+     * on every sync, so a column on `messages` would be wiped by the next sync of
+     * that thread and the user's reading would silently come undone. Any message
+     * older than this mark is one they have seen; anything newer is unread.
+     *
+     * Viewing is deliberately *not* the same as done: this is set by opening a
+     * thread, and it never moves the thread's state or its Done mark, so reading
+     * mail can never be mistaken for having dealt with it.
+     */
+    seenAt: integer('seen_at', { mode: 'timestamp_ms' }),
+
+    /**
+     * The user's own "done" mark: when they said this thread was handled, and the
+     * thread's last activity at that moment.
+     *
+     * Only the user sets it — not a sync, not the decision layer, and not opening
+     * the thread (that is `seen_at`). That is the point: a thread stays visibly
+     * open until something was actually done about it, which is what stops a
+     * read-but-unanswered thread from disappearing into the rest.
+     */
+    doneAt: integer('done_at', { mode: 'timestamp_ms' }),
+    /**
+     * The thread's `lastMessageAt` when the mark was made.
+     *
+     * The mark was a judgement about the mail that existed then, so newer mail
+     * voids it — the same rule as `stateOverrideMessageAt`, and for the same
+     * reason: a Done thread that receives a reply has to come back rather than
+     * stay filed away forever.
+     */
+    doneMessageAt: integer('done_message_at', { mode: 'timestamp_ms' }),
+
+    /**
      * Whether this conversation can be replied to at all.
      *
      * Two steps. The deterministic machine-mail marker settles it first — an
@@ -316,7 +371,43 @@ export type Participant = {
   email: string
 }
 
-/** Gmail history.list gives us deltas; this records where each account's cursor is. */
+/**
+ * What the user has taught the app about one sender.
+ *
+ * Kept apart from `sender_profiles` on purpose: that table holds preferences
+ * the user set (how to parse this sender's mail, how to sign a reply), while
+ * this is an inference drawn from what they *did* — they filed a thread from
+ * this sender away, or brought one back.
+ *
+ * Two timestamps rather than a counter, because the most recent thing the user
+ * did is the signal that matters: ignoring again re-arms the learning, and a
+ * restore switches it off until they file something away again. A counter would
+ * make "bring one back" a no-op for a sender filed away more than once.
+ */
+export const senderSignals = sqliteTable(
+  'sender_signals',
+  {
+    id: text('id').primaryKey(),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    senderEmail: text('sender_email').notNull(),
+    /** Last time the user filed a thread from this sender away. */
+    ignoredAt: integer('ignored_at', { mode: 'timestamp_ms' }),
+    /** Last time the user brought one back and told the app to stop assuming. */
+    restoredAt: integer('restored_at', { mode: 'timestamp_ms' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('sender_signals_account_email_idx').on(
+      table.accountId,
+      table.senderEmail,
+    ),
+  ],
+)
+
 /** Per-sender parsing and reply-style preferences owned by an account. */
 export const senderProfiles = sqliteTable(
   'sender_profiles',
@@ -346,6 +437,24 @@ export const senderProfiles = sqliteTable(
       .default(false),
     replyGreeting: text('reply_greeting'),
     replySignature: text('reply_signature'),
+
+    /**
+     * Whether a reply can reach this sender at all — the user's own answer.
+     *
+     * The machine-mail marker and Jev both miss the case this exists for: a
+     * company writing from an ordinary address (`updates@`, `account@`) whose
+     * mail is view-only, so there is nothing to answer. The user is the only one
+     * who can know that, so the flag lives here among the other per-sender
+     * preferences they set — and, like `topic` and `goal`, it outranks both: a
+     * marked sender's threads are never handed to Jev's replyability question.
+     *
+     * True by default, so a row saved for parsing or reply style alone changes
+     * nothing about replyability. False hides the composer and shows the "No
+     * reply" tag on every thread from the address; it deliberately leaves `state`
+     * alone — the user is saying they cannot answer, not that it does not matter.
+     */
+    replyable: integer('replyable', { mode: 'boolean' }).notNull().default(true),
+
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -394,6 +503,20 @@ export const appSettings = sqliteTable('app_settings', {
   llmModel: text('llm_model'),
   /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
   llmApiKeyEncrypted: text('llm_api_key_encrypted'),
+  /**
+   * How important a conversation has to be before a draft is offered (1–10).
+   *
+   * The spec's "importance exceeds a configured threshold", and the reason it is
+   * stored rather than hard-coded: a draft costs a paid API call per thread, and
+   * what is worth one is the user's call. Compared against the same 1–10 the
+   * decision layer scores, so the number on this row and the number on the
+   * conversation are the same unit. Default mirrors
+   * `REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT` (written out rather than imported, so
+   * the schema keeps no dependency on the conversation layer).
+   */
+  suggestReplyMinImportance: integer('suggest_reply_min_importance')
+    .notNull()
+    .default(6),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
     .notNull()
     .default(sql`(unixepoch() * 1000)`),
@@ -405,4 +528,5 @@ export type Conversation = typeof conversations.$inferSelect
 export type Message = typeof messages.$inferSelect
 export type Attachment = typeof attachments.$inferSelect
 export type SenderProfile = typeof senderProfiles.$inferSelect
+export type SenderSignal = typeof senderSignals.$inferSelect
 export type Decision = typeof decisions.$inferSelect

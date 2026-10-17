@@ -57,6 +57,34 @@
       "when": 1791481163067,
       "tag": "0007_redundant_thunderball",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1792074025716,
+      "tag": "0008_sturdy_luckman",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1792077379338,
+      "tag": "0009_neat_adam_destine",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792189388439,
+      "tag": "0010_sturdy_luminals",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1792195900435,
+      "tag": "0011_neat_wind_dancer",
+      "breakpoints": true
     }
   ]
 }

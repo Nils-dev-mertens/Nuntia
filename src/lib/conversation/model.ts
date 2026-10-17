@@ -16,6 +16,7 @@ import {
   sanitizeEmailHtml,
   selectAttachments,
   selectBodyPart,
+  stripCidPlaceholders,
   stripGreeting,
   stripHtmlGreeting,
   stripHtmlSignature,
@@ -84,6 +85,171 @@ export type ConversationAttachment = {
   contentId: string | null
 }
 
+/**
+ * The user's own call on what a thread is worth, and the activity it was made
+ * against.
+ *
+ * `messageAt` is the point of the call rather than a copy of the thread: the
+ * user judged the messages that existed when they clicked, so a later message
+ * voids it. Storing the timestamp (rather than a flag) is what lets a thread
+ * they filed away come back on its own when someone writes again.
+ */
+export type StateOverride = {
+  state: ConversationState
+  messageAt: Date
+}
+
+/**
+ * The user's live call on a conversation, or null when there is none.
+ *
+ * A call the thread has outrun counts as none: "not important" was said about
+ * the mail that existed at the time, and whatever arrived afterwards has not
+ * been judged. Kept here, in the pure model, because the merge, the decision
+ * fold and the inbox all have to answer this question the same way.
+ */
+export function activeStateOverride(
+  conversation: Pick<Conversation, 'stateOverride' | 'lastMessageAt'>,
+): ConversationState | null {
+  const override = conversation.stateOverride
+  if (!override) return null
+
+  return conversation.lastMessageAt.getTime() <= override.messageAt.getTime()
+    ? override.state
+    : null
+}
+
+/**
+ * When the user marked this thread done, or null when it is not (or no longer)
+ * done.
+ *
+ * Returns a time rather than a boolean so the caller can say *when* it was
+ * handled. A mark the thread has outrun counts as none: the user said "done"
+ * about the mail that existed then, and anything that arrived afterwards is new
+ * work — which is exactly the promise the mark makes ("you will not lose a thread
+ * you still have to answer").
+ *
+ * Kept in the pure model, like `activeStateOverride`, because three places ask
+ * it — the row, the merged cluster and the inbox list — and they have to answer
+ * the same way.
+ */
+export function activeDone(
+  conversation: Pick<Conversation, 'done' | 'lastMessageAt'>,
+): Date | null {
+  const done = conversation.done
+  if (!done) return null
+
+  return conversation.lastMessageAt.getTime() <= done.messageAt.getTime()
+    ? done.doneAt
+    : null
+}
+
+/**
+ * Messages the user has not seen yet — the ones that make a thread look new.
+ *
+ * Only incoming mail counts. The user's own reply is not news to them, and a
+ * thread whose newest message is theirs should not go back to looking unread the
+ * moment they send it.
+ */
+export function unseenMessages(
+  conversation: Pick<Conversation, 'messages' | 'seenAt'>,
+): ConversationMessage[] {
+  const seen = conversation.seenAt?.getTime() ?? 0
+  return conversation.messages.filter(
+    (message) => !message.isFromOwner && message.sentAt.getTime() > seen,
+  )
+}
+
+/**
+ * The address on the other side of a thread — its newest message not written by
+ * the user.
+ *
+ * Empty when the user has only ever written in it. That is the right answer for a
+ * lookup by address: they have never filed *themselves* away, and a preference
+ * stored against their own address means nothing.
+ *
+ * Kept here, as one definition, because three places ask this question: the
+ * decision path looking up what the user taught the app about a sender, the sweep
+ * that applies a new mark to already-stored threads, and the conversation view
+ * resolving which sender's preferences to show. `isFromOwner` decides it rather
+ * than a comparison against one address — an install can have several connected
+ * mailboxes, and a message any of them sent is still the user's.
+ *
+ * Typed structurally so a caller holding only message rows (the sweep, which
+ * reads `from`/`isFromOwner`/`sentAt` and nothing else) can use it without
+ * building whole conversations first.
+ */
+export function otherPartyOf(conversation: {
+  messages: ReadonlyArray<{
+    from: { email: string }
+    isFromOwner: boolean
+  }>
+}): string {
+  const incoming = [...conversation.messages]
+    .reverse()
+    .find((message) => !message.isFromOwner)
+
+  return incoming?.from.email.trim().toLowerCase() ?? ''
+}
+
+/** The greeting and signature a reply goes out with. */
+export type ReplyStyle = {
+  greeting: string | null
+  signature: string | null
+}
+
+/**
+ * Which greeting and signature a reply is composed with.
+ *
+ * Three sources, in order of authority: a sender-specific pair the user enabled,
+ * the account-wide pair, and — the fallback that matters — the user's *own* most
+ * recent message in the thread. The last one is what makes a reply look like the
+ * user wrote it rather than like the app guessed: whatever they actually signed
+ * with here beats anything stored.
+ *
+ * One definition because two callers now need the same answer: the send path
+ * (which puts these on the message) and the draft path (which tells the model not
+ * to write its own, because one is arriving anyway). Divergence between them is
+ * the duplicate-greeting bug, so they share this.
+ */
+export function resolveReplyStyle(input: {
+  /** Account-wide greeting/signature; null when the user set none. */
+  account: ReplyStyle
+  /** The sender's own pair, used only when it is switched on. */
+  sender?: {
+    enabled: boolean
+    greeting: string | null
+    signature: string | null
+  } | null
+  /** The user's own newest message in this thread, as the fallback. */
+  lastOwnerMessage?: {
+    greeting?: string | null
+    signature?: string | null
+    detectedGreeting?: string | null
+    detectedSignature?: string | null
+  } | null
+}): ReplyStyle {
+  if (input.sender?.enabled) {
+    return {
+      greeting: input.sender.greeting ?? null,
+      signature: input.sender.signature ?? null,
+    }
+  }
+
+  const last = input.lastOwnerMessage
+  return {
+    greeting:
+      input.account.greeting ??
+      last?.detectedGreeting ??
+      last?.greeting ??
+      null,
+    signature:
+      input.account.signature ??
+      last?.detectedSignature ??
+      last?.signature ??
+      null,
+  }
+}
+
 export type Conversation = {
   /** Derived, stable key. */
   id: string
@@ -123,7 +289,42 @@ export type Conversation = {
   topic: string | null
   /** User-owned. Never written by the model. */
   goal: string | null
+
+  /**
+   * The user's own call on the state, or null when they have made none.
+   *
+   * Like `topic` and `goal`, this is theirs rather than the decision layer's,
+   * and it outranks it: a re-decide may disagree with everything else on this
+   * object, but the thread stays where the user put it. See
+   * `activeStateOverride` for what makes a call current.
+   */
+  stateOverride: StateOverride | null
+
+  /**
+   * Sent time of the newest message the user has seen, or null when they have
+   * never opened the thread. Everything older than it is read; anything newer is
+   * new mail. See `unseenMessages`.
+   *
+   * Reading is not doing: this is set by opening a thread and never moves the
+   * state or the Done mark.
+   */
+  seenAt: Date | null
+
+  /**
+   * The user's own "done" mark, or null when they have made none. See
+   * `activeDone` for what makes a mark current.
+   */
+  done: DoneMark | null
 }
+
+/**
+ * The user saying a thread is handled, and the mail they said it about.
+ *
+ * The same shape as `StateOverride` on purpose: a mark is a judgement about the
+ * messages that existed at the time, so the thread's last activity at that moment
+ * is what decides whether it is still current.
+ */
+export type DoneMark = { doneAt: Date; messageAt: Date }
 
 /** Attachment metadata, when the source can supply it. */
 export type AttachmentRef = {
@@ -173,6 +374,30 @@ export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase()
 }
 
+/**
+ * Whether a typed address could be a sender the user cannot reply to.
+ *
+ * Shape only, deliberately: a mark is a *preference*, not a delivery, so this has
+ * to reject what could never be an address — `updates@`, `nope`, two addresses
+ * pasted at once, a whole header line — and nothing more. There is no "must have a
+ * dot" rule: local addresses exist, and one rule that rejected a real address
+ * would be worse than the entry that simply never matches. Whether mail actually
+ * arrives from an address is settled elsewhere, by the sweep over stored threads
+ * and by every decision that reads the stored row.
+ *
+ * Compared in its normalised form, so `Updates@Acme.Example` is judged as the
+ * address it will be stored as.
+ */
+export function isSenderAddress(input: string): boolean {
+  const address = normaliseEmail(input)
+  // 320 is the RFC's own ceiling on an address, so anything longer is not one.
+  if (!address || address.length > 320 || /\s/.test(address)) return false
+
+  const at = address.indexOf('@')
+  // Exactly one `@`, with something on each side of it.
+  return at >= 1 && at === address.lastIndexOf('@') && at < address.length - 1
+}
+
 /** Split "Name <a@b.c>" into a participant. */
 export function toParticipant(raw: string): Participant {
   const trimmed = raw.trim()
@@ -212,15 +437,20 @@ export function cleanMessage(
   // that strip reliably, and it is what `strip.ts` has always been tuned on, so
   // it stays authoritative even when an HTML alternative exists.
   if (text) {
-    const detectedQuote = stripQuotedText(text)
-    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+    // A signature logo arrives from the sender's client as the literal text
+    // `[cid:logo]` in the plain-text alternative. The signature is stored and
+    // handed back when replying, so leaving it in put a placeholder in the
+    // user's own reply.
+    const visible = stripCidPlaceholders(text)
+    const detectedQuote = stripQuotedText(visible)
+    const lines = visible.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
     const quoteStart = findQuoteStart(lines)
     // `stripQuotedText` deliberately keeps all-quote forwards intact. Only
     // split the message when stripping actually found a quote to remove.
     const hasRemovableQuote = quoteStart >= 0 && detectedQuote.quote !== null
     const userText = hasRemovableQuote
       ? lines.slice(0, quoteStart).join('\n').trim()
-      : text.trim()
+      : visible.trim()
     const retainedQuote =
       !shouldStripQuote && hasRemovableQuote
         ? lines.slice(quoteStart).join('\n').trim()
@@ -481,6 +711,15 @@ export function buildConversation(
 
     topic: null,
     goal: null,
+    // Set by whoever knows about the stored row — a freshly built conversation
+    // has no access to the user's calls, and assuming the call away here would
+    // let a sync overwrite one.
+    stateOverride: null,
+    // Same reason, and it covers reading as well as saying "done": a rebuild from
+    // Gmail knows nothing about either, and defaulting `seenAt` to now would make
+    // every rebuilt thread silently look read.
+    seenAt: null,
+    done: null,
   }
 }
 
@@ -551,6 +790,84 @@ function attachmentId(messageId: string, part: MailPart): string {
 }
 
 /**
+ * Lines that are about the mailing rather than written to the reader.
+ *
+ * Deliberately phrase-based rather than "contains a link": a real request can
+ * carry a URL, and the point is to recognise the furniture that every bulk mail
+ * ends with, not to guess at layout. Multi-lingual where the mailbox needs it,
+ * like the signature list in `strip.ts`.
+ */
+const BULK_FOOTER_PATTERNS = [
+  /\b(can'?t|cannot|unable to) see (this|the) (email|message)\b/i,
+  /\bview (this|the) (email|message) in\b/i,
+  /\bview (it|this) in (your )?(browser|web browser)\b/i,
+  /\bunsubscribe\b/i,
+  /\b(email|notification|communication) (preferences|settings)\b/i,
+  /\b(update|manage|change) (your )?(preferences|subscription|subscriptions|settings)\b/i,
+  /\bprivacy policy\b/i,
+  /\bterms (of service|and conditions)\b/i,
+  /\bcontact (us|support|your administrator)\b/i,
+  /\bhelp ?(centre|center)\b/i,
+  /\bsupport team\b/i,
+  /\b(any )?questions\?/i,
+  /\bquestions or concerns\b/i,
+  /\bdon'?t hesitate to\b/i,
+  /\bfeel free to (reach out|contact|ask)\b/i,
+]
+
+/** Is this one line the kind of thing bulk mail says about itself? */
+function isBulkFooterLine(line: string): boolean {
+  const text = line.trim()
+  if (!text) return false
+  return BULK_FOOTER_PATTERNS.some((pattern) => pattern.test(text))
+}
+
+/**
+ * The part of a message a request could plausibly be written in.
+ *
+ * A `?` anywhere in the body is not a request. "Can't see this email? View it in
+ * your browser." and "Questions? Please contact support." are the last lines of
+ * most bulk mail, and both used to file a newsletter under `needs-action`.
+ *
+ * The filter is unconditional, including when it leaves nothing — a message made
+ * only of furniture is bulk by definition, and re-admitting those lines to be
+ * safe would put every newsletter's "Do you have questions?" back in Needs
+ * action, which is the bug. The cost is a one-line mail phrased exactly like a
+ * footer; it stays listed and replyable, just not filed as work.
+ */
+function requestText(body: string): string {
+  return body
+    .split('\n')
+    .filter((line) => !isBulkFooterLine(line))
+    .join('\n')
+}
+
+/**
+ * Does the reader actually get asked for something?
+ *
+ * Still conservative, and deliberately not "contains a modal verb": `Please
+ * contact support` is a call to action, `Can't see this email` is a mail-client
+ * workaround, and `Do you have any questions` is an offer of help. What is left
+ * is a modal aimed at a person (`can you`, `could we`), or an explicit
+ * `please <verb>`. The question mark is still required — an ask without one is a
+ * statement, and the false-positive direction is the expensive one.
+ */
+const REQUEST_PATTERNS = [
+  // A modal with someone to act on, followed by the action: `can you send`,
+  // `could we move`. The verb is what separates an ask from a word search — and
+  // it is why `do you have questions` is not one.
+  /\b(can|could|would|will|should)\s+(you|we|i|someone|anyone|anybody)\s+\w+/,
+  /\b(any chance|would you mind|how about)\b/,
+  /\bplease\s+(send|confirm|review|reply|respond|check|update|sign|approve|share|provide|advise|call|book|schedule|cancel|pay|complete|fill|fix|let)\b/,
+]
+
+function asksForSomething(text: string): boolean {
+  if (!text.includes('?')) return false
+  const lower = text.toLowerCase()
+  return REQUEST_PATTERNS.some((pattern) => pattern.test(lower))
+}
+
+/**
  * Rule-based state derivation.
  *
  * This is a deterministic placeholder for the decision layer described in the
@@ -588,13 +905,10 @@ export function deriveState(
   const awaitingReply = lastIsOwner
 
   // A question aimed at us, with nothing sent after it, is the clearest signal
-  // that a reply is expected.
-  const lastBody = last.body.toLowerCase()
-  const asksQuestion =
-    /\?/.test(lastBody) &&
-    /\b(can|could|would|should|do you|did you|are you|is there|any chance|please)\b/.test(
-      lastBody,
-    )
+  // that a reply is expected. Bulk-mail furniture is dropped first, because a
+  // "?" in a footer is about the mailing, not a request to the reader.
+  const visible = requestText(last.body)
+  const asksQuestion = asksForSomething(visible)
 
   const requiresReply = !lastIsOwner && asksQuestion
 
@@ -630,7 +944,7 @@ export function deriveState(
     requiresReply,
     importance,
     urgency,
-    intent: inferIntent(last.body, asksQuestion),
+    intent: inferIntent(visible, asksQuestion),
   }
 }
 

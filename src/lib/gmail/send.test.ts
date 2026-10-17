@@ -56,6 +56,10 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     topic: null,
     goal: null,
     ...overrides,
+    // Last, so `Partial<Conversation>` cannot leave them undefined.
+    stateOverride: overrides.stateOverride ?? null,
+    seenAt: overrides.seenAt ?? null,
+    done: overrides.done ?? null,
   }
 }
 

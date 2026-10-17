@@ -44,6 +44,40 @@ export const STATE_ORDER: ConversationState[] = [
   'low-priority',
 ]
 
+/**
+ * The two marks the user owns, and the words for them.
+ *
+ * They are easy to confuse — one is a fact the app noticed, the other is a
+ * decision the user made — so the copy lives in one place rather than being
+ * re-worded per view. **New** is mail you have not opened; **Done** is what you
+ * decided about mail you have opened. Opening a thread clears the first and can
+ * never set the second.
+ */
+export const READ_META = {
+  label: 'New',
+  /** The dot's tooltip, and its accessible name. */
+  description: 'Mail you have not opened yet. Opening the thread clears it.',
+} as const
+
+export const DONE_META = {
+  label: 'Done',
+  /** Tooltip wherever the tag appears. */
+  description: 'You handled this. New mail brings it back on its own.',
+  /**
+   * Shown on the thread itself, where there is room to say what the mark does
+   * rather than only what it means.
+   */
+  detail:
+    'You marked this handled, so it is out of the open groups in the inbox. New mail brings it back by itself.',
+} as const
+
+/** The inbox section done threads move to, and the line under its heading. */
+export const DONE_GROUP = {
+  label: 'Done',
+  description:
+    'Handled by you, so no longer among the work below. The state each thread had is kept and shown faintly — new mail moves it back by itself.',
+} as const
+
 export function isConversationState(value: unknown): value is ConversationState {
   return (
     typeof value === 'string' && value in STATE_META

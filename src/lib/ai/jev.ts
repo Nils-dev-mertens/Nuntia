@@ -89,14 +89,24 @@ export class JevDecisionModel implements DecisionModel {
       },
     }
 
-    // Only ask about state when the rules could not decide it — the whole point
-    // of "rules first, Jev fills the gap". A confident rule is never overridden.
-    if (facts.state === null) {
+    // The state question is asked in two cases, and deliberately not a third:
+    //
+    // - the rules abstained (`null`) — this is the gap the model fills;
+    // - the rules claimed `needs-action` — the model may *drop* a false positive.
+    //   A rule can only ever add work, and "a `?` in the body" is a weak enough
+    //   signal that the threads it mislabels are the ones worth a second opinion.
+    //
+    // Not asked for `waiting-for-reply` or `low-priority`: those are readable off
+    // the message flow, and asking would invite the model to contradict something
+    // already certain. `foldState` is where the answer is resolved.
+    if (facts.state === null || facts.state === 'needs-action') {
       questions.state = {
         type: 'choice',
-        instructions: 'What does this conversation need from the recipient?',
+        instructions:
+          'What does this conversation actually need from the recipient? Choose "needs-action" only if a reply or a decision is genuinely expected of them.',
         criteria: {
-          'needs-action': 'A reply or a decision is expected from the recipient',
+          'needs-action':
+            'A reply or a decision is expected from the recipient',
           informational: 'No action expected; it is there to be read',
         },
       }
@@ -105,7 +115,11 @@ export class JevDecisionModel implements DecisionModel {
     // Machine mail is settled by the deterministic marker before Jev runs, so the
     // model is only asked about threads a human could actually answer. A letter
     // from a person with no return address is the case this catches.
-    if (!facts.isAutomated) {
+    //
+    // Not asked either when the user has marked the sender themselves: that is a
+    // stored answer about the sender, not a read of this thread, and a model is
+    // in no position to overrule it.
+    if (!facts.isAutomated && !facts.senderUnreplyable) {
       questions.replyable = {
         type: 'choice',
         instructions:
@@ -128,16 +142,21 @@ export class JevDecisionModel implements DecisionModel {
           questions,
         },
         fetchImpl: this.config.fetchImpl,
+        log: { service: 'jev', model: this.config.model },
       }),
       'Jev response',
     )
 
     const answers = isRecord(json.answers) ? json.answers : {}
 
-    const importance = scoreToTen(answers.importance) ?? facts.placeholderImportance
+    const importance =
+      scoreToTen(answers.importance) ?? facts.placeholderImportance
     const urgency = scoreToTen(answers.urgency) ?? facts.placeholderUrgency
-    // The model's state is only meaningful when the rules abstained.
-    const state = facts.state === null ? choiceState(answers.state) : null
+    // A state answer is only meaningful where the question was asked: to fill a
+    // gap, or to drop a rule's `needs-action`. `null` keeps the rule either way.
+    const askedAboutState =
+      facts.state === null || facts.state === 'needs-action'
+    const state = askedAboutState ? choiceState(answers.state) : null
     // `null` when the question was not asked (machine mail) or unanswered, and
     // the fold then keeps the rule outcome.
     const replyable = choiceReplyable(answers.replyable)

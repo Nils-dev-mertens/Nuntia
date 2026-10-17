@@ -17,16 +17,19 @@ import {
   messages as messagesTable,
   accounts,
   senderProfiles,
+  senderSignals,
 } from '#/db/schema.ts'
 import type {
   Conversation,
   ConversationAttachment,
   ConversationMessage,
+  DoneMark,
   ParsingPreferences,
+  StateOverride,
 } from './model.ts'
 import type { AccountConversation } from './merge.ts'
 import type { Decision } from './decision.ts'
-import { cleanMessage, conversationId } from './model.ts'
+import { cleanMessage, conversationId, otherPartyOf } from './model.ts'
 import { stripHtmlGreeting, stripHtmlSignature } from '#/lib/mail/index.ts'
 
 import { isAutomatedThread } from './automated.ts'
@@ -52,8 +55,14 @@ import { isAutomatedThread } from './automated.ts'
  * v4 — `conversations.replyable` was added. Derived from the stored sender
  * addresses alone, so it backfills locally like v1; the decision model's
  * contribution is only recomputed on the next sync or manual re-analyse.
+ *
+ * v5 — the classifier changed. Bulk and machine mail now rank `low-priority`
+ * instead of claiming action, and the model may drop a rule's `needs-action`. A
+ * stored `state` is only recomputed when a thread is re-decided, so unlike v4
+ * this cannot be a column backfill: the version pass re-runs the pipeline over
+ * the stored conversations (`redecideStoredConversations`).
  */
-export const DERIVED_VERSION = 4
+export const DERIVED_VERSION = 5
 
 /**
  * Recompute derived fields for every conversation of an account.
@@ -64,6 +73,7 @@ export const DERIVED_VERSION = 4
  */
 export async function backfillDerivedFields(
   ownerEmail: string,
+  unreplyableSenders: ReadonlySet<string> = new Set(),
 ): Promise<number> {
   const rows = await db
     .select({ id: conversations.id })
@@ -73,14 +83,23 @@ export async function backfillDerivedFields(
   await withWriteLock(async () => {
     for (const { id } of rows) {
       const msgs = await db
-        .select({ from: messagesTable.from })
+        .select({
+          from: messagesTable.from,
+          isFromOwner: messagesTable.isFromAccountOwner,
+          sentAt: messagesTable.sentAt,
+        })
         .from(messagesTable)
         .where(eq(messagesTable.conversationId, id))
 
       const isAutomated = isAutomatedThread(msgs, ownerEmail)
+      // The user's own mark is read here for the same reason the decision layer
+      // reads it: this pass recomputes a *derived* column, and replyability is
+      // no longer purely derived. Without it a version bump would silently put
+      // the composer back on every thread from a marked sender.
+      const marked = unreplyableSenders.has(otherPartyOf({ messages: msgs }))
       await db
         .update(conversations)
-        .set({ isAutomated, replyable: !isAutomated })
+        .set({ isAutomated, replyable: !isAutomated && !marked })
         .where(eq(conversations.id, id))
     }
   })
@@ -252,6 +271,20 @@ export async function saveConversation(
           messageCount: conversation.messageCount,
           attachmentCount: conversation.attachmentCount,
           lastMessageAt: conversation.lastMessageAt,
+          // The user's own call, written from the conversation rather than
+          // recomputed: `decideAndSave` puts the stored call back on the object
+          // before saving, and `applyDecision` clears one the thread has
+          // outrun, so this column always ends up holding what the user
+          // currently means.
+          stateOverride: conversation.stateOverride?.state ?? null,
+          stateOverrideMessageAt: conversation.stateOverride?.messageAt ?? null,
+          // Written from the conversation for the same reason, and "read" is as
+          // user-owned as "done": `decideAndSave` and `refreshThread` put the
+          // stored pair back on the object before saving, so a rebuild from Gmail
+          // cannot un-read or un-finish a thread.
+          seenAt: conversation.seenAt,
+          doneAt: conversation.done?.doneAt ?? null,
+          doneMessageAt: conversation.done?.messageAt ?? null,
           decidedAt: now,
           createdAt: now,
           updatedAt: now,
@@ -262,6 +295,12 @@ export async function saveConversation(
             subject: conversation.subject,
             participants: conversation.participants,
             state: conversation.state,
+            stateOverride: conversation.stateOverride?.state ?? null,
+            stateOverrideMessageAt:
+              conversation.stateOverride?.messageAt ?? null,
+            seenAt: conversation.seenAt,
+            doneAt: conversation.done?.doneAt ?? null,
+            doneMessageAt: conversation.done?.messageAt ?? null,
             isAutomated: conversation.isAutomated,
             replyable: conversation.replyable,
             awaitingReply: conversation.awaitingReply,
@@ -468,6 +507,235 @@ export async function saveParsingProfile(
         })
     })
   })
+}
+
+/**
+ * Mark one sender as replyable or not — the user's own answer, per sender.
+ *
+ * Insert-or-update rather than a plain update, because a sender the user has
+ * never tuned has no row at all. The insert therefore has to say "inherit the
+ * account's parsing defaults" instead of leaving the schema's own defaults to
+ * apply: those are `true` for each strip flag, so writing them would quietly
+ * start stripping quoted history for a sender whose mail the account is set up to
+ * keep intact. Marking a sender changes exactly one thing.
+ *
+ * Only `replyable` is written on conflict, so a sender who already has parsing or
+ * reply-style settings keeps every one of them.
+ */
+export async function setSenderReplyable(
+  accountId: string,
+  senderEmail: string,
+  replyable: boolean,
+): Promise<void> {
+  const email = senderEmail.trim().toLowerCase()
+  // Silent rather than throwing, like `recordSenderSignal`: neither the account
+  // owner's own address nor a thread with no other party can be a sender to
+  // mark, and an action that arrived with one has nothing to apply.
+  if (!email || email === accountId.trim().toLowerCase()) return
+
+  const id = `${accountId}:${email}`
+
+  await withWriteLock(async () => {
+    await db
+      .insert(senderProfiles)
+      .values({
+        id,
+        accountId,
+        senderEmail: email,
+        useAccountParsingDefaults: true,
+        replyable,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: senderProfiles.id,
+        set: { replyable, updatedAt: new Date() },
+      })
+  })
+}
+
+/**
+ * Senders the user has marked as ones a reply cannot reach.
+ *
+ * A plain set of addresses, read once per sync and passed down the batch, for the
+ * same reason `listIgnoredSenders` is: the decision path runs per thread and must
+ * not ask the same question once per row.
+ */
+export async function listUnreplyableSenders(
+  accountId: string,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({ senderEmail: senderProfiles.senderEmail })
+    .from(senderProfiles)
+    .where(
+      and(
+        eq(senderProfiles.accountId, accountId),
+        eq(senderProfiles.replyable, false),
+      ),
+    )
+
+  return new Set(rows.map((row) => row.senderEmail.trim().toLowerCase()))
+}
+
+/** One sender the user has actually received mail from. */
+export type IncomingSender = {
+  /** Normalised, which is the form the can't-reply list stores. */
+  email: string
+  /** Display name, when any message from them carried one. */
+  name: string | null
+  /** Newest message from them — the ordering key, and a "when" hint. */
+  lastMessageAt: Date
+}
+
+/**
+ * Senders the user has actually received from, newest first.
+ *
+ * The quick half of the can't-reply list: addresses that can be recognised and
+ * clicked rather than recalled and typed. Read from the stored messages, because
+ * a thread's counterpart is `otherPartyOf`'s answer per *thread* and what this
+ * wants is every address that has written at all.
+ *
+ * Only threads that still show a reply box are considered, and that single filter
+ * does three jobs: a sender already marked is excluded (the sweep sets all of
+ * their threads to `replyable = false`), a machine sender is excluded (their
+ * threads are already unanswerable without anyone being asked), and the list can
+ * never offer an address that marking would do nothing for. The user's own
+ * addresses are filtered separately, because a thread between two of their
+ * mailboxes has a non-owner side that is still theirs.
+ *
+ * `ownerEmails` is normalised here rather than trusted, so a caller does not have
+ * to remember that the comparison is on lowercased addresses.
+ */
+export async function listIncomingSenders(
+  accountId: string,
+  ownerEmails: ReadonlySet<string>,
+  limit = 8,
+): Promise<IncomingSender[]> {
+  const rows = await db
+    .select({ from: messagesTable.from, sentAt: messagesTable.sentAt })
+    .from(messagesTable)
+    .innerJoin(
+      conversations,
+      eq(conversations.id, messagesTable.conversationId),
+    )
+    .where(
+      and(
+        eq(conversations.accountId, accountId),
+        eq(messagesTable.isFromAccountOwner, false),
+        eq(conversations.replyable, true),
+      ),
+    )
+
+  const owners = new Set(
+    [...ownerEmails].map((email) => email.trim().toLowerCase()),
+  )
+
+  // Grouped here rather than in SQL: `from` is a JSON participant, and the name
+  // has to survive a newer message that omits it.
+  const byEmail = new Map<string, IncomingSender>()
+  for (const row of rows) {
+    const email = row.from.email.trim().toLowerCase()
+    if (!email || owners.has(email)) continue
+
+    const name = row.from.name?.trim() || null
+    const existing = byEmail.get(email)
+    if (!existing) {
+      byEmail.set(email, { email, name, lastMessageAt: row.sentAt })
+      continue
+    }
+
+    if (row.sentAt > existing.lastMessageAt) existing.lastMessageAt = row.sentAt
+    // First non-empty name wins, so a bare address on the newest message does not
+    // erase what an earlier one knew.
+    if (!existing.name && name) existing.name = name
+  }
+
+  return [...byEmail.values()]
+    .sort((a, b) => b.lastMessageAt.getTime() - a.lastMessageAt.getTime())
+    .slice(0, limit)
+}
+
+/**
+ * Apply a sender's replyability to every thread already stored from them.
+ *
+ * The decision layer covers new and re-decided mail, which leaves the threads the
+ * user is looking at right now untouched — so this sweep runs on the click. It
+ * reads the account's messages rather than loading whole conversations
+ * (`listConversations` re-parses every body) because it sits behind a button.
+ *
+ * A thread's sender is `otherPartyOf`'s, so the sweep agrees with the decision
+ * path about which address a thread belongs to. Machine mail keeps its own veto:
+ * taking a mark back can never hand a composer to a `noreply@` address.
+ *
+ * Returns how many rows actually changed, so a caller can tell "nothing to do"
+ * from "done" — and so a test can assert on the effect.
+ */
+export async function setReplyableForSender(
+  accountId: string,
+  senderEmail: string,
+  replyable: boolean,
+): Promise<number> {
+  const email = senderEmail.trim().toLowerCase()
+  if (!email) return 0
+
+  const rows = await db
+    .select({
+      conversationId: messagesTable.conversationId,
+      currentReplyable: conversations.replyable,
+      from: messagesTable.from,
+      isFromOwner: messagesTable.isFromAccountOwner,
+      sentAt: messagesTable.sentAt,
+    })
+    .from(messagesTable)
+    .innerJoin(
+      conversations,
+      eq(conversations.id, messagesTable.conversationId),
+    )
+    .where(eq(conversations.accountId, accountId))
+
+  const byConversation = new Map<string, typeof rows>()
+  for (const row of rows) {
+    const list = byConversation.get(row.conversationId)
+    if (list) list.push(row)
+    else byConversation.set(row.conversationId, [row])
+  }
+
+  const target = new Map<string, boolean>()
+  // `rowId` rather than `conversationId`: that name is the id builder imported
+  // above, and shadowing it here is how a row id gets mistaken for a derived key.
+  for (const [rowId, messages] of byConversation) {
+    // Ordered here rather than in SQL: `otherPartyOf` reads the *newest* message
+    // not written by the user, and the join comes back in whatever order the
+    // table happens to hold.
+    const ordered = [...messages].sort(
+      (a, b) => a.sentAt.getTime() - b.sentAt.getTime(),
+    )
+    if (otherPartyOf({ messages: ordered }) !== email) continue
+
+    const next = replyable && !isAutomatedThread(ordered, accountId)
+    // The column is per conversation, so any row of the group carries it.
+    if (next === messages[0]?.currentReplyable) continue
+    target.set(rowId, next)
+  }
+
+  if (target.size === 0) return 0
+
+  await withWriteLock(async () => {
+    // Two statements, one per value, because the account's threads can hold both
+    // and a single `IN` list would have to be split anyway.
+    for (const value of [false, true]) {
+      const ids = [...target]
+        .filter(([, next]) => next === value)
+        .map(([id]) => id)
+      if (ids.length === 0) continue
+
+      await db
+        .update(conversations)
+        .set({ replyable: value, updatedAt: new Date() })
+        .where(and(eq(conversations.accountId, accountId), inArray(conversations.id, ids)))
+    }
+  })
+
+  return target.size
 }
 
 /** Record a decision for audit, alongside the conversation's current values. */
@@ -787,7 +1055,282 @@ async function rowToConversation(
     lastMessageAt: row.lastMessageAt,
     topic: row.topic,
     goal: row.goal,
+    // The pair is written together, so a missing timestamp would mean a row
+    // from before this column existed. `lastMessageAt` is the honest stand-in
+    // for "when they said it" there, and it keeps the call live rather than
+    // silently discarding it.
+    stateOverride: row.stateOverride
+      ? {
+          state: row.stateOverride,
+          messageAt: row.stateOverrideMessageAt ?? row.lastMessageAt,
+        }
+      : null,
+    seenAt: row.seenAt,
+    // Not clamped to `lastMessageAt` here: a mark older than the newest message is
+    // a thread that came back, and the reader has to see it as not done. The
+    // clamping is `activeDone`'s job, so a caller that wants the raw stored mark
+    // can still have it.
+    done: row.doneAt
+      ? {
+          doneAt: row.doneAt,
+          messageAt: row.doneMessageAt ?? row.lastMessageAt,
+        }
+      : null,
   }
+}
+
+/**
+ * Store the user's own call on a conversation, or clear it.
+ *
+ * `state` is written alongside the override because the call is the state: every
+ * reader of the list groups by that column, and a stored call the column
+ * contradicts would show the thread exactly where the user just said it was not.
+ * Clearing the call deliberately leaves the state alone — the caller re-decides,
+ * which is the only thing that can say where the thread belongs now.
+ */
+export async function setStateOverride(
+  accountId: string,
+  gmailThreadId: string,
+  override: StateOverride | null,
+): Promise<void> {
+  const id = conversationId(accountId, gmailThreadId)
+
+  await withWriteLock(async () => {
+    await db
+      .update(conversations)
+      .set({
+        stateOverride: override?.state ?? null,
+        stateOverrideMessageAt: override?.messageAt ?? null,
+        ...(override ? { state: override.state } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
+  })
+}
+
+/**
+ * Everything about a conversation that belongs to the user rather than to Gmail.
+ *
+ * One read for all three, because all three exist for the same reason and are
+ * needed by the same two callers: a thread rebuilt from Gmail carries no memory
+ * of what the user said or read, so the row is the only place those answers live,
+ * and every rebuild has to put them back before saving. A single query also means
+ * a rebuild cannot pick up one of them and drop another.
+ */
+export type StoredUserFields = {
+  stateOverride: StateOverride | null
+  seenAt: Date | null
+  done: DoneMark | null
+}
+
+/**
+ * The user-owned fields of one conversation, exactly as stored.
+ *
+ * `stateOverride` and `done` come back even when the thread has outrun them — the
+ * clamping belongs to `activeStateOverride` and `activeDone`, and doing it here
+ * would silently discard a mark that a later sync might yet agree with.
+ */
+export async function getStoredUserFields(
+  accountId: string,
+  gmailThreadId: string,
+): Promise<StoredUserFields> {
+  const rows = await db
+    .select({
+      stateOverride: conversations.stateOverride,
+      stateOverrideMessageAt: conversations.stateOverrideMessageAt,
+      seenAt: conversations.seenAt,
+      doneAt: conversations.doneAt,
+      doneMessageAt: conversations.doneMessageAt,
+      lastMessageAt: conversations.lastMessageAt,
+    })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId(accountId, gmailThreadId)))
+    .limit(1)
+
+  const found = rows.at(0)
+  if (!found) return { stateOverride: null, seenAt: null, done: null }
+
+  return {
+    stateOverride: found.stateOverride
+      ? {
+          state: found.stateOverride,
+          messageAt: found.stateOverrideMessageAt ?? found.lastMessageAt,
+        }
+      : null,
+    seenAt: found.seenAt,
+    done: found.doneAt
+      ? {
+          doneAt: found.doneAt,
+          messageAt: found.doneMessageAt ?? found.lastMessageAt,
+        }
+      : null,
+  }
+}
+
+/**
+ * The stored call on one conversation, live or not. A view of the read above.
+ *
+ * A caller that also has to preserve reading and the Done mark should use
+ * `getStoredUserFields` instead of this, so a rebuild never carries one of the
+ * user's answers and drops another.
+ */
+export async function getStateOverride(
+  accountId: string,
+  gmailThreadId: string,
+): Promise<StateOverride | null> {
+  return (await getStoredUserFields(accountId, gmailThreadId)).stateOverride
+}
+
+/**
+ * Record that the user has seen this thread, up to a given message.
+ *
+ * Called when the conversation opens. The high-water mark only ever moves
+ * forward, so opening an old thread cannot un-read newer mail, and the value the
+ * *client* saw is what is written rather than the row's newest message: mail that
+ * synced in between is not mail they have read, and marking it seen would lose
+ * it.
+ *
+ * Nothing else changes. In particular the state and the Done mark are untouched —
+ * reading a thread is not dealing with it, which is the whole reason "done" is
+ * stored separately.
+ */
+export async function markConversationSeen(
+  accountId: string,
+  gmailThreadId: string,
+  seenThrough: Date,
+): Promise<void> {
+  const id = conversationId(accountId, gmailThreadId)
+
+  await withWriteLock(async () => {
+    const rows = await db
+      .select({ seenAt: conversations.seenAt })
+      .from(conversations)
+      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .limit(1)
+
+    const current = rows.at(0)?.seenAt ?? null
+    if (current && current.getTime() >= seenThrough.getTime()) return
+
+    await db
+      .update(conversations)
+      .set({ seenAt: seenThrough, updatedAt: new Date() })
+      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+  })
+}
+
+/**
+ * Mark a conversation done, or take the mark back.
+ *
+ * The thread's own `lastMessageAt` is what is stored alongside the mark, not
+ * anything from the caller: the mark means "the mail as it stands now is handled",
+ * and a time supplied by the browser could be older than a message and make the
+ * mark look current when it is not.
+ *
+ * As with the state override, taking the mark back does not re-decide anything.
+ * The state was never changed by the mark, so there is nothing to restore.
+ */
+export async function setConversationDone(
+  accountId: string,
+  gmailThreadId: string,
+  done: boolean,
+): Promise<void> {
+  const id = conversationId(accountId, gmailThreadId)
+
+  await withWriteLock(async () => {
+    const rows = await db
+      .select({ lastMessageAt: conversations.lastMessageAt })
+      .from(conversations)
+      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .limit(1)
+
+    const found = rows.at(0)
+    if (!found) return
+
+    const now = new Date()
+    await db
+      .update(conversations)
+      .set({
+        doneAt: done ? now : null,
+        doneMessageAt: done ? found.lastMessageAt : null,
+        updatedAt: now,
+      })
+      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+  })
+}
+
+/** What the user most recently did with mail from one sender. */
+export type SenderSignal = 'ignored' | 'restored'
+
+/**
+ * Remember that the user filed a sender away, or brought one back.
+ *
+ * Deliberately only the timestamp: the *latest* signal is the one that counts
+ * (see `listIgnoredSenders`), so there is no history to keep and no counter to
+ * get out of step with what the user actually did.
+ */
+export async function recordSenderSignal(
+  accountId: string,
+  senderEmail: string,
+  signal: SenderSignal,
+): Promise<void> {
+  const email = senderEmail.trim().toLowerCase()
+  if (!email || email === accountId.trim().toLowerCase()) return
+
+  const now = new Date()
+  const id = `${accountId}:${email}`
+
+  await withWriteLock(async () => {
+    await db
+      .insert(senderSignals)
+      .values({
+        id,
+        accountId,
+        senderEmail: email,
+        ignoredAt: signal === 'ignored' ? now : null,
+        restoredAt: signal === 'restored' ? now : null,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: senderSignals.id,
+        set:
+          signal === 'ignored'
+            ? { ignoredAt: now, updatedAt: now }
+            : { restoredAt: now, updatedAt: now },
+      })
+  })
+}
+
+/**
+ * Senders whose mail the user has filed away, and not brought back.
+ *
+ * A restore only counts until the next ignore: the user telling the app "this
+ * one matters" is about the sender as a whole, so it switches the learning off
+ * rather than being weighed against it. Reading it this way is what keeps the
+ * button honest — the alternative, a net count, makes bringing a thread back do
+ * nothing for a sender with several ignores behind it.
+ */
+export async function listIgnoredSenders(
+  accountId: string,
+): Promise<Set<string>> {
+  const rows = await db
+    .select({
+      senderEmail: senderSignals.senderEmail,
+      ignoredAt: senderSignals.ignoredAt,
+      restoredAt: senderSignals.restoredAt,
+    })
+    .from(senderSignals)
+    .where(eq(senderSignals.accountId, accountId))
+
+  const ignored = new Set<string>()
+  for (const row of rows) {
+    if (!row.ignoredAt) continue
+    if (row.restoredAt && row.restoredAt >= row.ignoredAt) continue
+    ignored.add(row.senderEmail.trim().toLowerCase())
+  }
+
+  return ignored
 }
 
 /** Delete a conversation and its children. */
@@ -829,6 +1372,69 @@ export async function getByThreadIds(
     .where(inArray(conversations.id, ids))
 
   return Promise.all(rows.map(rowToConversation))
+}
+
+/**
+ * One attachment row, with everything needed to fetch its bytes.
+ *
+ * `accountId` is the mailbox to ask Gmail for it, and `id` is the row's own key
+ * so the download can record where the file landed.
+ */
+export type StoredAttachment = {
+  id: string
+  accountId: string
+  gmailThreadId: string
+  gmailAttachmentId: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+  isInline: boolean
+  contentId: string | null
+  localPath: string | null
+}
+
+/**
+ * Find one stored attachment by the two ids the chat view holds.
+ *
+ * The thread id is mailbox-scoped, so the account comes back with it — the
+ * download needs it to build a Gmail client. Resolved through the conversation
+ * rather than from a stored account column because an attachment's row does not
+ * repeat its account, and the conversation already knows it.
+ */
+export async function getStoredAttachment(
+  gmailThreadId: string,
+  gmailAttachmentId: string,
+): Promise<StoredAttachment | null> {
+  const rows = await db
+    .select({ attachment: attachments, accountId: conversations.accountId })
+    .from(attachments)
+    .innerJoin(conversations, eq(conversations.id, attachments.conversationId))
+    .where(
+      and(
+        eq(conversations.gmailThreadId, gmailThreadId),
+        eq(attachments.gmailAttachmentId, gmailAttachmentId),
+      ),
+    )
+    .limit(1)
+
+  // `.at(0)` rather than `[0]`: the index form is typed as always-present, which
+  // hides the real "no such attachment" case.
+  const found = rows.at(0)
+  if (!found) return null
+
+  const row = found.attachment
+  return {
+    id: row.id,
+    accountId: found.accountId,
+    gmailThreadId,
+    gmailAttachmentId: row.gmailAttachmentId,
+    filename: row.filename,
+    mimeType: row.mimeType,
+    sizeBytes: row.sizeBytes,
+    isInline: row.isInline,
+    contentId: row.contentId,
+    localPath: row.localPath,
+  }
 }
 
 /**

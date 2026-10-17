@@ -1,0 +1,1 @@
+ALTER TABLE `sender_profiles` ADD `replyable` integer DEFAULT true NOT NULL;

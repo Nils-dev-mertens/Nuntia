@@ -335,6 +335,14 @@ function toGmailPart(part: {
   if (part.body?.data) node.data = part.body.data
   if (part.body?.attachmentId) node.headers['x-attachment-id'] = part.body.attachmentId
 
+  // The size lives on `body.size` and nowhere in the headers, but
+  // `collectAttachments` reads a part's metadata from the header tree. Without
+  // this the size was silently dropped and every stored attachment claimed to
+  // be 0 bytes, so every chip in the chat view read "0 B".
+  if (typeof part.body?.size === 'number' && part.body.size > 0) {
+    node.headers['x-attachment-size'] = String(part.body.size)
+  }
+
   for (const child of (part.parts ?? []) as Array<typeof part>) {
     node.children.push(toGmailPart(child))
   }

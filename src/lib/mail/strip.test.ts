@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
-import { cleanBody, stripGreeting, stripSignature } from './strip.ts'
+import {
+  cleanBody,
+  stripCidPlaceholders,
+  stripGreeting,
+  stripSignature,
+} from './strip.ts'
 
 describe('stripGreeting', () => {
   test('strips a known opener with a name', () => {
@@ -85,10 +90,12 @@ describe('stripGreeting', () => {
 
 describe('stripSignature', () => {
   test('strips the Dutch standard closing', () => {
-    expect(stripSignature('testing\n\nMet vriendelijke groeten\nNils')).toEqual({
-      body: 'testing',
-      signature: 'Met vriendelijke groeten\nNils',
-    })
+    expect(stripSignature('testing\n\nMet vriendelijke groeten\nNils')).toEqual(
+      {
+        body: 'testing',
+        signature: 'Met vriendelijke groeten\nNils',
+      },
+    )
   })
 
   test('strips closings the old list did not know', () => {
@@ -170,5 +177,44 @@ describe('cleanBody', () => {
     expect(result.greeting).toBe('Dag Guillaume,')
     expect(result.signature).toContain('Met vriendelijke groeten')
     expect(result.body).toBe('Voor het vak.\n\nAlvast bedankt!')
+  })
+})
+
+describe('stripCidPlaceholders', () => {
+  test('drops a placeholder on its own line, and the line with it', () => {
+    // The shape that reaches us from Outlook: a signature whose last line is a
+    // logo the text part could only render as this token.
+    const body = 'Groeten,\nNils\n[cid:logo]'
+    expect(stripCidPlaceholders(body)).toBe('Groeten,\nNils')
+  })
+
+  test('drops a placeholder that has text around it on the same line', () => {
+    const out = stripCidPlaceholders('Zie [cid:chart] hierboven.')
+    expect(out).toBe('Zie hierboven.')
+    expect(out).not.toContain('  ')
+  })
+
+  test('drops several placeholders and the blank line they leave', () => {
+    expect(stripCidPlaceholders('a\n[cid:one]\n[cid:two]\nb')).toBe('a\nb')
+  })
+
+  test('matches the token case-insensitively', () => {
+    expect(stripCidPlaceholders('hi\n[CID:Logo]')).toBe('hi')
+  })
+
+  test('leaves ordinary bracketed text alone', () => {
+    // `[cid:...]` is the only shape a mail client generates; a reader referring
+    // to one in prose should not be able to trigger this.
+    const body = 'The [cid] parameter and [cider] are fine.\n\nRegards'
+    expect(stripCidPlaceholders(body)).toBe(body)
+  })
+
+  test('leaves a body with no placeholder untouched, including its spacing', () => {
+    const body = 'Column A    Column B\nNext line'
+    expect(stripCidPlaceholders(body)).toBe(body)
+  })
+
+  test('handles an empty body', () => {
+    expect(stripCidPlaceholders('')).toBe('')
   })
 })

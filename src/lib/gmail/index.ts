@@ -33,11 +33,7 @@ export {
 } from './message.ts'
 export type { GmailAttachmentRef } from './message.ts'
 
-export {
-  backfill,
-  sync,
-  syncIncremental,
-} from './sync.ts'
+export { backfill, sync, syncIncremental } from './sync.ts'
 export type {
   SyncEvent,
   SyncOptions,
@@ -51,19 +47,14 @@ export {
   downloadAttachment,
   isCached,
   MAX_ATTACHMENT_BYTES,
+  removeAttachmentCache,
   safeFilename,
 } from './attachments.ts'
 export type { DownloadResult } from './attachments.ts'
 
-export {
-  DEFAULT_STALE_AFTER_MS,
-  isCursorStale,
-} from './freshness.ts'
+export { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
 
-export {
-  BACKFILL_QUERY,
-  loadInbox,
-} from './service.ts'
+export { BACKFILL_QUERY, forgetAccount, loadInbox } from './service.ts'
 export type {
   ConversationSummary,
   InboxPayload,

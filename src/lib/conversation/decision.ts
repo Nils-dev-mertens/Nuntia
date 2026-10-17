@@ -8,7 +8,7 @@
  *   state        rules when they are confident, otherwise Jev
  *   importance   Jev
  *   urgency      Jev
- *   replyable    the machine-mail marker first, then Jev
+ *   replyable    the user's own mark, then the machine-mail marker, then Jev
  *   topic        an LLM (prose)
  *   intent       the user — never written by a model
  *
@@ -27,7 +27,13 @@
 
 import type { Conversation, ConversationMessage } from './model.ts'
 import type { ConversationState } from '#/db/schema.ts'
-import { deriveState } from './model.ts'
+import { activeStateOverride, deriveState } from './model.ts'
+
+// Imported by path rather than through `#/lib/ai/index.ts`: the index pulls in
+// Jev, the providers and the settings table, and this file must not drag the
+// database into anything that imports the pipeline. `ai-log.ts` itself imports
+// nothing but `node:fs`.
+import { reportAiFailure } from '#/lib/ai/ai-log.ts'
 import { isAutomatedThread } from './automated.ts'
 
 export type DecisionInput = {
@@ -39,6 +45,26 @@ export type DecisionInput = {
   goal: string | null
   /** Last time the decision layer ran, if ever. */
   decidedAt: Date | null
+  /**
+   * The user has filed away mail from this thread's other party before, and has
+   * not brought any of it back since.
+   *
+   * The one *learned* input: it comes from what the user did to other threads
+   * from the same sender, not from anything in this one. Absent means nothing
+   * has been learned — which is also what a thread with no other party has.
+   */
+  ignoredSender?: boolean
+  /**
+   * The user has marked this thread's other party as one they cannot reply to.
+   *
+   * The second *stored* input, and the authoritative one for replyability: the
+   * machine-mail marker only catches senders that say so in their address, and
+   * Jev can only guess from the writing. A company whose mail is view-only from
+   * an ordinary address is invisible to both, and the user is the only one who
+   * knows. Absent means nothing has been marked, which is also what a thread with
+   * no other party has.
+   */
+  unreplyableSender?: boolean
 }
 
 /**
@@ -49,6 +75,12 @@ export type DecisionInput = {
  * back to; a real model overrides them.
  */
 export type RuleFacts = {
+  /**
+   * The deterministic state, or `null` when the rules have no strong signal.
+   *
+   * `low-priority` is a claim the rules can make on their own — machine mail and
+   * broadcasts are settled without asking a model.
+   */
   state: ConversationState | null
   awaitingReply: boolean
   requiresReply: boolean
@@ -58,6 +90,14 @@ export type RuleFacts = {
    * signal that tells the decision model to leave the question alone.
    */
   isAutomated: boolean
+  /**
+   * The user has marked this sender as one a reply cannot reach.
+   *
+   * Settles replyability before the model is asked, the same way `isAutomated`
+   * does — the two differ only in who decided, and in that this one is a stored
+   * answer rather than something read off the address.
+   */
+  senderUnreplyable: boolean
   placeholderImportance: number
   placeholderUrgency: number
   reasoning: string
@@ -72,8 +112,12 @@ export interface RuleClassifier {
 /** What the decision model (Jev) contributes. */
 export type ModelVerdict = {
   /**
-   * Used only when the rules returned `null`. A confident rule is never
-   * overridden.
+   * Used when the rules returned `null`, and also to *confirm or drop* a rule's
+   * `needs-action` — a rule claiming something needs doing is the claim most
+   * worth a second opinion, because a false positive is filed as work.
+   *
+   * Never applied to `waiting-for-reply` or `low-priority`: those the rules can
+   * read off the message flow. `null` means "no opinion", and the rule stands.
    */
   state: ConversationState | null
   importance: number
@@ -100,6 +144,10 @@ export interface TopicGenerator {
 
 /** The composed result, in the order the app consumes it. */
 export type Decision = {
+  /**
+   * `low-priority` is reachable from the rules (machine mail, promotions) and
+   * from the model's scores. See `HeuristicRuleClassifier` and `foldState`.
+   */
   state: ConversationState
   awaitingReply: boolean
   requiresReply: boolean
@@ -139,19 +187,75 @@ export class HeuristicRuleClassifier implements RuleClassifier {
       now: new Date(),
     })
 
+    const isAutomated = isAutomatedThread(input.messages, input.ownerEmail)
+
+    // The user's own mark on this sender. Read here rather than in the fold so
+    // the model's replyability question can be skipped entirely: the user has
+    // already answered it, and asking would only invite the model to disagree.
+    const senderUnreplyable = input.unreplyableSender === true
+
+    // What the user has taught the app about this sender, applied to a thread
+    // they have never answered: mail arriving in one direction only, with
+    // nobody asking them anything.
+    //
+    // The case this exists for is the one-off notice — "your order shipped",
+    // "someone viewed your profile" — which is not machine-marked often enough
+    // for the marker to catch it, and which nobody wants to be told about
+    // twice. A question survives it: if there is something to answer, the
+    // thread is work again whatever the sender's history is.
+    const learnedLowPriority =
+      input.ignoredSender === true &&
+      input.messages.every((message) => !message.isFromOwner) &&
+      !result.requiresReply
+
+    // Three deterministic routes into `low-priority`, all keyless:
+    //
+    // - Machine mail is not a conversation. Nothing is expected of the reader and
+    //   the thread is never replyable, so "a receipt landed" is not work.
+    // - A broadcast promotion is not addressed to the reader either. Its "?" is a
+    //   call to action ("Do you want to save 20%?"), and that is what used to file
+    //   marketing mail under Needs action.
+    // - A sender the user has already filed away, writing a one-way notice. This
+    //   is the app applying their own earlier judgement, so that the same mail
+    //   only has to be dismissed once to stop coming back.
+    //
+    // None of them asks the model: the rules can justify all three, and the cost
+    // of being wrong is low — the thread is still listed, still readable, still
+    // replyable when a human wrote it.
+    const lowPriority =
+      isAutomated ||
+      (result.state !== 'waiting-for-reply' && result.intent === 'promotion') ||
+      learnedLowPriority
+
+    // `informational` is the rules' "no strong signal" bucket, so it is reported
+    // as `null` rather than claimed: the model is allowed to say something
+    // sharper about a thread the rules could only shrug at.
+    const state: ConversationState | null = lowPriority
+      ? 'low-priority'
+      : result.state === 'informational'
+        ? null
+        : result.state
+
     const reasoning = !last
       ? 'Empty conversation.'
-      : last.isFromOwner
-        ? 'You sent the last message; waiting on a reply.'
-        : result.requiresReply
-          ? 'The last message asks you a direct question.'
-          : 'Last message was informational.'
+      : lowPriority
+        ? isAutomated
+          ? 'Machine mail; nothing here is written to you.'
+          : learnedLowPriority
+            ? 'You have filed away mail from this sender before.'
+            : 'A bulk promotion; nobody is asking you for anything.'
+        : last.isFromOwner
+          ? 'You sent the last message; waiting on a reply.'
+          : result.requiresReply
+            ? 'The last message asks you a direct question.'
+            : 'Last message was informational.'
 
     return {
-      state: result.state === 'informational' ? null : result.state,
+      state,
       awaitingReply: result.awaitingReply,
       requiresReply: result.requiresReply,
-      isAutomated: isAutomatedThread(input.messages, input.ownerEmail),
+      isAutomated,
+      senderUnreplyable,
       placeholderImportance: result.importance,
       placeholderUrgency: result.urgency,
       reasoning,
@@ -222,18 +326,57 @@ export async function decideConversation(
   const topic = await safeGenerateTopic(pipeline.topics, input)
 
   return {
-    state: facts.state ?? verdict.state ?? 'informational',
+    state: foldState(facts, verdict),
     awaitingReply: facts.awaitingReply,
     requiresReply: facts.requiresReply,
     // Machine mail is settled by the marker and cannot be talked back into being
-    // replyable; otherwise the model may downgrade it, and defaults to yes.
-    replyable: facts.isAutomated ? false : (verdict.replyable ?? true),
+    // replyable; otherwise the model may downgrade it, and defaults to yes. The
+    // user's own mark settles it too, and for the same reason — it is an answer
+    // rather than a hint, and a re-decide must not reach a different one.
+    replyable:
+      facts.isAutomated || facts.senderUnreplyable
+        ? false
+        : (verdict.replyable ?? true),
     importance: verdict.importance,
     urgency: verdict.urgency,
     topic,
     reasoning: verdict.reasoning ?? facts.reasoning,
     providers: [pipeline.rules.name, pipeline.model.name, pipeline.topics.name],
   }
+}
+
+/**
+ * Fold the rule facts and the model verdict into one state.
+ *
+ * Three cases, in order:
+ *
+ * 1. The rules are certain (`waiting-for-reply`, `low-priority`) — the answer is
+ *    readable from the message flow, so nothing overrides it.
+ * 2. Otherwise — the rules abstained, or claimed `needs-action` — the model's
+ *    answer wins when it gave one. A rule can only ever *add* work, and "a `?`
+ *    in the body" is a weaker signal than a model reading the thread, so the
+ *    false positives it produces are exactly the threads worth a second
+ *    opinion. A `null` verdict (no model, no answer) keeps the rule.
+ *
+ * An `informational` verdict still needs nothing, so when the model *also* scored
+ * both importance and urgency at the bottom of its rubric the thread is moved to
+ * `low-priority` — "nothing to do" and "not worth your time now" are different
+ * answers, and only the second one keeps the inbox quiet.
+ */
+function foldState(facts: RuleFacts, verdict: ModelVerdict): ConversationState {
+  if (facts.state === 'waiting-for-reply' || facts.state === 'low-priority') {
+    return facts.state
+  }
+
+  const state = verdict.state ?? facts.state ?? 'informational'
+  if (state !== 'informational') return state
+
+  return isTrivial(verdict) ? 'low-priority' : 'informational'
+}
+
+/** The model's own scores say the thread is barely worth opening. */
+function isTrivial(verdict: ModelVerdict): boolean {
+  return verdict.importance <= 3 && verdict.urgency <= 3
 }
 
 /** Run the decision model, falling back to the rule placeholders on failure. */
@@ -245,8 +388,12 @@ async function safeDecide(
   try {
     return await model.decide(input, facts)
   } catch (error) {
-    console.error(
-      `[decision] model "${model.name}" failed; using rules: ${String(error)}`,
+    // Logged to the file as well as the terminal: a failure the rules paper over
+    // is exactly the one nobody notices until they ask why nothing happened.
+    await reportAiFailure(
+      model.name,
+      error,
+      'failed; using rules for this conversation',
     )
     return {
       state: null,
@@ -266,8 +413,10 @@ async function safeGenerateTopic(
   try {
     return await topics.generate(input)
   } catch (error) {
-    console.error(
-      `[decision] topic generator "${topics.name}" failed: ${String(error)}`,
+    await reportAiFailure(
+      topics.name,
+      error,
+      'failed; this conversation gets no topic',
     )
     return null
   }
@@ -279,14 +428,22 @@ async function safeGenerateTopic(
  * `goal` and `intent` are user-owned and are never written here — the user is the
  * source of truth for what a thread means to them, and a decision layer has no
  * business overwriting either.
+ *
+ * `state` joins them in that respect: the user's own call outranks the pipeline,
+ * which is the whole point of storing it. A call the thread has outrun is dropped
+ * rather than kept — it no longer affects the state, and leaving it on the row
+ * would make an expired judgement look current to the next reader.
  */
 export function applyDecision(
   conversation: Conversation,
   decision: Decision,
 ): Conversation {
+  const override = activeStateOverride(conversation)
+
   return {
     ...conversation,
-    state: decision.state,
+    state: override ?? decision.state,
+    stateOverride: override ? conversation.stateOverride : null,
     awaitingReply: decision.awaitingReply,
     replyable: decision.replyable,
     importance: decision.importance,

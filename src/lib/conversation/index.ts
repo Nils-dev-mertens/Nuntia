@@ -11,17 +11,43 @@ export type {
   Conversation,
   ConversationAttachment,
   ConversationMessage,
+  DoneMark,
 } from './model.ts'
 
 export {
+  activeDone,
+  activeStateOverride,
   buildConversation,
   cleanMessage,
   conversationId,
   deriveState,
   inferIntent,
+  isSenderAddress,
+  normaliseEmail,
+  otherPartyOf,
+  resolveReplyStyle,
   strippedReplyPrefix,
   toParticipant,
+  unseenMessages,
 } from './model.ts'
+export type { ReplyStyle, StateOverride } from './model.ts'
+
+export {
+  buildReplyDraftPrompt,
+  NoReplyDrafter,
+  replyDraftEligibility,
+  REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+  REPLY_DRAFT_MIN_IMPORTANCE_MAX,
+  REPLY_DRAFT_MIN_IMPORTANCE_MIN,
+  sanitizeDraft,
+} from './draft.ts'
+export type {
+  DraftEligibility,
+  DraftSkipReason,
+  ReplyDrafter,
+  ReplyDraftMessage,
+  ReplyDraftRequest,
+} from './draft.ts'
 
 export type {
   Decision,
@@ -51,25 +77,45 @@ export {
   getConversation,
   getConversationByThreadId,
   getConversationClusterByThreadId,
+  getStateOverride,
+  getStoredAttachment,
+  getStoredUserFields,
   listByState,
   listConversations,
+  listIgnoredSenders,
+  listIncomingSenders,
+  markConversationSeen,
   recordDecision,
+  recordSenderSignal,
   reparseStoredMessages,
   saveConversation,
   getParsingProfileContext,
   saveParsingProfile,
+  setAttachmentLocalPath,
   setConversationDetails,
+  setConversationDone,
   setGoal,
+  setReplyableForSender,
+  setSenderReplyable,
+  listUnreplyableSenders,
+  setStateOverride,
   setTopic,
+} from './repository.ts'
+export type {
+  IncomingSender,
+  SenderSignal,
+  StoredUserFields,
 } from './repository.ts'
 export type {
   ParsingProfileContext,
   SenderProfileSettings,
+  StoredAttachment,
 } from './repository.ts'
 export type { ParsingPreferences } from './model.ts'
 
 export {
   mergeAccountConversations,
+  partitionByState,
   relationForRoles,
   relationOf,
   replyAccountsFor,

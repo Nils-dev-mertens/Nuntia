@@ -8,9 +8,19 @@
 import { useState } from 'react'
 
 import type { ConversationState } from '#/db/schema.ts'
-import type { ConversationSummary, InboxPayload } from '#/lib/gmail/service.ts'
+import type {
+  AccountSyncProgress,
+  ConversationSummary,
+  InboxPayload,
+} from '#/lib/gmail/service.ts'
 
-import { STATE_META, STATE_ORDER } from '#/lib/conversation-state'
+import {
+  DONE_GROUP,
+  DONE_META,
+  READ_META,
+  STATE_META,
+  STATE_ORDER,
+} from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
 import { Link } from '@tanstack/react-router'
 import { StateBadge } from '#/components/state-badge'
@@ -41,11 +51,24 @@ function timeAgo(iso: string): string {
   })
 }
 
+/**
+ * The open threads filed under one state.
+ *
+ * `!c.done` is not redundant with the counts: a done thread keeps the state it
+ * had (`done` is the user's answer about handling it, not a claim about what the
+ * mail needs), so without this it would be listed twice — once here and once
+ * under Done.
+ */
 function byState(
   conversations: ConversationSummary[],
   state: ConversationState,
 ): ConversationSummary[] {
-  return conversations.filter((c) => c.state === state)
+  return conversations.filter((c) => c.state === state && !c.done)
+}
+
+/** The threads the user has handled, in their own section. */
+function doneThreads(conversations: ConversationSummary[]): ConversationSummary[] {
+  return conversations.filter((c) => c.done)
 }
 
 /** Names if we have them, otherwise the bare address. */
@@ -78,6 +101,25 @@ function NoReplyTag() {
  * The inbox is one merged list, so a row has to say where it came from — with
  * several addresses in play, "who is this from" is only half the question.
  */
+/**
+ * The user's own "handled" mark.
+ *
+ * The counterpart of the unread dot, and the two are the pair that used to be
+ * missing: the dot is mail they have not opened, this is mail they have dealt
+ * with. `title` is the difference in words, because the point of the pair is that
+ * nobody has to guess which is which.
+ */
+function DoneTag() {
+  return (
+    <span
+      title={DONE_META.description}
+      className="shrink-0 rounded-full border border-success/30 bg-success/15 px-1.5 py-px text-[10px] font-medium tracking-wide text-success uppercase"
+    >
+      {DONE_META.label}
+    </span>
+  )
+}
+
 function AccountTag({ email }: { email: string }) {
   return (
     <span className="shrink-0 rounded-full border border-border bg-background px-1.5 py-px text-[10px] font-medium text-muted-foreground">
@@ -175,8 +217,26 @@ function ConversationRow({
       >
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-card-foreground">
-              {title}
+            <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-card-foreground">
+              {/*
+               * Incoming mail the user has not opened. Only unseen mail earns
+               * this: a thread they have read but not answered is not new — it is
+               * the one case where looking away would lose a reply, so it keeps
+               * its row's weight and stays where it is.
+               */}
+              {conversation.unseen ? (
+                <span
+                  role="img"
+                  aria-label={READ_META.description}
+                  title={READ_META.description}
+                  className="size-2 shrink-0 rounded-full bg-primary"
+                />
+              ) : null}
+              <span
+                className={cn('truncate', conversation.unseen && 'font-semibold')}
+              >
+                {title}
+              </span>
             </p>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {participantsOf(conversation)}
@@ -199,7 +259,14 @@ function ConversationRow({
         ) : null}
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <StateBadge state={conversation.state} />
+          {/* Faint in the Done section: the state is the one it had when the user
+              finished with it, kept rather than rewritten, and dimming it says so
+              without hiding it. */}
+          <StateBadge
+            state={conversation.state}
+            className={conversation.done ? 'opacity-60' : undefined}
+          />
+          {conversation.done ? <DoneTag /> : null}
           {/* A human thread can still have nobody to answer — same "No reply"
               tag as an automated card, since the composer is hidden either way. */}
           {conversation.replyable ? null : <NoReplyTag />}
@@ -220,6 +287,91 @@ function ConversationRow({
         </div>
       </Link>
     </li>
+  )
+}
+
+/**
+ * The bar under a mailbox's progress line.
+ *
+ * A determinate bar once the total is known, and a moving sliver when it is not
+ * — `threads.list` has to finish paging before there is a denominator, and a bar
+ * that guessed at one would be lying in the run that matters most.
+ */
+function SyncProgressBar({ progress }: { progress: AccountSyncProgress }) {
+  const { processed, estimated } = progress
+  const known = estimated !== null && estimated > 0
+  const done = known ? Math.min(processed, estimated) : 0
+
+  return (
+    <div
+      role="progressbar"
+      aria-label={`Syncing ${progress.email}`}
+      aria-valuemin={0}
+      aria-valuemax={known ? estimated : undefined}
+      aria-valuenow={known ? done : undefined}
+      className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-border/60"
+    >
+      <div
+        className={cn(
+          'h-full rounded-full bg-primary',
+          known ? 'transition-[width] duration-500' : 'w-1/3 animate-pulse',
+        )}
+        style={known ? { width: `${(done / estimated) * 100}%` } : undefined}
+      />
+    </div>
+  )
+}
+
+/** "42 of ~600", or just "42 so far" before the total is known. */
+function progressLabel(progress: AccountSyncProgress): string {
+  if (progress.estimated === null) {
+    return progress.processed > 0 ? `${progress.processed} so far` : 'starting…'
+  }
+
+  return `${Math.min(progress.processed, progress.estimated)} of ~${progress.estimated}`
+}
+
+/**
+ * What a sync that is still running looks like.
+ *
+ * The first backfill of a real mailbox is minutes of work, and until this
+ * existed the page simply sat there — the run was awaited by the loader, so
+ * adding an account looked like a hang. The numbers come from the sync itself,
+ * so the bar moves for a reason.
+ */
+function SyncBanner({ syncing }: { syncing: AccountSyncProgress[] }) {
+  return (
+    <div
+      role="status"
+      className="mt-6 rounded-md border border-border bg-muted/30 px-4 py-3"
+    >
+      <p className="text-sm font-medium text-foreground">
+        {syncing.length === 1
+          ? 'Syncing your mailbox…'
+          : `Syncing ${syncing.length} mailboxes…`}
+      </p>
+
+      <ul className="mt-2 space-y-2">
+        {syncing.map((progress) => (
+          <li key={progress.id}>
+            <div className="flex items-baseline justify-between gap-3 text-xs">
+              <span className="truncate text-muted-foreground">
+                {progress.email}
+              </span>
+              <span className="shrink-0 text-muted-foreground">
+                {progressLabel(progress)}
+              </span>
+            </div>
+            <SyncProgressBar progress={progress} />
+          </li>
+        ))}
+      </ul>
+
+      <p className="mt-2 text-xs text-muted-foreground">
+        Conversations appear in the list as they are synced. A large mailbox can
+        take a few minutes the first time.
+      </p>
+    </div>
   )
 }
 
@@ -290,20 +442,42 @@ export function Inbox({
     accounts,
     conversations,
     counts,
+    doneCount,
     syncError,
     authRequiredAccounts,
     lastSyncedAt,
+    syncing,
   } = payload
 
   // Every state is present in `counts`, including zeroes — an absent key would
   // mean the counts and the list disagree, which is worth hiding rather than
   // papering over.
   const visibleStates = STATE_ORDER.filter((state) => counts[state] > 0)
+  const done = doneThreads(conversations)
 
   return (
     <div className="mx-auto max-w-2xl p-8">
       <header className="flex items-baseline justify-between gap-4">
-        <h1 className="text-3xl font-bold">Lumen</h1>
+        <div>
+          <h1 className="text-3xl font-bold">Lumen</h1>
+          {/*
+           * The two marks, in words, once — because the dot and the tag are only
+           * obvious to whoever wrote them. One is a fact the app noticed, the
+           * other is a decision the user made, and saying so here is cheaper than
+           * expecting anyone to work it out from the two rows side by side.
+           */}
+          <p className="mt-1 text-xs text-muted-foreground">
+            <span
+              aria-hidden="true"
+              className="mr-1.5 inline-block size-2 rounded-full bg-primary align-middle"
+            />
+            {READ_META.label} — mail you have not opened. {' '}
+            <span className="font-medium text-foreground">
+              {DONE_META.label}
+            </span>{' '}
+            — you handled it, so it is out of the groups below.
+          </p>
+        </div>
         {/* All connected mailboxes are merged into the one list below. The
             "Add mailbox" action re-runs the same OAuth flow as the sign-in
             prompt, but accounts are global, so signing in again connects the
@@ -385,10 +559,15 @@ export function Inbox({
         </p>
       ) : null}
 
+      {syncing.length > 0 ? <SyncBanner syncing={syncing} /> : null}
+
       {conversations.length === 0 ? (
         <p className="mt-8 text-sm text-muted-foreground">
-          Nothing synced yet
-          {lastSyncedAt ? '' : ' — this may take a moment on first run.'}
+          {syncing.length > 0
+            ? 'The first sync is running — conversations will appear here as they arrive.'
+            : lastSyncedAt
+              ? 'Nothing in the synced window.'
+              : 'Nothing synced yet.'}
         </p>
       ) : (
         <div className="mt-8 space-y-8">
@@ -422,6 +601,44 @@ export function Inbox({
               </ul>
             </section>
           ))}
+
+          {/*
+           * Last, and its own section rather than another state: these are the
+           * threads the user has said they are finished with, and the reason to
+           * split them out is that the groups above are what still wants
+           * attention. New mail moves a thread back up here on its own.
+           */}
+          {doneCount > 0 ? (
+            <section>
+              <div className="mb-3 flex items-baseline justify-between gap-4">
+                <h2 className="text-sm font-semibold tracking-wide text-muted-foreground uppercase">
+                  {DONE_GROUP.label}
+                </h2>
+                <span className="text-xs text-muted-foreground">
+                  {doneCount}
+                </span>
+              </div>
+              <p className="mb-3 text-xs text-muted-foreground">
+                {DONE_GROUP.description}
+              </p>
+
+              <ul className="space-y-3">
+                {done.map((conversation) =>
+                  conversation.isAutomated ? (
+                    <AutomatedRow
+                      key={conversation.id}
+                      conversation={conversation}
+                    />
+                  ) : (
+                    <ConversationRow
+                      key={conversation.id}
+                      conversation={conversation}
+                    />
+                  ),
+                )}
+              </ul>
+            </section>
+          ) : null}
         </div>
       )}
     </div>

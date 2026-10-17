@@ -631,6 +631,53 @@ export function cleanBody(
 }
 
 /**
+ * A reference to an inline image that a plain-text body shows as literal text.
+ *
+ * Outlook, Gmail and the calendar invites they emit put the image in the HTML
+ * part and write `[cid:logo]` where it belongs in the text part — the filename
+ * or the Content-ID, wrapped in brackets. It is a placeholder, not something the
+ * sender typed, and it reads as noise in a chat bubble.
+ */
+const CID_PLACEHOLDER = /\[cid:[^\]\r\n]*\]/i
+
+/** The same token, matched repeatedly for removal. */
+const CID_PLACEHOLDER_GLOBAL = /\[cid:[^\]\r\n]*\]/gi
+
+/**
+ * Remove `[cid:...]` image placeholders from a plain-text body.
+ *
+ * Most often the token is the sender's signature logo, which makes this more
+ * than cosmetic: the signature is stored and offered back when replying, so the
+ * placeholder would otherwise be pasted into the user's own reply as text.
+ *
+ * A token alone on its line is dropped together with the line: the image occupied
+ * that line, and leaving the blank behind only separates a signature from the
+ * name above it.
+ */
+export function stripCidPlaceholders(text: string): string {
+  if (!CID_PLACEHOLDER.test(text)) return text
+
+  // Line-wise rather than with a global replace: a token that is the whole line
+  // takes the line with it, and a token inside a sentence leaves a double space
+  // behind that has to be closed up. Doing both in one pattern trades one
+  // artifact for the other.
+  return text
+    .split('\n')
+    .filter((line) => !WHOLE_LINE_CID.test(line))
+    .map((line) => {
+      if (!CID_PLACEHOLDER.test(line)) return line
+      return line
+        .replace(CID_PLACEHOLDER_GLOBAL, ' ')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim()
+    })
+    .join('\n')
+}
+
+/** A line that holds nothing but an image placeholder. */
+const WHOLE_LINE_CID = /^[ \t]*\[cid:[^\]\r\n]*\][ \t]*\r?$/i
+
+/**
  * HTML handling lives in `html.ts`.
  *
  * The DOM-based extractor there replaced an earlier regex implementation that

@@ -15,6 +15,7 @@ export type {
 export {
   cleanBody,
   findQuoteStart,
+  stripCidPlaceholders,
   stripGreeting,
   stripInvisibleCharacters,
   stripQuotedText,
