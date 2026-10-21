@@ -78,6 +78,45 @@ describe('JevDecisionModel', () => {
     expect(verdict.reasoning).toBeTruthy()
   })
 
+  test('includes a user-authored contact rating as context for the importance decision', async () => {
+    let requestState = ''
+    let instructions = ''
+    const fetchImpl: FetchLike = async (_url, init) => {
+      const body = JSON.parse(init.body) as {
+        state: string
+        questions: { importance: { instructions: string } }
+      }
+      requestState = body.state
+      instructions = body.questions.importance.instructions
+      return json(200, { answers: {} })
+    }
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
+
+    await model.decide(
+      {
+        ...INPUT,
+        senderImportance: 9,
+        senderContext: {
+          roleCompany: 'CEO of Acme',
+          relationship: 'Long-term customer',
+          topics: 'Product launch',
+          currentWork: 'Planning the next release',
+          importance: 9,
+        },
+      },
+      RULES_ABSTAINED,
+    )
+
+    expect(requestState).toContain('Contact importance: 9/10')
+    expect(requestState).toContain('Long-term customer')
+    expect(requestState).toContain('Planning the next release')
+    expect(instructions).toContain('personally rated this correspondent 9/10')
+  })
+
   test('skips the replyability question for machine mail', async () => {
     let askedReplyable = true
     const fetchImpl: FetchLike = async (_url, init) => {

@@ -52,6 +52,7 @@ describe('contact context profiles', () => {
       relationship: 'Met through the founders group',
       topics: 'Hiring and partnership',
       currentWork: 'Launching a new product',
+      importance: 9,
     })
 
     expect(saved?.email).toBe(CONTACT)
@@ -65,6 +66,7 @@ describe('contact context profiles', () => {
       relationship: '',
       topics: '',
       currentWork: '',
+      importance: 7,
     })
     expect((await getContactContext(ALICE, CONTACT))?.roleCompany).toBe(
       'CEO of Acme',
@@ -75,8 +77,22 @@ describe('contact context profiles', () => {
       relationship: '',
       topics: '',
       currentWork: '',
+      importance: null,
     })
     expect(cleared).toBeNull()
+    expect(await getContactContext(ALICE, CONTACT)).toBeNull()
+  })
+
+  test('refuses an importance rating outside 1–10', async () => {
+    expect(
+      await saveContactContext(ALICE, CONTACT, {
+        roleCompany: '',
+        relationship: '',
+        topics: '',
+        currentWork: '',
+        importance: 11,
+      }),
+    ).toBeNull()
     expect(await getContactContext(ALICE, CONTACT)).toBeNull()
   })
 
@@ -86,6 +102,7 @@ describe('contact context profiles', () => {
       relationship: '',
       topics: '',
       currentWork: '',
+      importance: null,
     })
 
     expect(saved).toBeNull()

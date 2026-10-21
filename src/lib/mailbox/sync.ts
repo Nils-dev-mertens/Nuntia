@@ -36,9 +36,11 @@ import type {
   DecisionPipeline,
   ParsingProfileContext,
 } from '#/lib/conversation/index.ts'
-import { setCursor } from '#/lib/auth/accounts.ts'
+import { listAccounts, setCursor } from '#/lib/auth/accounts.ts'
 import { cursorKindFor } from './types.ts'
 import { loadDecisionPipeline } from '#/lib/ai/index.ts'
+import { listContactDecisionContextByEmail } from '#/lib/contacts/context.ts'
+import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
 
 /** Progress callback, so a long backfill can report what it is doing. */
 export type SyncProgress = (event: SyncEvent) => void
@@ -75,16 +77,21 @@ export type SyncEvent =
 export type SenderFacts = {
   ignored: ReadonlySet<string>
   unreplyable: ReadonlySet<string>
+  contactContext: ReadonlyMap<string, ContactDecisionContext>
 }
 
-/** Read both sets for one account. Private: callers get them through a batch. */
-async function loadSenderFacts(accountId: string): Promise<SenderFacts> {
-  const [ignored, unreplyable] = await Promise.all([
+/** Read sender signals and user-authored contact ratings once for a batch. */
+async function loadSenderFacts(
+  accountId: string,
+  userId: string,
+): Promise<SenderFacts> {
+  const [ignored, unreplyable, contactContext] = await Promise.all([
     listIgnoredSenders(accountId),
     listUnreplyableSenders(accountId),
+    listContactDecisionContextByEmail(userId),
   ])
 
-  return { ignored, unreplyable }
+  return { ignored, unreplyable, contactContext }
 }
 
 export type SyncOptions = {
@@ -212,7 +219,8 @@ export async function decideAndSave(
   )
   const withCall: Conversation = { ...conversation, ...storedUserFields }
 
-  const senderFacts = opts.senderFacts ?? (await loadSenderFacts(accountId))
+  const senderFacts =
+    opts.senderFacts ?? (await loadSenderFacts(accountId, opts.userId))
   const otherParty = otherPartyOf(withCall)
 
   const decision = await decideConversation(
@@ -227,6 +235,9 @@ export async function decideAndSave(
       // the model is asked — and which a re-decide must therefore read from the
       // stored preference rather than infer.
       unreplyableSender: senderFacts.unreplyable.has(otherParty),
+      senderImportance:
+        senderFacts.contactContext.get(otherParty)?.importance ?? null,
+      senderContext: senderFacts.contactContext.get(otherParty) ?? null,
     },
     opts.pipeline ?? (await loadDecisionPipeline(opts.userId)),
   )
@@ -255,6 +266,51 @@ export async function decideAndSave(
  * and skipped rather than thrown: this runs from a load path, and one bad
  * conversation must not blank the inbox.
  */
+export async function redecideConversationsForSender(
+  userId: string,
+  senderEmail: string,
+): Promise<number> {
+  const sender = senderEmail.trim().toLowerCase()
+  if (!sender) return 0
+
+  const accounts = await listAccounts(userId)
+  if (accounts.length === 0) return 0
+  const pipeline = await loadDecisionPipeline(userId)
+  let redecided = 0
+
+  for (const account of accounts) {
+    const [conversations, senderFacts] = await Promise.all([
+      listConversations(account.id, { includeArchived: true }),
+      loadSenderFacts(account.id, userId),
+    ])
+    const matching = conversations.filter((conversation) =>
+      conversation.messages.some(
+        (message) =>
+          !message.isFromOwner &&
+          message.from.email.trim().toLowerCase() === sender,
+      ),
+    )
+
+    for (const conversation of matching) {
+      try {
+        await decideAndSave(account.id, conversation, {
+          userId,
+          pipeline,
+          senderFacts,
+        })
+        redecided++
+      } catch (error) {
+        console.error(
+          `[contact] could not re-decide ${conversation.providerThreadId}:`,
+          reasonOf(error),
+        )
+      }
+    }
+  }
+
+  return redecided
+}
+
 export async function redecideStoredConversations(
   accountId: string,
   userId: string,
@@ -265,7 +321,7 @@ export async function redecideStoredConversations(
   if (conversations.length === 0) return 0
 
   const pipeline = await loadDecisionPipeline(userId)
-  const senderFacts = await loadSenderFacts(accountId)
+  const senderFacts = await loadSenderFacts(accountId, userId)
 
   let redecided = 0
   for (const conversation of conversations) {
@@ -415,7 +471,7 @@ export async function backfill(
 
   const targets = opts.limit ? threadIds.slice(0, opts.limit) : threadIds
   const profileContext = await getParsingProfileContext(accountId)
-  const senderFacts = await loadSenderFacts(accountId)
+  const senderFacts = await loadSenderFacts(accountId, opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 
@@ -493,7 +549,7 @@ export async function syncIncremental(
     ? [...threadIds].slice(0, opts.limit)
     : [...threadIds]
   const profileContext = await getParsingProfileContext(accountId)
-  const senderFacts = await loadSenderFacts(accountId)
+  const senderFacts = await loadSenderFacts(accountId, opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 

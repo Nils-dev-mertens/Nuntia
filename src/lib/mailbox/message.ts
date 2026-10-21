@@ -42,9 +42,24 @@ function decodeText(part: LooseProviderPart): string {
   if (!part.data) return ''
 
   const bytes = decodeGmailData(part.data)
+  const contentType = part.headers?.['content-type'] ?? ''
+  const charset = /charset\s*=\s*["']?([^;"'\s]+)/i.exec(contentType)?.[1]
 
-  // Body parts are UTF-8 in practice. Decoding strictly and falling back avoids
-  // throwing on a mislabeled legacy message.
+  // Use the part's declared charset first; older mail often uses Windows-1252
+  // or ISO-8859-1 even though modern messages are UTF-8. Unknown/mislabeled
+  // values still fall back safely rather than dropping the message.
+  if (charset) {
+    try {
+      return new TextDecoder(charset, { fatal: true }).decode(bytes)
+    } catch {
+      try {
+        return new TextDecoder(charset).decode(bytes)
+      } catch {
+        // Continue with the UTF-8 fallback below.
+      }
+    }
+  }
+
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   } catch {
@@ -74,6 +89,15 @@ function findPart(
   predicate: (p: LooseProviderPart) => boolean,
 ): LooseProviderPart | null {
   if (!part) return null
+
+  // A text/plain or text/html attachment is not the message body. Do not descend
+  // into an attached message either; it is a separate document the user opens.
+  if (
+    part.filename ||
+    /attachment/i.test(part.headers?.['content-disposition'] ?? '')
+  ) {
+    return null
+  }
   if (predicate(part)) return part
 
   for (const child of part.children ?? []) {

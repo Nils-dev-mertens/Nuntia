@@ -91,6 +91,7 @@ export {
   reparseStoredMessages,
   saveConversation,
   getParsingProfileContext,
+  saveAccountParsingDefaults,
   saveParsingProfile,
   setAttachmentLocalPath,
   setConversationDetails,

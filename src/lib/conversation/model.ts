@@ -53,6 +53,10 @@ export type ConversationMessage = {
   cc: Participant[]
   subject: string
   snippet: string | null
+  /** Original text body retained locally so future parser improvements can recover removed content. */
+  rawBodyText?: string | null
+  /** Original HTML body retained locally so future parser improvements can recover removed content. */
+  rawBodyHtml?: string | null
   /** Body with greeting, signature and quoted history removed. */
   body: string
   /** HTML body retained for rich rendering, with quoted history stripped. */
@@ -450,17 +454,28 @@ export function cleanMessage(
       .replace(/\r/g, '\n')
       .split('\n')
     const quoteStart = findQuoteStart(lines)
+    // Some clients mark quoted history only in HTML. When that structural
+    // evidence exists and the plain alternative has no recognizable boundary,
+    // use the HTML projection so the prior conversation is neither duplicated
+    // nor mistaken for the sender's new text.
+    const htmlExtracted = html ? extractHtmlBody(html) : null
+    const htmlHasQuote = Boolean(htmlExtracted?.quote && htmlExtracted.body)
     // `stripQuotedText` deliberately keeps all-quote forwards intact. Only
-    // split the message when stripping actually found a quote to remove.
+    // split the text part when stripping actually found a quote to remove.
     const hasRemovableQuote = quoteStart >= 0 && detectedQuote.quote !== null
-    const userText = hasRemovableQuote
-      ? lines.slice(0, quoteStart).join('\n').trim()
-      : visible.trim()
-    const retainedQuote =
-      !shouldStripQuote && hasRemovableQuote
-        ? lines.slice(quoteStart).join('\n').trim()
+    const userText =
+      htmlHasQuote && !hasRemovableQuote
+        ? htmlExtracted!.body
+        : hasRemovableQuote
+          ? lines.slice(0, quoteStart).join('\n').trim()
+          : visible.trim()
+    const detectedQuoteText = hasRemovableQuote
+      ? lines.slice(quoteStart).join('\n').trim()
+      : htmlHasQuote
+        ? htmlExtracted!.quote
         : null
-    quote = shouldStripQuote ? detectedQuote.quote : null
+    const retainedQuote = !shouldStripQuote ? detectedQuoteText : null
+    quote = shouldStripQuote ? detectedQuoteText : null
 
     const detectedSigned = stripSignature(userText)
     signature = detectedSigned.signature
@@ -530,6 +545,8 @@ export function cleanMessage(
     cc: message.cc.map(toParticipant),
     subject: message.subject,
     snippet: null,
+    rawBodyText: text,
+    rawBodyHtml: html,
     body,
     bodyHtml,
     greeting: shouldStripGreeting ? greeting : null,

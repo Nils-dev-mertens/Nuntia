@@ -22,6 +22,9 @@ const STRONG_QUOTE_MARKERS: RegExp[] = [
   /^\s*-{2,}\s*forwarded(\s+message)?\s*-{2,}\s*$/i,
   // Apple Mail / Gmail web: "On <date>, <person> wrote:"
   /^\s*on .{0,200}\bwrote:\s*$/i,
+  // Forwarded-message headers vary in spacing and locale, but a From/Sent/To
+  // header run is much stronger evidence than any single header line.
+  /^\s*(from|de|van):\s*.+$/i,
   // Outlook web / new Outlook: a long machine-drawn rule of underscores above
   // the "From:" block. Long enough that it is not a person underlining a word.
   /^_{10,}$/,
@@ -361,18 +364,30 @@ export function findQuoteStart(lines: string[]): number {
     const line = lines[i]
     const trimmed = line.trim()
 
-    // A `>` prefix is a near-universal convention, so it counts anywhere —
-    // except on the very first line of a body that is otherwise all content.
-    if (QUOTED_LINE.test(line)) return i
+    // A `>` prefix is the strongest plain-text signal. A single quoted line in
+    // the middle of a paragraph can be intentional; require a quoted block or
+    // an attribution/header above it before treating it as history.
+    if (QUOTED_LINE.test(line)) {
+      if (
+        i > 0 &&
+        (isQuoteAttribution(lines[i - 1] ?? '') ||
+          lines.slice(i).filter((candidate) => QUOTED_LINE.test(candidate))
+            .length >= 2)
+      ) {
+        return i
+      }
+    }
 
-    if (STRONG_QUOTE_MARKERS.some((m) => m.test(trimmed))) return i
-
-    // The Outlook reply header marks a boundary wherever it sits. A lone
-    // `From:` could be the body (hence the positional weak marker below), but
-    // the `From:` + `Sent:`/`Date:` block only appears above quoted history.
     if (isOutlookHeaderBlock(lines, i)) return i
 
-    if (i >= floor && WEAK_QUOTE_MARKERS.some((m) => m.test(trimmed))) {
+    if (STRONG_QUOTE_MARKERS.some((marker) => marker.test(trimmed))) {
+      return i
+    }
+
+    if (
+      i >= floor &&
+      WEAK_QUOTE_MARKERS.some((marker) => marker.test(trimmed))
+    ) {
       return i
     }
   }
@@ -380,20 +395,27 @@ export function findQuoteStart(lines: string[]): number {
   return -1
 }
 
+/** A standalone attribution line such as "On Tuesday, Alex wrote:". */
+function isQuoteAttribution(line: string): boolean {
+  return /^\s*on .{0,200}\bwrote:\s*$/i.test(line.trim())
+}
+
 /**
- * A `From:` line followed by `Sent:`/`Date:`, as Outlook writes above a quote.
- *
- * The pair is what makes it unambiguous: a message that merely begins "From:"
- * does not carry the rest of the header block.
+ * Recognise a forwarded/replied message header as a sequence, not a single
+ * `From:` field. The nearby fields can vary between Outlook and localized clients.
  */
 function isOutlookHeaderBlock(lines: string[], index: number): boolean {
-  if (!/^\s*from:\s*\S/i.test((lines[index] ?? '').trim())) return false
+  const first = (lines[index] ?? '').trim()
+  if (!/^\s*(from|de|van):\s*\S/i.test(first)) return false
 
-  for (const line of lines.slice(index + 1, index + 4)) {
-    if (/^\s*(sent|date):/i.test(line.trim())) return true
-  }
-
-  return false
+  const headerCount = lines
+    .slice(index, index + 8)
+    .filter((line) =>
+      /^\s*(from|de|van|sent|date|to|cc|subject|onderwerp|betreff):\s*\S/i.test(
+        line.trim(),
+      ),
+    ).length
+  return headerCount >= 2
 }
 
 /**

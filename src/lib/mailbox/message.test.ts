@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { ProviderMessage, ProviderPart } from '#/lib/mailbox/types.ts'
-import { findAttachmentPart } from '#/lib/mailbox/message.ts'
+import { findAttachmentPart, toParsedMessage } from '#/lib/mailbox/message.ts'
 
 /** One leaf part, shaped the way `toProviderPart` leaves a real attachment. */
 function attachmentPart(args: {
@@ -50,6 +50,70 @@ const PHOTO = {
   isInline: false,
   contentId: null,
 }
+
+describe('provider body decoding', () => {
+  test('prefers declared legacy charset over UTF-8 replacement decoding', () => {
+    const bytes = Buffer.from([0x63, 0x61, 0x66, 0xe9])
+    const body = {
+      partId: '1',
+      mimeType: 'text/plain',
+      filename: null,
+      data: bytes.toString('base64url'),
+      headers: { 'content-type': 'text/plain; charset=windows-1252' },
+      children: [],
+    }
+    const parsed = toParsedMessage({
+      id: 'legacy-char-set',
+      threadId: 't1',
+      labelIds: [],
+      internalDate: '1700000000000',
+      snippet: null,
+      payload: {
+        partId: '0',
+        mimeType: 'multipart/alternative',
+        filename: null,
+        headers: {
+          from: 'alice@example.com',
+          to: 'me@example.com',
+          subject: 'Legacy encoding',
+        },
+        children: [body],
+      },
+    })
+
+    expect(parsed.parts[0].text).toBe('café')
+  })
+
+  test('does not use text attachments as the message body', () => {
+    const parsed = toParsedMessage({
+      id: 'attached-message',
+      threadId: 't1',
+      labelIds: [],
+      internalDate: '1700000000000',
+      snippet: null,
+      payload: {
+        partId: '0',
+        mimeType: 'multipart/mixed',
+        filename: null,
+        headers: { from: 'alice@example.com', to: 'me@example.com' },
+        children: [
+          {
+            partId: '1',
+            mimeType: 'text/plain',
+            filename: 'notes.txt',
+            data: Buffer.from('attached note').toString('base64url'),
+            headers: {
+              'content-disposition': 'attachment; filename=notes.txt',
+            },
+            children: [],
+          },
+        ],
+      },
+    })
+
+    expect(parsed.parts).toEqual([])
+  })
+})
 
 describe('findAttachmentPart', () => {
   test('uses the recorded id when it is still current', () => {

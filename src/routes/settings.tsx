@@ -49,9 +49,15 @@ import {
   removeUnreplyableSender,
 } from '#/lib/gmail/service.ts'
 import {
+  getParsingProfileContext,
   listIncomingSenders,
   listUnreplyableSenders,
+  reparseStoredMessages,
+  saveAccountParsingDefaults,
 } from '#/lib/conversation/index.ts'
+import type { ParsingPreferences } from '#/lib/conversation/index.ts'
+import { assertOwnedAccount } from '#/lib/auth/accounts.ts'
+import { redecideStoredConversations } from '#/lib/mailbox/sync.ts'
 // The draft limits are imported from the pure module that defines them, not from
 // the conversation barrel: the barrel also re-exports the repository and the
 // decision pipeline, and a browser import of it drags `node:fs` (the AI log)
@@ -62,6 +68,15 @@ import {
 } from '#/lib/conversation/draft.ts'
 import { cn } from '#/lib/utils'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
+import {
+  listOrganizationRules,
+  saveOrganizationRules,
+} from '#/lib/organization/store.ts'
+import type { OrganizationRule } from '#/lib/organization/matching.ts'
+import {
+  ORGANIZATION_RULE_FIELDS,
+  ORGANIZATION_RULE_LIMITS,
+} from '#/lib/organization/matching.ts'
 
 /** Provider choices for the topic generator. Labels only — no server code. */
 const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
@@ -78,11 +93,16 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     | { signedIn: false }
     | {
         signedIn: true
-        settings: AiSettingsSummary /** Connected mailboxes, so they can be listed and cleared out. */
+        settings: AiSettingsSummary
+        organizationRules: OrganizationRule[]
+        /** Connected mailboxes, so they can be listed and cleared out. */
         accounts: Array<{
           id: string
           email: string
           provider: 'google' | 'microsoft'
+          parsingDefaults: ParsingPreferences
+          defaultReplyGreeting: string
+          defaultReplySignature: string
         }>
         /** Whether avatars may be fetched from Gravatar (opt-in, off by default). */
         useGravatar: boolean
@@ -174,11 +194,20 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     return {
       signedIn: true,
       settings: await getAiSettings(session.userId),
-      accounts: accounts.map((account) => ({
-        id: account.id,
-        email: account.email,
-        provider: account.provider,
-      })),
+      organizationRules: await listOrganizationRules(session.userId),
+      accounts: await Promise.all(
+        accounts.map(async (account) => {
+          const profile = await getParsingProfileContext(account.id)
+          return {
+            id: account.id,
+            email: account.email,
+            provider: account.provider,
+            parsingDefaults: profile.parsingDefaults,
+            defaultReplyGreeting: profile.replyStyles.account.greeting ?? '',
+            defaultReplySignature: profile.replyStyles.account.signature ?? '',
+          }
+        }),
+      ),
       viewer: {
         id: viewer.id,
         email: viewer.email,
@@ -236,6 +265,70 @@ const forgetAccountAction = createServerFn({ method: 'POST' })
  * request carries an MD5 of each address, which is why it is an explicit choice
  * rather than an opt-out nobody notices.
  */
+const saveParsingDefaultsAction = createServerFn({ method: 'POST' })
+  .inputValidator(
+    (data: {
+      accountId: string
+      parsing: ParsingPreferences
+      greeting: string
+      signature: string
+    }) => data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+    if (
+      typeof data.parsing.stripQuotedHistory !== 'boolean' ||
+      typeof data.parsing.stripGreeting !== 'boolean' ||
+      typeof data.parsing.stripSignature !== 'boolean' ||
+      typeof data.greeting !== 'string' ||
+      typeof data.signature !== 'string' ||
+      data.greeting.length > 200 ||
+      data.signature.length > 1000
+    ) {
+      return { error: 'Parsing settings are invalid or too long.' }
+    }
+
+    try {
+      const accountId = data.accountId.trim().toLowerCase()
+      await assertOwnedAccount(session.userId, accountId)
+      await saveAccountParsingDefaults(accountId, {
+        parsing: data.parsing,
+        greeting: data.greeting.trim() || null,
+        signature: data.signature.trim() || null,
+      })
+      const context = await getParsingProfileContext(accountId)
+      await reparseStoredMessages(accountId, context)
+      await redecideStoredConversations(accountId, session.userId)
+      return { error: null }
+    } catch (error) {
+      console.error('[settings] saving parsing defaults failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not save parsing settings.',
+      }
+    }
+  })
+
+const saveOrganizationRulesAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => data)
+  .handler(async ({ data }): Promise<{ rules: OrganizationRule[] | null; error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { rules: null, error: 'You are not signed in.' }
+
+    try {
+      const rules = await saveOrganizationRules(session.userId, data)
+      return rules
+        ? { rules, error: null }
+        : { rules: null, error: 'Organization rules are invalid or exceed the limit.' }
+    } catch (error) {
+      console.error('[settings] saving organization rules failed:', error)
+      return { rules: null, error: 'Could not save organization rules.' }
+    }
+  })
+
 const saveGravatarAction = createServerFn({ method: 'POST' })
   .validator((data: { useGravatar: boolean }) => data)
   .handler(async ({ data }): Promise<{ error: string | null }> => {
@@ -476,6 +569,254 @@ type SignedInSettings = Extract<
  * now, so the only variable left is how many mailboxes the user has — and a user
  * with none still has an account, keys to set, and devices to sign out.
  */
+function OrganizationRulesEditor({
+  initialRules,
+}: {
+  initialRules: OrganizationRule[]
+}) {
+  const router = useRouter()
+  const [rules, setRules] = useState(initialRules)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  function updateRule(id: string, patch: Partial<OrganizationRule>) {
+    setRules((current) =>
+      current.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule)),
+    )
+    setMessage(null)
+  }
+
+  function moveRule(index: number, offset: -1 | 1) {
+    const nextIndex = index + offset
+    if (nextIndex < 0 || nextIndex >= rules.length) return
+    setRules((current) => {
+      const reordered = [...current]
+      ;[reordered[index], reordered[nextIndex]] = [
+        reordered[nextIndex],
+        reordered[index],
+      ]
+      return reordered
+    })
+    setMessage(null)
+  }
+
+  async function save() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await saveOrganizationRulesAction({ data: rules })
+      if (result.error || !result.rules) {
+        setError(result.error ?? 'Could not save organization rules.')
+        return
+      }
+      setRules(result.rules)
+      setMessage('Organization rules saved.')
+      await router.invalidate()
+    } catch {
+      setError('Could not save organization rules.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const fieldLabels: Record<(typeof ORGANIZATION_RULE_FIELDS)[number], string> = {
+    'sender-email': 'Sender email is',
+    'sender-domain': 'Sender domain is',
+    'subject-contains': 'Subject contains',
+    'topic-contains': 'Topic contains',
+    'state-is': 'Conversation state is',
+  }
+  const inputClass =
+    'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
+
+  return (
+    <section className="mt-6 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">
+        Organization rules
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        File matching conversations into named inbox sections. Rules run from top
+        to bottom; the first enabled match wins. Unmatched threads stay in their
+        usual state groups, and Done threads stay in Done. Rules only change
+        organization, never the conversation state or AI classification.
+      </p>
+      {rules.length > 0 ? (
+        <ol className="mt-3 space-y-2">
+          {rules.map((rule, index) => (
+            <li
+              key={rule.id}
+              className="rounded-md border border-border p-3"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-medium text-muted-foreground">
+                  {index + 1}.
+                </span>
+                <input
+                  aria-label={`Rule ${index + 1} section name`}
+                  value={rule.name}
+                  maxLength={80}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateRule(rule.id, { name: event.target.value })
+                  }
+                  placeholder="Section name, e.g. Finance"
+                  className={`${inputClass} flex-1`}
+                />
+                <button
+                  type="button"
+                  aria-label={`Move rule ${index + 1} up`}
+                  disabled={busy || index === 0}
+                  onClick={() => moveRule(index, -1)}
+                  className="rounded border border-border px-2 py-1 text-xs disabled:opacity-40"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Move rule ${index + 1} down`}
+                  disabled={busy || index === rules.length - 1}
+                  onClick={() => moveRule(index, 1)}
+                  className="rounded border border-border px-2 py-1 text-xs disabled:opacity-40"
+                >
+                  ↓
+                </button>
+                <label className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateRule(rule.id, { enabled: event.target.checked })
+                    }
+                  />
+                  Enabled
+                </label>
+                <button
+                  type="button"
+                  aria-label={`Delete rule ${index + 1}`}
+                  disabled={busy}
+                  onClick={() =>
+                    setRules((current) =>
+                      current.filter((entry) => entry.id !== rule.id),
+                    )
+                  }
+                  className="rounded border border-destructive/40 px-2 py-1 text-xs text-destructive disabled:opacity-50"
+                >
+                  Delete
+                </button>
+              </div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <label className="text-[11px] text-muted-foreground">
+                  Match when
+                  <select
+                    aria-label={`Rule ${index + 1} match field`}
+                    value={rule.field}
+                    disabled={busy}
+                    onChange={(event) =>
+                      updateRule(rule.id, {
+                        field: event.target.value as OrganizationRule['field'],
+                        value:
+                          event.target.value === 'state-is'
+                            ? 'needs-action'
+                            : '',
+                      })
+                    }
+                    className={`${inputClass} mt-1 block w-full`}
+                  >
+                    {ORGANIZATION_RULE_FIELDS.map((field) => (
+                      <option key={field} value={field}>
+                        {fieldLabels[field]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-[11px] text-muted-foreground">
+                  {rule.field === 'state-is' ? 'State' : 'Value'}
+                  {rule.field === 'state-is' ? (
+                    <select
+                      aria-label={`Rule ${index + 1} match value`}
+                      value={rule.value}
+                      disabled={busy}
+                      onChange={(event) =>
+                        updateRule(rule.id, { value: event.target.value })
+                      }
+                      className={`${inputClass} mt-1 block w-full`}
+                    >
+                      <option value="needs-action">Needs action</option>
+                      <option value="waiting-for-reply">Waiting for reply</option>
+                      <option value="informational">Informational</option>
+                      <option value="low-priority">Low priority</option>
+                    </select>
+                  ) : (
+                    <input
+                      aria-label={`Rule ${index + 1} match value`}
+                      value={rule.value}
+                      maxLength={200}
+                      disabled={busy}
+                      onChange={(event) =>
+                        updateRule(rule.id, { value: event.target.value })
+                      }
+                      placeholder={
+                        rule.field === 'sender-domain'
+                          ? 'example.com'
+                          : rule.field === 'sender-email'
+                            ? 'billing@example.com'
+                            : 'Text to match'
+                      }
+                      className={`${inputClass} mt-1 block w-full`}
+                    />
+                  )}
+                </label>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No rules yet. Add one to create a custom inbox section.
+        </p>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy || rules.length >= ORGANIZATION_RULE_LIMITS.count}
+          onClick={() =>
+            setRules((current) => [
+              ...current,
+              {
+                id: crypto.randomUUID(),
+                name: '',
+                field: 'sender-domain',
+                value: '',
+                enabled: true,
+              },
+            ])
+          }
+          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          Add rule
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save()}
+          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Save organization rules'}
+        </button>
+        <span className="text-[11px] text-muted-foreground">
+          {rules.length}/{ORGANIZATION_RULE_LIMITS.count} rules
+        </span>
+      </div>
+      {error ? <p role="alert" className="mt-2 text-xs text-destructive">{error}</p> : null}
+      {message ? <p role="status" className="mt-2 text-xs text-muted-foreground">{message}</p> : null}
+    </section>
+  )
+}
+
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -485,6 +826,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
 
   const {
     settings,
+    organizationRules: initialOrganizationRules,
     accounts,
     aiLog,
     unreplyableSenders,
@@ -538,6 +880,21 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   // the first one, because most installs have exactly one.
   const [senderAccount, setSenderAccount] = useState(accounts[0]?.id ?? '')
   const [senderInput, setSenderInput] = useState('')
+  const [parsingDrafts, setParsingDrafts] = useState(() =>
+    Object.fromEntries(
+      accounts.map((account) => [
+        account.id,
+        {
+          ...account.parsingDefaults,
+          greeting: account.defaultReplyGreeting,
+          signature: account.defaultReplySignature,
+        },
+      ]),
+    ),
+  )
+  const [parsingBusy, setParsingBusy] = useState<string | null>(null)
+  const [parsingError, setParsingError] = useState<string | null>(null)
+  const [parsingMessage, setParsingMessage] = useState<string | null>(null)
 
   // Only the selected mailbox's senders. The list is per mailbox, and mixing two
   // mailboxes' addresses under one picker is how the wrong one gets marked.
@@ -740,6 +1097,41 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     }
   }
 
+  async function saveMailboxParsing(accountId: string) {
+    if (busy || parsingBusy) return
+    const draft = parsingDrafts[accountId]
+
+    setParsingBusy(accountId)
+    setParsingError(null)
+    setParsingMessage(null)
+    try {
+      const saved = await saveParsingDefaultsAction({
+        data: {
+          accountId,
+          parsing: {
+            stripQuotedHistory: draft.stripQuotedHistory,
+            stripGreeting: draft.stripGreeting,
+            stripSignature: draft.stripSignature,
+          },
+          greeting: draft.greeting,
+          signature: draft.signature,
+        },
+      })
+      if (saved.error) {
+        setParsingError(saved.error)
+        return
+      }
+      setParsingMessage(
+        `Saved parsing defaults for ${accounts.find((item) => item.id === accountId)?.email ?? accountId}. Existing messages were re-parsed.`,
+      )
+      await router.invalidate()
+    } catch {
+      setParsingError('Could not save mailbox parsing settings.')
+    } finally {
+      setParsingBusy(null)
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
@@ -889,6 +1281,122 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           </p>
         ) : null}
       </section>
+
+      <section className="mt-6 space-y-4 rounded-lg border border-border bg-card p-4">
+        <h2 className="text-sm font-semibold text-foreground">
+          Parsing defaults
+        </h2>
+        <p className="text-xs text-muted-foreground">
+          These defaults apply to new messages in each mailbox. Saving also
+          re-parses stored messages locally, including their original text and
+          HTML where available. Sender-specific overrides remain in each
+          conversation.
+        </p>
+        {accounts.map((account) => {
+          const draft = parsingDrafts[account.id] ?? {
+            ...account.parsingDefaults,
+            greeting: account.defaultReplyGreeting,
+            signature: account.defaultReplySignature,
+          }
+          const toggle = (key: keyof ParsingPreferences, label: string) => (
+            <label className="flex items-center gap-2 text-xs text-foreground">
+              <input
+                type="checkbox"
+                checked={draft[key]}
+                disabled={parsingBusy !== null}
+                onChange={(event) =>
+                  setParsingDrafts((current) => ({
+                    ...current,
+                    [account.id]: {
+                      ...(current[account.id] ?? draft),
+                      [key]: event.target.checked,
+                    },
+                  }))
+                }
+              />
+              Strip {label}
+            </label>
+          )
+          return (
+            <div
+              key={account.id}
+              className="rounded-md border border-border p-3"
+            >
+              <h3 className="text-xs font-medium text-foreground">
+                {account.email} ·{' '}
+                {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
+              </h3>
+              <div className="mt-3 space-y-2">
+                {toggle('stripQuotedHistory', 'quoted history')}
+                {toggle('stripGreeting', 'greetings')}
+                {toggle('stripSignature', 'signatures')}
+                <Field label="Default reply greeting">
+                  <input
+                    value={draft.greeting}
+                    maxLength={200}
+                    disabled={parsingBusy !== null}
+                    onChange={(event) =>
+                      setParsingDrafts((current) => ({
+                        ...current,
+                        [account.id]: {
+                          ...(current[account.id] ?? draft),
+                          greeting: event.target.value,
+                        },
+                      }))
+                    }
+                    className={inputClass}
+                  />
+                </Field>
+                <Field label="Default reply signature">
+                  <textarea
+                    value={draft.signature}
+                    maxLength={1000}
+                    rows={2}
+                    disabled={parsingBusy !== null}
+                    onChange={(event) =>
+                      setParsingDrafts((current) => ({
+                        ...current,
+                        [account.id]: {
+                          ...(current[account.id] ?? draft),
+                          signature: event.target.value,
+                        },
+                      }))
+                    }
+                    className={inputClass}
+                  />
+                </Field>
+                <button
+                  type="button"
+                  disabled={parsingBusy !== null}
+                  onClick={() => void saveMailboxParsing(account.id)}
+                  className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {parsingBusy === account.id
+                    ? 'Saving & re-parsing…'
+                    : 'Save parsing defaults'}
+                </button>
+              </div>
+            </div>
+          )
+        })}
+        {accounts.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Connect a mailbox to set its parsing defaults.
+          </p>
+        ) : null}
+        {parsingError ? (
+          <p role="alert" className="text-xs text-destructive">
+            {parsingError}
+          </p>
+        ) : null}
+        {parsingMessage ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            {parsingMessage}
+          </p>
+        ) : null}
+      </section>
+
+      <OrganizationRulesEditor initialRules={initialOrganizationRules} />
 
       <p className="mt-6 text-sm text-muted-foreground">
         Both AI services are optional. Without them Lumen classifies with rules

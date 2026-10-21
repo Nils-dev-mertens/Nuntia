@@ -25,6 +25,7 @@ import { cn } from '#/lib/utils'
 import { Link } from '@tanstack/react-router'
 import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
+import { partitionOrganizationGroups } from '#/lib/organization/matching.ts'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -68,12 +69,6 @@ function byState(
 }
 
 /** The threads the user has handled, in their own section. */
-function doneThreads(
-  conversations: ConversationSummary[],
-): ConversationSummary[] {
-  return conversations.filter((c) => c.done)
-}
-
 /** Names if we have them, otherwise the bare address. */
 function participantsOf(conversation: ConversationSummary): string {
   if (conversation.participants.length === 0) return 'Unknown sender'
@@ -279,6 +274,14 @@ function ConversationRow({
           {/* A human thread can still have nobody to answer — same "No reply"
               tag as an automated card, since the composer is hidden either way. */}
           {conversation.replyable ? null : <NoReplyTag />}
+          {conversation.senderImportance !== null ? (
+            <span
+              title="Your importance rating for this correspondent; used as context when classifying their mail."
+              className="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary"
+            >
+              Contact · {conversation.senderImportance}/10
+            </span>
+          ) : null}
           <AccountTag email={conversation.accountEmail} />
           <RelationTag conversation={conversation} />
           <span className="text-xs text-muted-foreground">
@@ -461,7 +464,6 @@ export function Inbox({
   const {
     accounts,
     conversations,
-    counts,
     doneCount,
     syncError,
     authRequiredAccounts,
@@ -472,8 +474,18 @@ export function Inbox({
   // Every state is present in `counts`, including zeroes — an absent key would
   // mean the counts and the list disagree, which is worth hiding rather than
   // papering over.
-  const visibleStates = STATE_ORDER.filter((state) => counts[state] > 0)
-  const done = doneThreads(conversations)
+  const organizationGroups = partitionOrganizationGroups(
+    conversations,
+    payload.organizationRules,
+  )
+  const stateCounts = Object.fromEntries(
+    STATE_ORDER.map((state) => [
+      state,
+      organizationGroups.ungrouped.filter((conversation) => conversation.state === state).length,
+    ]),
+  ) as Record<ConversationState, number>
+  const visibleStates = STATE_ORDER.filter((state) => stateCounts[state] > 0)
+  const done = organizationGroups.done
 
   return (
     <div className="mx-auto max-w-2xl p-8">
@@ -619,6 +631,27 @@ export function Inbox({
         </p>
       ) : (
         <div className="mt-8 space-y-8">
+          {organizationGroups.groups.map((group) => (
+            <section key={group.id}>
+              <div className="mb-3 flex items-baseline justify-between gap-4">
+                <h2 className="text-sm font-semibold tracking-wide text-foreground">
+                  {group.name}
+                </h2>
+                <span className="text-xs text-muted-foreground">
+                  {group.items.length}
+                </span>
+              </div>
+              <ul className="space-y-3">
+                {group.items.map((conversation) =>
+                  conversation.isAutomated ? (
+                    <AutomatedRow key={conversation.id} conversation={conversation} />
+                  ) : (
+                    <ConversationRow key={conversation.id} conversation={conversation} />
+                  ),
+                )}
+              </ul>
+            </section>
+          ))}
           {visibleStates.map((state) => (
             <section key={state}>
               <div className="mb-3 flex items-baseline justify-between gap-4">
@@ -626,12 +659,12 @@ export function Inbox({
                   {STATE_META[state].label}
                 </h2>
                 <span className="text-xs text-muted-foreground">
-                  {counts[state]}
+                  {stateCounts[state]}
                 </span>
               </div>
 
               <ul className="space-y-3">
-                {byState(conversations, state).map((conversation) =>
+                {byState(organizationGroups.ungrouped, state).map((conversation) =>
                   // Same feed, same grouping — only the presentation differs. A
                   // failed build is still `needs-action`; it is just not a chat.
                   conversation.isAutomated ? (

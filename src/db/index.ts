@@ -1,5 +1,6 @@
 import { createClient } from '@libsql/client'
 import { drizzle } from 'drizzle-orm/libsql'
+import { migrate } from 'drizzle-orm/libsql/migrator'
 
 import * as schema from './schema.ts'
 
@@ -57,23 +58,40 @@ export { client }
  * while nothing outside the tests called it, so a running app never applied any
  * of this.
  */
-export async function initDatabase(): Promise<void> {
-  if (!url.startsWith('file:')) return
+let databaseReady: Promise<void> | undefined
 
-  try {
-    // WAL is persistent, but setting it again is cheap and covers a fresh file.
-    await client.execute('PRAGMA journal_mode = WAL')
-    // Wait rather than throw when another writer holds the lock.
-    await client.execute('PRAGMA busy_timeout = 5000')
-    // Enforce foreign keys so cascading deletes actually fire.
-    await client.execute('PRAGMA foreign_keys = ON')
-    // Logged rather than assumed: nothing else in the app can report whether
-    // these settings took effect, and their absence is silent until a sync drops
-    // mail.
-    console.log('[db] SQLite prepared: WAL, busy_timeout=5000, foreign_keys=ON')
-  } catch (error) {
-    // A read-only database or an already-locked file should not crash startup;
-    // the first real query will surface the problem with better context.
-    console.warn('[db] could not apply SQLite pragmas:', error)
+export function initDatabase(): Promise<void> {
+  databaseReady ??= prepareDatabase()
+  return databaseReady
+}
+
+async function prepareDatabase(): Promise<void> {
+  if (url.startsWith('file:')) {
+    try {
+      // WAL is persistent, but setting it again is cheap and covers a fresh file.
+      await client.execute('PRAGMA journal_mode = WAL')
+      // Wait rather than throw when another writer holds the lock.
+      await client.execute('PRAGMA busy_timeout = 5000')
+      // Enforce foreign keys so cascading deletes actually fire.
+      await client.execute('PRAGMA foreign_keys = ON')
+      // Logged rather than assumed: nothing else in the app can report whether
+      // these settings took effect, and their absence is silent until a sync drops
+      // mail.
+      console.log(
+        '[db] SQLite prepared: WAL, busy_timeout=5000, foreign_keys=ON',
+      )
+    } catch (error) {
+      // A read-only database or an already-locked file should not crash startup;
+      // the first real query will surface the problem with better context.
+      console.warn('[db] could not apply SQLite pragmas:', error)
+    }
   }
+
+  // Existing installs may have a database from before the current schema. Apply
+  // migrations before serving a request so queries never race ahead of columns
+  // such as messages.raw_body_text. Do not swallow migration errors: serving with
+  // a partially upgraded schema would turn a recoverable startup failure into
+  // broken inbox requests.
+  await migrate(db, { migrationsFolder: './drizzle' })
+  console.log('[db] migrations applied')
 }

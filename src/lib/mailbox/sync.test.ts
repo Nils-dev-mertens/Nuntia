@@ -51,8 +51,10 @@ const {
   getParsingProfileContext,
   getStoredAttachment,
   listConversations,
+  saveAccountParsingDefaults,
   saveConversation,
   saveParsingProfile,
+  reparseStoredMessages,
   setConversationDetails,
 } = await import('#/lib/conversation/index.ts')
 const { draftReply, forgetAccount, loadAttachment, loadInbox } =
@@ -401,28 +403,24 @@ describe('toAttachmentRefs', () => {
 
 describe('sender parsing profiles', () => {
   test('stores sender parsing and reply-style preferences', async () => {
-    await saveParsingProfile(
-      ACCOUNT,
-      'Alice@Example.com',
-      {
-        greeting: 'Hello,',
-        signature: 'Best,\nMe',
-        parsing: {
-          stripQuotedHistory: false,
-          stripGreeting: false,
-          stripSignature: true,
-        },
+    await saveAccountParsingDefaults(ACCOUNT, {
+      greeting: 'Hello,',
+      signature: 'Best,\nMe',
+      parsing: {
+        stripQuotedHistory: false,
+        stripGreeting: false,
+        stripSignature: true,
       },
-      {
-        useAccountParsingDefaults: false,
-        stripQuotedHistory: true,
-        stripGreeting: true,
-        stripSignature: false,
-        replyStyleEnabled: true,
-        replyGreeting: 'Hi Alice,',
-        replySignature: 'Cheers,\nMe',
-      },
-    )
+    })
+    await saveParsingProfile(ACCOUNT, 'Alice@Example.com', {
+      useAccountParsingDefaults: false,
+      stripQuotedHistory: true,
+      stripGreeting: true,
+      stripSignature: false,
+      replyStyleEnabled: true,
+      replyGreeting: 'Hi Alice,',
+      replySignature: 'Cheers,\nMe',
+    })
 
     const profiles = await getParsingProfileContext(ACCOUNT)
     expect(profiles.parsingDefaults).toEqual({
@@ -450,28 +448,15 @@ describe('sender parsing profiles', () => {
   })
 
   test('sync applies saved sender overrides and retains removed text for inspection', async () => {
-    await saveParsingProfile(
-      ACCOUNT,
-      'alice@example.com',
-      {
-        greeting: null,
-        signature: null,
-        parsing: {
-          stripQuotedHistory: true,
-          stripGreeting: true,
-          stripSignature: true,
-        },
-      },
-      {
-        useAccountParsingDefaults: false,
-        stripQuotedHistory: false,
-        stripGreeting: false,
-        stripSignature: true,
-        replyStyleEnabled: false,
-        replyGreeting: null,
-        replySignature: null,
-      },
-    )
+    await saveParsingProfile(ACCOUNT, 'alice@example.com', {
+      useAccountParsingDefaults: false,
+      stripQuotedHistory: false,
+      stripGreeting: false,
+      stripSignature: true,
+      replyStyleEnabled: false,
+      replyGreeting: null,
+      replySignature: null,
+    })
     const client = new FakeMailboxClient({
       threads: [
         {
@@ -513,30 +498,76 @@ describe('sender parsing profiles', () => {
     expect(detail?.messages[0].strippedSignature ?? '').toContain('Best,')
   })
 
+  test('account defaults re-parse retained source text and restore hidden content', async () => {
+    const client = new FakeMailboxClient({
+      threads: [
+        {
+          id: 'reparse-source-thread',
+          cursor: '902',
+          messages: [
+            message({
+              id: 'reparse-source-message',
+              threadId: 'reparse-source-thread',
+              from: 'Alice <alice@example.com>',
+              subject: 'Project',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'Hi Alex,\n\nA reply.\n\nBest,\nAlice\n\nOn Monday Alex wrote:\n> Original.',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT, { userId: USER })
+    let saved = (await listConversations(ACCOUNT)).find(
+      (item) => item.providerThreadId === 'reparse-source-thread',
+    )
+    expect(saved?.messages[0].body).toBe('A reply.')
+
+    await saveAccountParsingDefaults(ACCOUNT, {
+      greeting: null,
+      signature: null,
+      parsing: {
+        stripQuotedHistory: false,
+        stripGreeting: false,
+        stripSignature: false,
+      },
+    })
+    const context = await getParsingProfileContext(ACCOUNT)
+    expect(await reparseStoredMessages(ACCOUNT, context)).toBe(1)
+
+    saved = (await listConversations(ACCOUNT)).find(
+      (item) => item.providerThreadId === 'reparse-source-thread',
+    )
+    expect(saved?.messages[0].body).toContain('Hi Alex,')
+    expect(saved?.messages[0].body).toContain('Best,')
+    expect(saved?.messages[0].body).toContain('On Monday Alex wrote:')
+    expect(saved?.messages[0].strippedGreeting).toBeNull()
+    expect(saved?.messages[0].strippedSignature).toBeNull()
+    expect(saved?.messages[0].strippedQuote).toBeNull()
+    expect(saved?.messages[0].rawBodyText).toContain('> Original.')
+  })
+
   test('reuses account-wide parsing defaults when a sender inherits them', async () => {
     const { buildConversation } = await import('#/lib/conversation/index.ts')
-    await saveParsingProfile(
-      ACCOUNT,
-      'alice@example.com',
-      {
-        greeting: null,
-        signature: null,
-        parsing: {
-          stripQuotedHistory: false,
-          stripGreeting: false,
-          stripSignature: false,
-        },
+    await saveAccountParsingDefaults(ACCOUNT, {
+      greeting: null,
+      signature: null,
+      parsing: {
+        stripQuotedHistory: false,
+        stripGreeting: false,
+        stripSignature: false,
       },
-      {
-        useAccountParsingDefaults: true,
-        stripQuotedHistory: true,
-        stripGreeting: true,
-        stripSignature: true,
-        replyStyleEnabled: false,
-        replyGreeting: null,
-        replySignature: null,
-      },
-    )
+    })
+    await saveParsingProfile(ACCOUNT, 'alice@example.com', {
+      useAccountParsingDefaults: true,
+      stripQuotedHistory: true,
+      stripGreeting: true,
+      stripSignature: true,
+      replyStyleEnabled: false,
+      replyGreeting: null,
+      replySignature: null,
+    })
 
     const context = await getParsingProfileContext(ACCOUNT)
     expect(context.parsingPreferences['alice@example.com']).toEqual({

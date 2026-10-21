@@ -37,6 +37,16 @@ export const INTENTS = [
 
 export type Intent = (typeof INTENTS)[number]
 
+export const ORGANIZATION_RULE_FIELDS = [
+  'sender-email',
+  'sender-domain',
+  'subject-contains',
+  'topic-contains',
+  'state-is',
+] as const
+
+export type OrganizationRuleField = (typeof ORGANIZATION_RULE_FIELDS)[number]
+
 /**
  * A person who signs in to this install.
  *
@@ -347,6 +357,9 @@ export const messages = sqliteTable(
 
     subject: text('subject').notNull(),
     snippet: text('snippet'),
+    /** Original provider body parts, retained locally for lossless re-parsing. */
+    rawBodyText: text('raw_body_text'),
+    rawBodyHtml: text('raw_body_html'),
     bodyText: text('body_text'),
     bodyHtml: text('body_html'),
     /** Plaintext signature block detected on this message, re-added on reply. */
@@ -583,6 +596,8 @@ export const contactContexts = sqliteTable(
     relationship: text('relationship'),
     topics: text('topics'),
     currentWork: text('current_work'),
+    /** User's 1–10 importance rating for this correspondent; null means unrated. */
+    importance: integer('importance'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -590,6 +605,32 @@ export const contactContexts = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.userId, table.email] }),
     index('contact_contexts_email_idx').on(table.email),
+  ],
+)
+
+export const organizationRules = sqliteTable(
+  'organization_rules',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** User-facing name of the custom inbox section. */
+    name: text('name').notNull(),
+    field: text('field').$type<OrganizationRuleField>().notNull(),
+    value: text('value').notNull(),
+    enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+    /** Lower number wins; array order is preserved by the settings UI. */
+    position: integer('position').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('organization_rules_user_position_idx').on(table.userId, table.position),
   ],
 )
 
@@ -715,4 +756,5 @@ export type SenderProfile = typeof senderProfiles.$inferSelect
 export type SenderSignal = typeof senderSignals.$inferSelect
 export type Contact = typeof contacts.$inferSelect
 export type ContactContext = typeof contactContexts.$inferSelect
+export type OrganizationRuleRow = typeof organizationRules.$inferSelect
 export type Decision = typeof decisions.$inferSelect

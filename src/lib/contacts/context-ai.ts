@@ -4,9 +4,9 @@ import { completeLlm, isReasoningModel } from '#/lib/ai/llm.ts'
 import type { LlmConfig } from '#/lib/ai/llm.ts'
 import {
   CONTACT_CONTEXT_LIMITS,
-  normaliseContactContextFields,
+  normaliseContactContextTextFields,
 } from './context.ts'
-import type { ContactContextFields } from './context.ts'
+import type { ContactContextTextFields } from './context.ts'
 
 export type ContactContextSource = {
   subject: string
@@ -15,14 +15,14 @@ export type ContactContextSource = {
     sentAt: string
     body: string
   }>
-  current: ContactContextFields
+  current: ContactContextTextFields
 }
 
 /** Ask the configured model for a structured proposal, never for a direct write. */
 export async function suggestContactContext(
   config: LlmConfig,
   source: ContactContextSource,
-): Promise<ContactContextFields> {
+): Promise<ContactContextTextFields> {
   const messages = source.messages.slice(-12).map((message) => ({
     sender: message.sender.slice(0, 200),
     sentAt: message.sentAt,
@@ -59,7 +59,7 @@ export async function suggestContactContext(
 /** Parse and validate the four fields before they are ever shown or saved. */
 export function parseContactContextSuggestion(
   raw: string,
-): ContactContextFields | null {
+): ContactContextTextFields | null {
   const text = raw
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
@@ -78,7 +78,7 @@ export function parseContactContextSuggestion(
     return null
 
   const record = parsed as Record<string, unknown>
-  const fields: ContactContextFields = {
+  const fields: ContactContextTextFields = {
     roleCompany: record.roleCompany as string,
     relationship: record.relationship as string,
     topics: record.topics as string,
@@ -87,5 +87,5 @@ export function parseContactContextSuggestion(
   if (Object.values(fields).some((value) => typeof value !== 'string')) {
     return null
   }
-  return normaliseContactContextFields(fields)
+  return normaliseContactContextTextFields(fields)
 }

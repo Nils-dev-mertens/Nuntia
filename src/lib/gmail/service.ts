@@ -75,10 +75,16 @@ import type {
 import { reportAiFailure } from '#/lib/ai/ai-log.ts'
 import { loadReplyDrafter } from '#/lib/ai/index.ts'
 import { contactNamesFor, enrichParticipants } from '#/lib/contacts/index.ts'
-import { getContactContext } from '#/lib/contacts/context.ts'
+import {
+  getContactContext,
+  listContactImportanceByEmail,
+} from '#/lib/contacts/context.ts'
 import type { ContactContext } from '#/lib/contacts/context.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
+import { listOrganizationRules } from '#/lib/organization/store.ts'
+import { matchOrganizationRule } from '#/lib/organization/matching.ts'
+import type { OrganizationRule } from '#/lib/organization/matching.ts'
 import {
   downloadAttachment,
   isCached,
@@ -154,6 +160,10 @@ export type ConversationSummary = {
   done: boolean
   /** First line of the newest message, for the list preview. */
   preview: string | null
+  /** User-authored contact importance rating, when the correspondent is rated. */
+  senderImportance: number | null
+  /** Custom section assigned by the user's first matching organization rule. */
+  organizationGroup: { id: string; name: string } | null
 }
 
 export type InboxPayload =
@@ -165,6 +175,8 @@ export type InboxPayload =
       conversations: ConversationSummary[]
       /** Every state is present, including zeroes, so the UI can render headers. */
       counts: Record<ConversationState, number>
+      /** Ordered user-defined rules used to create custom inbox sections. */
+      organizationRules: OrganizationRule[]
       /** Threads the user has marked done — listed apart from the groups. */
       doneCount: number
       /** ISO string of the most recent completed sync, or null if never. */
@@ -350,15 +362,13 @@ export type ConversationDetail = {
     sentAt: string | null
   }>
   contactContext: ContactContext | null
+  senderImportance: number | null
   parsingProfile: {
     senderEmail: string
     useAccountParsingDefaults: boolean
     stripQuotedHistory: boolean
     stripGreeting: boolean
     stripSignature: boolean
-    defaultStripQuotedHistory: boolean
-    defaultStripGreeting: boolean
-    defaultStripSignature: boolean
     defaultReplyGreeting: string
     defaultReplySignature: string
     replyStyleEnabled: boolean
@@ -561,6 +571,7 @@ export async function loadConversation(
       }
     }),
     contactContext,
+    senderImportance: contactContext?.importance ?? null,
     parsingProfile: senderEmail
       ? {
           senderEmail,
@@ -575,10 +586,6 @@ export async function loadConversation(
           stripSignature:
             senderParsing?.stripSignature ??
             profileContext.parsingDefaults.stripSignature,
-          defaultStripQuotedHistory:
-            profileContext.parsingDefaults.stripQuotedHistory,
-          defaultStripGreeting: profileContext.parsingDefaults.stripGreeting,
-          defaultStripSignature: profileContext.parsingDefaults.stripSignature,
           defaultReplyGreeting:
             profileContext.replyStyles.account.greeting ?? '',
           defaultReplySignature:
@@ -1436,8 +1443,20 @@ function toSummary(
   emailById: Map<string, string>,
   names: Map<string, string>,
   useGravatar: boolean,
+  organizationRules: OrganizationRule[],
+  contactImportance: ReadonlyMap<string, number>,
 ): ConversationSummary {
   const conversation = merged.conversation
+
+  const matchedRule = matchOrganizationRule(
+    {
+      senderEmail: otherPartyOf(conversation),
+      subject: conversation.subject,
+      topic: conversation.topic,
+      state: conversation.state,
+    },
+    organizationRules,
+  )
 
   return {
     id: conversation.id,
@@ -1465,6 +1484,12 @@ function toSummary(
     unseen: unseenMessages(conversation).length > 0,
     done: activeDone(conversation) !== null,
     preview: previewOf(conversation),
+    senderImportance:
+      contactImportance.get(otherPartyOf(conversation)) ?? null,
+    organizationGroup: matchedRule
+      ? { id: matchedRule.id, name: matchedRule.name }
+      : null,
+
   }
 }
 
@@ -1504,10 +1529,9 @@ async function ensureDerivedFields(
     accountId,
     await listUnreplyableSenders(accountId),
   )
-  // A parsing change cannot be picked up by incremental sync (Gmail only
-  // revisits changed threads) and raw MIME is not stored, but the pre-strip text
-  // is reconstructable from the row. Re-running the parser here is what makes a
-  // detection fix apply to mail that is already in the database.
+  // A parsing change cannot be picked up by incremental sync (the provider only
+  // revisits changed threads). Re-running over retained original bodies also
+  // makes detection fixes apply to already-stored mail.
   const reparsed = await reparseStoredMessages(
     accountId,
     await getParsingProfileContext(accountId),
@@ -1651,6 +1675,10 @@ export async function loadInbox(
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
   const { counts, doneCount } = partitionByState(merged)
+  const [organizationRules, contactImportance] = await Promise.all([
+    listOrganizationRules(userId),
+    listContactImportanceByEmail(userId),
+  ])
 
   // The list is grouped by state in the UI, but ordering within a group is by
   // activity, and the union is not sorted by construction.
@@ -1663,8 +1691,16 @@ export async function loadInbox(
   return {
     signedIn: true,
     accounts,
+    organizationRules,
     conversations: merged.map((row) =>
-      toSummary(row, emailById, names, preferences.useGravatar),
+      toSummary(
+        row,
+        emailById,
+        names,
+        preferences.useGravatar,
+        organizationRules,
+        contactImportance,
+      ),
     ),
     counts,
     doneCount,

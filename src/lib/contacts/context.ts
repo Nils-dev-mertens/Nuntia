@@ -13,20 +13,24 @@ export type ContactContext = {
   relationship: string
   topics: string
   currentWork: string
+  importance: number | null
 }
 
 export type ContactContextFields = Omit<ContactContext, 'email'>
+export type ContactContextTextFields = Omit<ContactContextFields, 'importance'>
+export type ContactDecisionContext = ContactContextFields
 
 export const CONTACT_CONTEXT_LIMITS = {
   roleCompany: 160,
   relationship: 500,
   topics: 1000,
   currentWork: 1000,
+  importance: 10,
 } as const
 
-export function normaliseContactContextFields(
-  input: ContactContextFields,
-): ContactContextFields | null {
+export function normaliseContactContextTextFields(
+  input: ContactContextTextFields,
+): ContactContextTextFields | null {
   const fields = {
     roleCompany: input.roleCompany.trim(),
     relationship: input.relationship.trim(),
@@ -42,8 +46,59 @@ export function normaliseContactContextFields(
   ) {
     return null
   }
-
   return fields
+}
+
+export function normaliseContactContextFields(
+  input: ContactContextFields,
+): ContactContextFields | null {
+  const textFields = normaliseContactContextTextFields(input)
+  const importance = input.importance
+  if (
+    !textFields ||
+    (importance !== null &&
+      (!Number.isInteger(importance) ||
+        importance < 1 ||
+        importance > CONTACT_CONTEXT_LIMITS.importance))
+  ) {
+    return null
+  }
+  return { ...textFields, importance }
+}
+
+export async function listContactDecisionContextByEmail(
+  userId: string,
+): Promise<Map<string, ContactDecisionContext>> {
+  const owner = userId.trim().toLowerCase()
+  if (!owner) return new Map()
+
+  const rows = await db
+    .select()
+    .from(contactContexts)
+    .where(eq(contactContexts.userId, owner))
+  return new Map(
+    rows.map((row) => [
+      row.email,
+      {
+        roleCompany: row.roleCompany ?? '',
+        relationship: row.relationship ?? '',
+        topics: row.topics ?? '',
+        currentWork: row.currentWork ?? '',
+        importance: row.importance,
+      },
+    ]),
+  )
+}
+
+export async function listContactImportanceByEmail(
+  userId: string,
+): Promise<Map<string, number>> {
+  const contexts = await listContactDecisionContextByEmail(userId)
+  return new Map(
+    [...contexts].flatMap(([email, context]) =>
+      context.importance === null ? [] : [[email, context.importance] as const],
+    ),
+  )
 }
 
 export async function getContactContext(
@@ -68,6 +123,7 @@ export async function getContactContext(
         relationship: row.relationship ?? '',
         topics: row.topics ?? '',
         currentWork: row.currentWork ?? '',
+        importance: row.importance,
       }
     : null
 }
@@ -87,9 +143,17 @@ export async function saveContactContext(
     relationship: fields.relationship || null,
     topics: fields.topics || null,
     currentWork: fields.currentWork || null,
+    importance: fields.importance,
     updatedAt: new Date(),
   }
-  const empty = Object.values(fields).every((value) => value.length === 0)
+  const empty =
+    fields.importance === null &&
+    [
+      fields.roleCompany,
+      fields.relationship,
+      fields.topics,
+      fields.currentWork,
+    ].every((value) => value.length === 0)
 
   if (empty) {
     await db
@@ -117,5 +181,6 @@ export async function saveContactContext(
     relationship: fields.relationship,
     topics: fields.topics,
     currentWork: fields.currentWork,
+    importance: fields.importance,
   }
 }

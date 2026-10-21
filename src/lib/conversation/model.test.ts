@@ -102,7 +102,10 @@ describe('activeDone', () => {
 
   test('no mark at all is not a done thread', () => {
     expect(
-      activeDone({ done: null, lastMessageAt: new Date('2026-02-03T09:00:00Z') }),
+      activeDone({
+        done: null,
+        lastMessageAt: new Date('2026-02-03T09:00:00Z'),
+      }),
     ).toBeNull()
   })
 })
@@ -534,10 +537,11 @@ describe('deriveState', () => {
     ]
 
     for (const body of footers) {
-      const result = deriveState(
-        [{ isFromOwner: false, sentAt: now, body }],
-        { ownerEmail: OWNER, lastMessageAt: now, now },
-      )
+      const result = deriveState([{ isFromOwner: false, sentAt: now, body }], {
+        ownerEmail: OWNER,
+        lastMessageAt: now,
+        now,
+      })
 
       expect(result.requiresReply).toBe(false)
       expect(result.state).toBe('informational')
@@ -549,12 +553,13 @@ describe('deriveState', () => {
       'Could you send me the invoice before Friday?',
       'Can we move the launch to Tuesday?',
       'Any chance you could review the draft?',
-      'Please send the signed copy back?'
+      'Please send the signed copy back?',
     ]) {
-      const result = deriveState(
-        [{ isFromOwner: false, sentAt: now, body }],
-        { ownerEmail: OWNER, lastMessageAt: now, now },
-      )
+      const result = deriveState([{ isFromOwner: false, sentAt: now, body }], {
+        ownerEmail: OWNER,
+        lastMessageAt: now,
+        now,
+      })
 
       expect(result.requiresReply).toBe(true)
     }
@@ -620,7 +625,10 @@ describe('inferIntent', () => {
 })
 
 /** A decision input with one inbound message, for the classifier tests below. */
-function decisionInput(body: string, from = 'sarah@example.com'): DecisionInput {
+function decisionInput(
+  body: string,
+  from = 'sarah@example.com',
+): DecisionInput {
   return {
     subject: 'Subject',
     messages: [
@@ -746,7 +754,11 @@ describe('decision layer', () => {
   })
 
   test('the decision model can drop a rule that claimed needs-action', async () => {
-    const pipeline = pipelineWith({ state: 'informational', importance: 4, urgency: 3 })
+    const pipeline = pipelineWith({
+      state: 'informational',
+      importance: 4,
+      urgency: 3,
+    })
     const decision = await decideConversation(
       decisionInput('Can you confirm Tuesday?'),
       pipeline,
@@ -1143,6 +1155,40 @@ describe('html bodies', () => {
     expect(cleaned.strippedQuote).toBeNull()
     expect(cleaned.bodyHtml).toContain('Hi Sarah,')
     expect(cleaned.bodyHtml).toContain('Earlier: old text')
+  })
+
+  test('uses the HTML quote boundary when the plain text alternative lacks one', () => {
+    const cleaned = cleanMessage(
+      message([
+        {
+          contentType: 'text/plain',
+          text: 'Hi Alex,\\n\\nThanks for the update.\\n\\nInline note from today.\\n> this was literal text',
+        },
+        {
+          contentType: 'text/html',
+          text:
+            '<div>Hi Alex,</div><div>Thanks for the update.</div>' +
+            '<div class="gmail_quote"><div>Earlier message.</div></div>',
+        },
+      ]),
+      OWNER_EMAIL,
+    )
+
+    expect(cleaned.body).toBe('Thanks for the update.')
+    expect(cleaned.strippedQuote).toContain('Earlier message.')
+    expect(cleaned.bodyHtml).not.toContain('Earlier message.')
+  })
+
+  test('keeps an inline greater-than line as literal content without quote evidence', () => {
+    const text =
+      'Here is the comparison:\\n> A customer-provided string\\nIt is literal, not a reply.'
+    const cleaned = cleanMessage(
+      message([{ contentType: 'text/plain', text }]),
+      OWNER_EMAIL,
+    )
+
+    expect(cleaned.body).toBe(text)
+    expect(cleaned.strippedQuote).toBeNull()
   })
 
   test('strips quoted history out of the html as well as the text', () => {

@@ -283,7 +283,8 @@ export async function getCursor(
  * Incremental sync only rewrites threads Gmail reports as changed, so a derived
  * column added to `conversations` later would otherwise keep its migration
  * default for every already-synced conversation, silently. Comparing this
- * against `DERIVED_VERSION` is what triggers the one-off recomputation.
+ * against `DERIVED_VERSION` is what triggers the one-off recomputation, including
+ * local reparsing after parser behavior changes.
  */
 export async function getDerivedVersion(id: string): Promise<number> {
   const row = await db.query.accounts.findFirst({

@@ -36,21 +36,23 @@ import {
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import {
   getParsingProfileContext,
+  reparseStoredMessages,
   replyAccountsFor,
   resolveReplyStyle,
   saveParsingProfile,
   setConversationDetails,
 } from '#/lib/conversation/index.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
-import { syncThread } from '#/lib/mailbox/sync.ts'
 import { createMailboxClientFor } from '#/lib/mailbox/provider.ts'
+import { redecideConversationsForSender } from '#/lib/mailbox/sync.ts'
 import { listAccounts } from '#/lib/auth/accounts.ts'
 import {
   CONTACT_CONTEXT_LIMITS,
-  normaliseContactContextFields,
+  getContactContext,
+  normaliseContactContextTextFields,
   saveContactContext,
 } from '#/lib/contacts/context.ts'
-import type { ContactContextFields } from '#/lib/contacts/context.ts'
+import type { ContactContextFields, ContactContextTextFields } from '#/lib/contacts/context.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
 
 /**
@@ -63,15 +65,8 @@ const MAX_DRAFT_INSTRUCTION_CHARS = 500
 
 const saveParsingProfileAction = createServerFn({ method: 'POST' })
   .inputValidator(
-    (data: {
-      providerThreadId: string
-      profile: SenderProfileSettings
-      defaultReplyGreeting: string
-      defaultReplySignature: string
-      defaultStripQuotedHistory: boolean
-      defaultStripGreeting: boolean
-      defaultStripSignature: boolean
-    }) => data,
+    (data: { providerThreadId: string; profile: SenderProfileSettings }) =>
+      data,
   )
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
@@ -94,9 +89,6 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       typeof data.profile.stripSignature !== 'boolean' ||
       typeof data.profile.useAccountParsingDefaults !== 'boolean' ||
       typeof data.profile.replyStyleEnabled !== 'boolean' ||
-      typeof data.defaultStripQuotedHistory !== 'boolean' ||
-      typeof data.defaultStripGreeting !== 'boolean' ||
-      typeof data.defaultStripSignature !== 'boolean' ||
       (data.profile.replyGreeting !== null &&
         typeof data.profile.replyGreeting !== 'string') ||
       (data.profile.replySignature !== null &&
@@ -105,8 +97,6 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       return { error: 'Parsing preferences are invalid.' }
     }
     const limits: Array<[string, unknown, number]> = [
-      ['default reply greeting', data.defaultReplyGreeting, 200],
-      ['default reply signature', data.defaultReplySignature, 1000],
       ['reply greeting', data.profile.replyGreeting ?? '', 200],
       ['reply signature', data.profile.replySignature ?? '', 1000],
     ]
@@ -115,48 +105,21 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
         return { error: `${label} must be ${limit} characters or fewer.` }
       }
     }
-    await saveParsingProfile(
-      accountId,
-      senderEmail,
-      {
-        greeting: data.defaultReplyGreeting.trim() || null,
-        signature: data.defaultReplySignature.trim() || null,
-        parsing: {
-          stripQuotedHistory: data.defaultStripQuotedHistory,
-          stripGreeting: data.defaultStripGreeting,
-          stripSignature: data.defaultStripSignature,
-        },
-      },
-      {
-        ...data.profile,
-        replyGreeting: data.profile.replyGreeting?.trim() || null,
-        replySignature: data.profile.replySignature?.trim() || null,
-      },
-    )
+    await saveParsingProfile(accountId, senderEmail, {
+      ...data.profile,
+      replyGreeting: data.profile.replyGreeting?.trim() || null,
+      replySignature: data.profile.replySignature?.trim() || null,
+    })
 
     try {
-      const client = await createMailboxClientFor(accountId)
-      if (!client)
-        return {
-          error: 'Preferences saved, but this mailbox is no longer connected.',
-        }
-      const thread = await client.getThread(conversation.providerThreadId)
       const profileContext = await getParsingProfileContext(accountId)
-      const synced = await syncThread(accountId, thread, {
-        userId: session.userId,
-        profileContext,
-      })
-      if (synced !== 'synced') {
-        return {
-          error:
-            'Preferences saved, but the conversation could not be re-parsed.',
-        }
-      }
+      await reparseStoredMessages(accountId, profileContext, senderEmail)
+      await reanalyseConversation(session.userId, data.providerThreadId)
       return { error: null }
     } catch (error) {
       const reason = error instanceof Error ? ` ${error.message}` : ''
       return {
-        error: `Preferences saved, but the conversation could not be re-parsed.${reason}`,
+        error: `Preferences saved, but this sender's messages could not be re-parsed.${reason}`,
       }
     }
   })
@@ -185,9 +148,10 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
         typeof context.roleCompany !== 'string' ||
         typeof context.relationship !== 'string' ||
         typeof context.topics !== 'string' ||
-        typeof context.currentWork !== 'string'
+        typeof context.currentWork !== 'string' ||
+        (context.importance !== null && typeof context.importance !== 'number')
       ) {
-        throw new Error('Contact context must contain text fields.')
+        throw new Error('Contact context fields are invalid.')
       }
       return {
         providerThreadId: candidate.providerThreadId,
@@ -196,6 +160,7 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
           relationship: context.relationship,
           topics: context.topics,
           currentWork: context.currentWork,
+          importance: context.importance,
         },
       }
     },
@@ -209,15 +174,20 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
       typeof context.roleCompany !== 'string' ||
       typeof context.relationship !== 'string' ||
       typeof context.topics !== 'string' ||
-      typeof context.currentWork !== 'string'
+      typeof context.currentWork !== 'string' ||
+      (context.importance !== null && typeof context.importance !== 'number')
     ) {
-      return { error: 'Contact context must contain text fields.' }
+      return { error: 'Contact context fields are invalid.' }
     }
     if (
       context.roleCompany.length > CONTACT_CONTEXT_LIMITS.roleCompany ||
       context.relationship.length > CONTACT_CONTEXT_LIMITS.relationship ||
       context.topics.length > CONTACT_CONTEXT_LIMITS.topics ||
-      context.currentWork.length > CONTACT_CONTEXT_LIMITS.currentWork
+      context.currentWork.length > CONTACT_CONTEXT_LIMITS.currentWork ||
+      (context.importance !== null &&
+        (!Number.isInteger(context.importance) ||
+          context.importance < 1 ||
+          context.importance > CONTACT_CONTEXT_LIMITS.importance))
     ) {
       return { error: 'One or more contact context fields are too long.' }
     }
@@ -243,7 +213,11 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
       // Resolve the target from stored thread data, never from an address supplied
       // by the browser, and key the profile to the signed-in user.
       const email = normaliseContactEmail(correspondent)
+      const previous = await getContactContext(session.userId, email)
       await saveContactContext(session.userId, email, context)
+      if (previous?.importance !== context.importance) {
+        await redecideConversationsForSender(session.userId, email)
+      }
       return { error: null }
     } catch (error) {
       return {
@@ -294,13 +268,13 @@ const suggestContactContextAction = createServerFn({ method: 'POST' })
     async ({
       data,
     }): Promise<{
-      suggestion: ContactContextFields | null
+      suggestion: ContactContextTextFields | null
       error: string | null
     }> => {
       const session = await getSession()
       if (!session) return { suggestion: null, error: 'You are not signed in.' }
 
-      const current = normaliseContactContextFields(data.current)
+      const current = normaliseContactContextTextFields(data.current)
       if (!current) {
         return {
           suggestion: null,
@@ -318,11 +292,11 @@ const suggestContactContextAction = createServerFn({ method: 'POST' })
           }
         }
 
-        const { conversation } = await requireConversationByThreadId(
-          session.userId,
-          data.providerThreadId,
-        )
-        const owners = new Set(
+      const { conversation } = await requireConversationByThreadId(
+        session.userId,
+        data.providerThreadId,
+      )
+      const owners = new Set(
           (await listAccounts(session.userId)).map((account) =>
             account.email.trim().toLowerCase(),
           ),
@@ -795,16 +769,11 @@ function ConversationRoute() {
   return (
     <ConversationView
       detail={detail}
-      onSaveParsingProfile={async (profile, defaults) => {
+      onSaveParsingProfile={async (profile) => {
         const saved = await saveParsingProfileAction({
           data: {
             providerThreadId: detail.providerThreadId,
             profile,
-            defaultReplyGreeting: defaults.greeting,
-            defaultReplySignature: defaults.signature,
-            defaultStripQuotedHistory: defaults.stripQuotedHistory,
-            defaultStripGreeting: defaults.stripGreeting,
-            defaultStripSignature: defaults.stripSignature,
           },
         })
         if (!saved.error) await router.invalidate()

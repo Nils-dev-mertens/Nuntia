@@ -27,6 +27,7 @@
 
 import type { Conversation, ConversationMessage } from './model.ts'
 import type { ConversationState } from '#/db/schema.ts'
+import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
 import { activeStateOverride, deriveState } from './model.ts'
 
 // Imported by path rather than through `#/lib/ai/index.ts`: the index pulls in
@@ -65,6 +66,10 @@ export type DecisionInput = {
    * no other party has.
    */
   unreplyableSender?: boolean
+  /** User's own 1–10 importance rating for this correspondent, if set. */
+  senderImportance?: number | null
+  /** User-authored profile notes for this correspondent, when present. */
+  senderContext?: ContactDecisionContext | null
 }
 
 /**

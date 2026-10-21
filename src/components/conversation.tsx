@@ -25,7 +25,10 @@ import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
 import { dedupeMediaByHash, sha256Hex } from '#/lib/mail/media.ts'
-import type { ContactContextFields } from '#/lib/contacts/context.ts'
+import type {
+  ContactContextFields,
+  ContactContextTextFields,
+} from '#/lib/contacts/context.ts'
 
 import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
@@ -586,8 +589,8 @@ function ContactContextEditor({
   email: string
   initialContext: ConversationDetail['contactContext']
   onSave: (context: ContactContextFields) => Promise<{ error: string | null }>
-  onSuggest: (current: ContactContextFields) => Promise<{
-    suggestion: ContactContextFields | null
+  onSuggest: (current: ContactContextTextFields) => Promise<{
+    suggestion: ContactContextTextFields | null
     error: string | null
   }>
 }) {
@@ -606,12 +609,16 @@ function ContactContextEditor({
   const [currentWork, setCurrentWork] = useState(
     initialContext?.currentWork ?? '',
   )
+  const [importance, setImportance] = useState<number | null>(
+    initialContext?.importance ?? null,
+  )
 
   useEffect(() => {
     setRoleCompany(initialContext?.roleCompany ?? '')
     setRelationship(initialContext?.relationship ?? '')
     setTopics(initialContext?.topics ?? '')
     setCurrentWork(initialContext?.currentWork ?? '')
+    setImportance(initialContext?.importance ?? null)
     setEditing(false)
     setAiSuggested(false)
     setError(null)
@@ -655,6 +662,7 @@ function ContactContextEditor({
         relationship,
         topics,
         currentWork,
+        importance,
       })
       if (result.error) {
         setError(result.error)
@@ -670,9 +678,11 @@ function ContactContextEditor({
 
   const hasContext = Boolean(
     initialContext?.roleCompany ||
-    initialContext?.relationship ||
-    initialContext?.topics ||
-    initialContext?.currentWork,
+      initialContext?.relationship ||
+      initialContext?.topics ||
+      initialContext?.currentWork ||
+      initialContext?.importance !== null &&
+        initialContext?.importance !== undefined,
   )
 
   return (
@@ -705,6 +715,23 @@ function ContactContextEditor({
               placeholder="CEO of Acme"
               className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
             />
+          </label>
+          <label className="block text-xs text-muted-foreground">
+            Importance to you (1–10)
+            <select
+              value={importance === null ? '' : String(importance)}
+              onChange={(event) =>
+                setImportance(event.target.value ? Number(event.target.value) : null)
+              }
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            >
+              <option value="">Not rated</option>
+              {Array.from({ length: 10 }, (_, index) => index + 1).map((score) => (
+                <option key={score} value={score}>
+                  {score}/10{score === 10 ? ' · Very important' : score === 1 ? ' · Low importance' : ''}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="block text-xs text-muted-foreground">
             Relationship
@@ -766,6 +793,7 @@ function ContactContextEditor({
                 setRelationship(initialContext?.relationship ?? '')
                 setTopics(initialContext?.topics ?? '')
                 setCurrentWork(initialContext?.currentWork ?? '')
+                setImportance(initialContext?.importance ?? null)
                 setEditing(false)
                 setAiSuggested(false)
                 setError(null)
@@ -784,25 +812,48 @@ function ContactContextEditor({
           </div>
         </form>
       ) : hasContext ? (
-        <dl className="mt-3 space-y-2 text-sm">
-          {[
-            ['Role / company', initialContext?.roleCompany],
-            ['Relationship', initialContext?.relationship],
-            ['Topics discussed', initialContext?.topics],
-            ['Currently working on', initialContext?.currentWork],
-          ].map(([label, value]) =>
-            value ? (
-              <div key={label}>
-                <dt className="text-[10px] font-medium text-muted-foreground">
-                  {label}
-                </dt>
-                <dd className="whitespace-pre-wrap text-xs text-foreground">
-                  {value}
-                </dd>
-              </div>
-            ) : null,
-          )}
-        </dl>
+        <>
+          {initialContext?.importance !== null && initialContext?.importance !== undefined ? (
+            <span
+              title="Your importance rating for this correspondent; used as context when classifying their mail."
+              className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+            >
+              Contact importance · {initialContext.importance}/10
+            </span>
+          ) : null}
+          <dl className="mt-3 space-y-2 text-sm">
+            {[
+              ['Role / company', initialContext?.roleCompany],
+              ['Relationship', initialContext?.relationship],
+              ['Topics discussed', initialContext?.topics],
+              ['Currently working on', initialContext?.currentWork],
+            ].map(([label, value]) =>
+              value ? (
+                <div key={label}>
+                  <dt className="text-[10px] font-medium text-muted-foreground">
+                    {label}
+                  </dt>
+                  <dd className="whitespace-pre-wrap text-xs text-foreground">
+                    {value}
+                  </dd>
+                </div>
+              ) : null,
+            )}
+          </dl>
+        </>
+      ) : initialContext?.importance !== null && initialContext?.importance !== undefined ? (
+        <>
+          <span className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+            Contact importance · {initialContext.importance}/10
+          </span>
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="ml-2 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+          >
+            Edit context
+          </button>
+        </>
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">
           Add private notes or ask AI for a draft based on this thread. Review
@@ -818,16 +869,7 @@ function ParsingProfileEditor({
   onSave,
 }: {
   profile: NonNullable<ConversationDetail['parsingProfile']>
-  onSave: (
-    profile: SenderProfileSettings,
-    defaults: {
-      greeting: string
-      signature: string
-      stripQuotedHistory: boolean
-      stripGreeting: boolean
-      stripSignature: boolean
-    },
-  ) => Promise<{ error: string | null }>
+  onSave: (profile: SenderProfileSettings) => Promise<{ error: string | null }>
 }) {
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -840,40 +882,20 @@ function ParsingProfileEditor({
   )
   const [stripGreeting, setStripGreeting] = useState(profile.stripGreeting)
   const [stripSignature, setStripSignature] = useState(profile.stripSignature)
-  const [defaultStripQuotedHistory, setDefaultStripQuotedHistory] = useState(
-    profile.defaultStripQuotedHistory,
-  )
-  const [defaultStripGreeting, setDefaultStripGreeting] = useState(
-    profile.defaultStripGreeting,
-  )
-  const [defaultStripSignature, setDefaultStripSignature] = useState(
-    profile.defaultStripSignature,
-  )
   const [replyStyleEnabled, setReplyStyleEnabled] = useState(
     profile.replyStyleEnabled,
   )
   const [replyGreeting, setReplyGreeting] = useState(profile.replyGreeting)
   const [replySignature, setReplySignature] = useState(profile.replySignature)
-  const [defaultReplyGreeting, setDefaultReplyGreeting] = useState(
-    profile.defaultReplyGreeting,
-  )
-  const [defaultReplySignature, setDefaultReplySignature] = useState(
-    profile.defaultReplySignature,
-  )
 
   useEffect(() => {
     setUseAccountParsingDefaults(profile.useAccountParsingDefaults)
     setStripQuotedHistory(profile.stripQuotedHistory)
     setStripGreeting(profile.stripGreeting)
     setStripSignature(profile.stripSignature)
-    setDefaultStripQuotedHistory(profile.defaultStripQuotedHistory)
-    setDefaultStripGreeting(profile.defaultStripGreeting)
-    setDefaultStripSignature(profile.defaultStripSignature)
     setReplyStyleEnabled(profile.replyStyleEnabled)
     setReplyGreeting(profile.replyGreeting)
     setReplySignature(profile.replySignature)
-    setDefaultReplyGreeting(profile.defaultReplyGreeting)
-    setDefaultReplySignature(profile.defaultReplySignature)
   }, [profile])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -882,24 +904,15 @@ function ParsingProfileEditor({
     setBusy(true)
     setError(null)
     try {
-      const result = await onSave(
-        {
-          useAccountParsingDefaults,
-          stripQuotedHistory,
-          stripGreeting,
-          stripSignature,
-          replyStyleEnabled,
-          replyGreeting: replyStyleEnabled ? replyGreeting : null,
-          replySignature: replyStyleEnabled ? replySignature : null,
-        },
-        {
-          greeting: defaultReplyGreeting,
-          signature: defaultReplySignature,
-          stripQuotedHistory: defaultStripQuotedHistory,
-          stripGreeting: defaultStripGreeting,
-          stripSignature: defaultStripSignature,
-        },
-      )
+      const result = await onSave({
+        useAccountParsingDefaults,
+        stripQuotedHistory,
+        stripGreeting,
+        stripSignature,
+        replyStyleEnabled,
+        replyGreeting: replyStyleEnabled ? replyGreeting : null,
+        replySignature: replyStyleEnabled ? replySignature : null,
+      })
       if (result.error) setError(result.error)
       else setEditing(false)
     } catch {
@@ -964,44 +977,6 @@ function ParsingProfileEditor({
         </div>
       ) : null}
       <div className="border-t border-border pt-3">
-        <p className="mb-2 text-xs font-medium text-foreground">
-          Account-wide parsing defaults
-        </p>
-        {toggle(
-          'quoted history',
-          defaultStripQuotedHistory,
-          setDefaultStripQuotedHistory,
-        )}
-        {toggle('greetings', defaultStripGreeting, setDefaultStripGreeting)}
-        {toggle('signatures', defaultStripSignature, setDefaultStripSignature)}
-      </div>
-      <div className="border-t border-border pt-3">
-        <p className="mb-2 text-xs font-medium text-foreground">
-          Your account-wide reply defaults
-        </p>
-        <label className="block text-xs text-muted-foreground">
-          Default greeting
-          <input
-            value={defaultReplyGreeting}
-            maxLength={200}
-            onChange={(event) => setDefaultReplyGreeting(event.target.value)}
-            placeholder="Hi there,"
-            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
-          />
-        </label>
-        <label className="mt-2 block text-xs text-muted-foreground">
-          Default signature
-          <textarea
-            value={defaultReplySignature}
-            maxLength={1000}
-            rows={2}
-            onChange={(event) => setDefaultReplySignature(event.target.value)}
-            placeholder="Best,\nYour name"
-            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
-          />
-        </label>
-      </div>
-      <div className="border-t border-border pt-3">
         <label className="flex items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
@@ -1045,7 +1020,7 @@ function ParsingProfileEditor({
           disabled={busy}
           className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
         >
-          {busy ? 'Saving…' : 'Save & re-parse'}
+          {busy ? 'Saving…' : 'Save & re-parse this sender'}
         </button>
         <button
           type="button"
@@ -1685,8 +1660,8 @@ export function ConversationView({
   onSaveContactContext: (
     context: ContactContextFields,
   ) => Promise<{ error: string | null }>
-  onSuggestContactContext: (current: ContactContextFields) => Promise<{
-    suggestion: ContactContextFields | null
+  onSuggestContactContext: (current: ContactContextTextFields) => Promise<{
+    suggestion: ContactContextTextFields | null
     error: string | null
   }>
   onReanalyse: () => Promise<{ error: string | null }>
@@ -1707,13 +1682,6 @@ export function ConversationView({
   onMarkSenderUnreplyable: () => Promise<{ error: string | null }>
   onSaveParsingProfile: (
     profile: SenderProfileSettings,
-    defaults: {
-      greeting: string
-      signature: string
-      stripQuotedHistory: boolean
-      stripGreeting: boolean
-      stripSignature: boolean
-    },
   ) => Promise<{ error: string | null }>
   onSaveDetails: (
     topic: string | null,

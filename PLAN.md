@@ -219,8 +219,13 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] **Read and Done marks** — per-message "viewed" as a forward-only high-water mark set by opening a thread, and a Done mark only the user's own action sets; Done moves the thread out of the state groups into its own section, and both survive every rebuild — newer mail voids Done (see "Read is not doing")
 - [x] **First sync runs in the background** — adding a mailbox no longer blocks the page on a 30-day backfill; the inbox shows per-mailbox progress and polls fast until it lands (see "A first sync is not something to wait for")
 - [x] **Suggested replies** — a draft generated on demand for a thread that asks for a reply and clears an importance threshold, shown in the composer to edit or use; never stored and never sent (see "Suggested replies are drafts, not sends")
-- [x] **Multiple accounts in one merged inbox** — accounts global to the install, `loadInbox` fanning out and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
+- [x] **Multiple accounts in one merged inbox** — mailboxes scoped per user, `loadInbox` fanning out across the signed-in user's mailboxes and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
 - [x] **A second mailbox service** — Outlook / Microsoft 365 through Graph, behind the same `MailboxClient` seam; `accounts.provider`, the `provider_*` rename and `sync_cursors(account, kind, value)` land together (see "Outlook is the second service")
+- [x] **People, not one owner** — email/password sign-in (argon2id), revocable per-device
+  sessions, and mailboxes, settings and contact context scoped by the signed-in user
+- [ ] **Request-only beta** — the next release: sign-in disabled for now, a request form and
+  an emailed invite, a six-step funnel, first-party feedback and a `/admin` view (see "Access is
+  request-only, and the beta is measured")
 
 ## Remaining work and requested features
 
@@ -228,6 +233,10 @@ The MVP checklist above is complete. These are deferred or newly requested follo
 existing per-message attachment chips and mail-learned contact names are useful foundations,
 but do not count as the consolidated media overview or editable contact context below.
 
+- [ ] **Request-only beta access and measurement** — sign-in disabled for now, a public request
+  form, an emailed single-use invite, a small event log, first-party feedback, and an operator page
+  that answers "how many signed up, do they use it, what do they say" (see "Access is
+  request-only, and the beta is measured").
 - [ ] **Right-side thread media overview** — add a sidebar to the conversation view that
   collects media and attachments from every message in the thread, rather than making the
   user find each message's attachment chip. Show useful file details (name, type, size, and
@@ -602,26 +611,401 @@ provider's request shape, and the budget each model gets), and `resolveReplyStyl
 What is *not* covered: the panel itself has no DOM harness, so its behaviour rests on typecheck
 and on the server functions it calls.
 
+## Access is request-only, and the beta is measured
+
+The next round of work is not a feature. It is three questions: who wants in, do the people who
+get in actually use it, and what do they say. Open registration answers none of the three —
+there is no cap, no attribution, and no reason for anyone to tell you anything. So access
+becomes **request → approval → invite**, sign-in is disabled for the beta, and the app keeps
+just enough of its own data to answer those questions without a third-party analytics tool.
+
+### The path in
+
+1. **`/request-access`** — public, no account. Email, name, and one free-text field: "What are
+   you trying to fix?" That sentence is the most useful thing a beta can collect. It is written
+   before anyone has seen the product, so it cannot be reverse-engineered from behaviour, and
+   it is what tells you whether the next twenty people are the right twenty.
+2. **`/admin`** — the request lands in a pending queue. Approve or decline. Approving issues an
+   invite bound to that address and mails the link.
+3. **`/join/XXXX-XXXX-XXXX`** — the invite is the credential. Email prefilled and locked, name
+   prefilled, one button.
+4. **`/`** — the inbox, which asks for a mailbox. Connecting it is the first point the product
+   can do anything at all.
+
+`/request-access` is the only page a stranger can reach, and it is deliberately boring: four
+fields, no marketing, no social proof. It answers with the same sentence every time — "Request
+received. If it's a fit, you'll get a link by email." — whether the address is new, already
+pending, already has an account, or was declined last week. Anything more specific turns the
+form into an account oracle and gives a declined person something to argue with.
+
+### Requests are rows, not an inbox
+
+`access_requests`: `id`, `email`, `name`, `note` (the free-text answer), `source` (how they
+heard, optional), `status` (`pending` | `approved` | `declined` | `redeemed`), `created_at`,
+`decided_at`, `decided_by`, `invite_id`, `declined_reason`.
+
+`redeemed` is written by the redemption itself, not by the approval, so "how many approvals
+became users" is one join rather than a guess. `decided_by` is the operator's user id, for the
+day there is more than one operator.
+
+Rules:
+
+- **One pending request per address** — a partial unique index on `email` where
+  `status = 'pending'`. Submitting again returns the same sentence and writes nothing.
+- **Throttled by IP in memory** (5 per hour) and a hidden field that must stay empty. This is a
+  public form on a one-process install; the throttle is against scripts, not people.
+- **Declining stores a reason and tells nobody.** A "you were declined" email costs a support
+  conversation and gains nothing; the requester sees the same sentence they saw on submit.
+- **Declined rows are pruned after 90 days** by `scripts/beta-report.ts --prune`, so the beta
+  does not accumulate a permanent file of people who said no.
+
+### Approving is one transaction and one email
+
+Approval has a side effect that is allowed to fail:
+
+1. Create the invite bound to the request's address (`max_uses = 1`, `expires_at = now + 14
+   days`).
+2. Point the request at it, set `status = 'approved'` and `decided_at`.
+3. Send the email. **On failure keep the approval**, record the error, and show a "Resend"
+   button beside the row. Rolling back a decision because the mail provider had a bad minute
+   would throw away the decision, not the mistake.
+
+The email is plain text and one link:
+
+```
+You asked for access to Lumen. It's ready:
+
+https://lumen.example/join/XXXX-XXXX-XXXX
+
+The link works for 14 days.
+```
+
+No tracking pixel, no HTML template, no unsubscribe footer — this is transactional, and a beta
+invitation that reads like a marketing blast is a bad start. `LUMEN_APP_URL` supplies the
+origin; a link built from `request.url` is wrong behind the reverse proxy that will host this.
+
+Sending needs no provider at all: **the operator's own connected mailbox sends it.**
+`sendNewMessage` in `src/lib/mailbox/send-new.ts` already does the whole job — ownership check,
+address parsing, the operator's greeting and signature, Gmail or Graph, the contacted-address
+book, and a thread refresh — so an invite is one more new message from a real address. No ESP,
+no DKIM or SPF to arrange, no second bill, and a reply to the invitation lands in the inbox the
+product is about.
+
+What that costs: the operator needs a mailbox connected before approving sends anything.
+`src/lib/invites/notify.ts` picks the sender — `LUMEN_INVITE_SENDER` when it names one of the
+operator's addresses, otherwise the first connected mailbox — and when there is none, the
+approve button still works and shows the link to copy. `invites.notified_at` records a send the
+provider accepted, `notify_error` records the last failure, and Resend retries against the same
+invite rather than minting a second code.
+
+### Login is disabled for now
+
+There is no sign-in form for beta users. An invite code is the credential, the address on
+`/join` is the identity, and mailbox OAuth stays what it already is: the thing that proves the
+address works and the source of the mail. Passwords, argon2 hashes, the sign-in throttle and the
+30-day sessions all stay in the code. They are behind a mode, not deleted, because this is a beta
+decision rather than an architecture one.
+
+`LUMEN_ACCESS_MODE` selects the entry point:
+
+| Value    | Entry                                                | For                |
+| -------- | ---------------------------------------------------- | ------------------ |
+| `invite` | `/join/…` — invite code, or `/request-access` to ask | the beta           |
+| `login`  | `/sign-in` + `/sign-up` — the existing password flow  | opening the app up |
+
+In `invite` mode:
+
+- `/sign-in` and `/sign-up` redirect to `/request-access`. No route reaches a password form for
+  an ordinary visitor.
+- `/join` validates the invite, creates the user with a **random, unusable password hash**
+  (`password_hash` is `NOT NULL`, so the column stays honest and nothing can ever match it),
+  starts a session, and lands on the inbox, which asks for a mailbox.
+- An address already in `users` **signs back in** instead of being refused as "already
+  registered", but only through an invite bound to that address. That is the recovery path for
+  a cleared cookie, and the reason the approval email's link keeps working for its 14 days.
+- `LUMEN_DEFAULT_USER_*` bootstrap is ignored: it exists to seed a login install without
+  visiting the form, and in invite mode it would create a user nobody asked for.
+- Signing out still works — the session row is deleted and the browser returns to
+  `/request-access`.
+- **`/admin/sign-in` keeps the password form.** Disabling sign-in for testers must not disable
+  it for the operator: a 30-day cookie that expires while an invite can only be issued from
+  `/admin` is a lockout with no way back. It is the same argon2 verify, and an address that is
+  not an admin gets the same "Email or password is incorrect." as a wrong password.
+
+Before flipping the flag on an existing install, every current user needs an address-bound
+invite. Without one, an expired session is a lockout — there is no password reset because there
+is no password. That is the one migration cost of this decision, and it is a link per person
+rather than a code change.
+
+### The invite is a row, and the code is never stored
+
+`invites`:
+
+| Column         | Meaning                                                                     |
+| ------------ | --------------------------------------------------------------------------- |
+| `code_hash`    | SHA-256 of the code. The code is shown once, at creation.                   |
+| `label`        | Who it is for, free text — "Ada, from the design meetup".                   |
+| `email`        | Set for every approved request. When set, only that address may redeem it.  |
+| `max_uses`     | Default 1. A redemption by a _different_ address consumes one.              |
+| `use_count`    | Redemptions so far, kept as a counter rather than recomputed.               |
+| `expires_at`   | Default +14 days. Null means no expiry.                                     |
+| `revoked_at`   | Set from `/admin`; a revoked invite is refused exactly like an unknown one. |
+| `notified_at`  | When a mailbox accepted the approval email. Null means nothing was sent.    |
+| `notify_error` | The last send failure, cleared by a successful Resend.                      |
+| `created_at`   | Also the "issued" end of the funnel.                                        |
+
+`invite_redemptions` records every successful redemption: `invite_id`, `user_id`, `user_agent`,
+`redeemed_at`. It is what makes "which invite produced which person" answerable later; the code
+hash alone cannot say who used it.
+
+Rules worth writing down before the code exists:
+
+- **A 12-character code from an unambiguous alphabet** (Crockford base32: no `I`, `L`, `O`,
+  `U`; uppercase in the link, case-insensitive on input). Read aloud and typed by hand are both
+  real delivery methods for an invite.
+- **Unknown, expired, revoked and exhausted return the same sentence** — "This invite is not
+  valid." A distinct message per failure turns `/join` into an oracle for guessing codes and
+  tells a terminated tester that they were terminated.
+- **Constant-time compare**, the same shape as the session token: hash what was submitted and
+  `timingSafeEqual` it against the stored hash.
+- **Redemption is throttled in memory**, like the sign-in failure counter: 8 failures per 15
+  minutes for the whole process, since this is one install on one Bun process. The code space
+  does the rest — guessing is not the realistic attack, a leaked link is.
+- **An address-bound invite is reusable by that address.** Each redemption by someone else
+  consumes a use; the invited person can come back. Two rules, one code path.
+- **Only the operator mints codes** — from the request queue, from the invite form on `/admin`,
+  or from `LUMEN_BOOTSTRAP_INVITE` while the install is empty. There is no public endpoint that
+  creates an invite; `/request-access` creates a _request_, never a code.
+- **Redemption is one statement.** `UPDATE invites SET use_count = use_count + 1 WHERE code_hash
+  = ? AND use_count < max_uses AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at >
+  now)` then check that a row changed. Read-then-write would let two clicks on the same link
+  exceed `max_uses`.
+
+### Six steps, not one number
+
+The funnel has six steps, and they are separate on purpose:
+
+1. **Requested** — an `access_requests` row exists.
+2. **Approved** — an invite was issued for it.
+3. **Redeemed** — someone completed `/join`.
+4. **Activated** — they connected a mailbox (`accounts` row), the first point the product can do
+   anything at all.
+5. **Used** — they opened a thread and/or sent a reply.
+6. **Returned** — activity on a second day.
+
+Two ratios matter more than any single count: **approval rate** (are you turning away the wrong
+people, or the right ones?) and **approval → redemption time** (is the email arriving, and is it
+being read?). An unopened link, an opened-but-abandoned code, and a connected mailbox nobody read
+are three different problems. One "signed up" number hides all three, and the whole point of the
+beta is knowing which one you have.
+
+### Metrics come from tables the app already writes
+
+| Question             | Signal                                                | Source                          |
+| -------------------- | ----------------------------------------------------- | ------------------------------- |
+| Is there demand?     | requests per week, approval rate                      | `access_requests`               |
+| Did the invite land? | issued, redeemed, conversion, time to redeem          | `invites`, `invite_redemptions` |
+| Did they sign up?    | `users.created_at` in invite mode                     | `users`                         |
+| Did it work?         | first `accounts` row, first `sync_cursors.updated_at` | `accounts`, `sync_cursors`      |
+| Did they use it?     | threads opened, replies sent, threads marked done     | `conversations`, `messages`     |
+| Did they come back?  | distinct active days per user, after the first        | `product_events`                |
+| What do they say?    | feedback rows and ratings                             | `feedback`                      |
+
+No charts, no export pipeline, no warehouse. The numbers are one page of SQL against the same
+SQLite file the app runs on.
+
+### Only the gaps get an event log
+
+Most of the funnel is already provable from rows written for the app's own reasons. A separate
+analytics store would be a second copy of the same facts, and a second copy drifts.
+
+A short, **closed** list of actions leaves no trace, so `product_events` holds exactly those:
+
+| Event                | Why it cannot be derived                                   |
+| -------------------- | ---------------------------------------------------------- |
+| `active-day`         | `sessions.last_seen_at` is only the latest, not a history. |
+| `draft-generated`    | drafts are deliberately never stored.                      |
+| `draft-used`         | the draft becomes composer text; its origin is lost.       |
+| `feedback-opened`    | "ignored" and "never saw it" are different answers.        |
+| `invite-link-copied` | delivery friction, not observable from the server.         |
+
+`name` is an enum in code, emitted from one helper, so this can never quietly become a
+general-purpose tracker. Nothing in an event may contain a subject, a sender, a body, a topic, or
+a third party's address: the row is `user_id`, the event name, a timestamp, and at most a
+conversation id. `active-day` is written at most once per session per day, on the first request
+that touches `getSession`.
+
+### Feedback is a table, not an inbox you read later
+
+`feedback`: `id`, `user_id`, `email` (optional, user-supplied), `rating` 1–5 nullable, `message`
+not null, `context` (route plus conversation id when there is one), `created_at`, `status` (`new`
+/ `read` / `planned` / `fixed` / `declined`), `resolution_note`.
+
+- **Two entry points, one form.** A "Feedback" link in the inbox header, and a single prompt
+  after the user marks a thread done — the moment they have just watched the product do its job.
+  Never a modal on first load, never an NPS popup, never a third-party widget.
+- **One question:** "What got in the way?" plus an optional rating. The thread id travels with
+  it, so a complaint about the composer arrives attached to the thread it happened on.
+- **No email required.** Filling the field in is permission to reply by mail; leaving it blank
+  still counts.
+- **`/admin` is the loop.** Newest first, status controls, no email digest and no syncing to
+  another tool. The point of collecting feedback is to close it, not to route it.
+
+### The operator view is one page
+
+`/admin` belongs to `users.role = 'admin'`. **The first user created on an empty install is the
+admin**, and `LUMEN_ADMIN_EMAILS` (comma-separated, case-insensitive) stays as a break-glass
+override: it can restore access after a bad migration or a deleted row, and it is the only way
+in before the first user exists. Anyone else gets **404**, not 403: an operator page should not advertise itself
+to a beta user who guesses the URL.
+
+- **Requests** — the pending queue, newest first, with the free-text answer shown in full.
+  Approve (issues the invite and emails it) or decline (with a reason). Resend on a failed send.
+- **Invites** — issue a manual invite (label, optional email, uses, expiry), copy the link,
+  revoke, and per invite show redeemed and activated counts.
+- **Funnel** — requested → approved → redeemed → activated → replied → returned.
+- **People** — one row per user: signed up, mailboxes, threads, replies, last active, which
+  invite brought them.
+- **Feedback** — the list above.
+
+`scripts/beta-report.ts` prints the same numbers in the terminal, for when opening the app to
+read its own metrics is the wrong tool.
+
+**An empty install has nobody who can open `/admin`.** `LUMEN_BOOTSTRAP_INVITE` solves it: set
+it, visit `/join/<code>` once, and the user it creates is the admin. The variable is honoured
+only while `users` is empty, and the code is compared constant-time like any other. After that
+every invite comes from the request queue or the invite form.
+
+### One app now, two when the database is not a file
+
+`/admin` is a route group in the application, not a second site. Three reasons, in order of how
+hard they are to work around:
+
+- **The database is a file** (`DATABASE_URL=file:./data/lumen.db`). A second deployment on
+  another host cannot open it; separating the admin is a migration to a network database first,
+  not a UI decision.
+- **The session cookie is the identity.** Same origin makes `requireOperator()` one function.
+  A separate origin needs either a second auth system or cookie-domain work, for no extra
+  safety — the boundary that matters is the server-side check, not the hostname.
+- **One process, one deploy, one set of secrets.** At this size that is the difference between a
+  tool you maintain and a tool you avoid touching.
+
+So the boundary is drawn in code instead: `src/lib/admin/`, `src/lib/invites/`,
+`src/routes/admin.*`, its own layout, and no component shared with the inbox.
+Every admin server function calls `requireOperator()` itself rather than trusting the route
+loader, because a server function is a public endpoint with a nicer syntax.
+
+The layout that makes the split mechanical later is a workspace one, even while there is a
+single app:
+
+```
+apps/web            the inbox, /join and /request-access
+apps/admin          later; the operator page as its own deploy
+packages/db         schema, client, migrations, and the one migrator
+packages/core       auth, invites, email, metrics — no React
+packages/ui         later, if the two apps actually share components
+```
+
+Moving to that is `git mv` and one alias change (`#/db/schema.ts` becomes `@lumen/db`), which is
+cheap exactly as long as no inbox component imports an admin module. The rule that keeps it
+cheap: **`src/lib/admin` and `src/lib/invites` may import from `core` and `db`, never from
+`components`, and nothing in `components` may import them.**
+
+The split earns its keep when the database stops being a file:
+
+- **Redemption becomes genuinely concurrent.** The conditional `UPDATE … RETURNING` above is the
+  whole guard in both engines — but SQLite serialises writers, so a read-modify-write bug would
+  hide there and surface under Postgres. Keeping the single statement now is what makes the port
+  uneventful.
+- **In-memory throttles become wrong.** The sign-in failure map, the invite-failure counter and
+  the request throttle are per-process. The moment two processes exist they need a table or a
+  shared store; until then they are correct and free.
+- **The schema port is mechanical but not small.** `sqliteTable` → `pgTable`, `integer` with
+  `timestamp_ms` → `timestamptz`, `unixepoch() * 1000` defaults → `now()`, and the PRAGMA/WAL
+  block in `db/index.ts` disappears in favour of a connection pool. Migrations start again: the
+  data moves by dump and restore, not by `drizzle-kit push`.
+- **`packages/db` owns the migrator**, and both apps import it. That is the real reason to split
+  — one schema, one migration run, two consumers — and it is why the split waits for the
+  database rather than the monorepo.
+
+### What this deliberately does not do
+
+- **No marketing or lifecycle email.** One transactional message per approval, and that is the
+  whole list. No drip, no "you haven't tried drafts yet".
+- **No third-party analytics**, session recording, or error tracking. The instrumentation is
+  these five tables.
+- **No self-serve approval and no invite requests by email.** A request is a row on
+  `/request-access`; an email to you about it is a message you have to file.
+- **No roles beyond admin.** One operator, one `role` value that matters.
+- **No password reset**, because invite mode has no password for a tester.
+- **No metrics for someone who never connected a mailbox.** They are a user with zero mailboxes,
+  counted as redeemed and not activated — which is where the funnel says so.
+
+### Prerequisites, and what is already true
+
+- **Mailboxes are already per-user.** `accounts.user_id`, `listAccounts(userId)`,
+  `assertOwnedAccount`, and the merge path all scope by the session's user, so inviting a
+  stranger does not show them anyone else's mail. This had to be true first; it is.
+- **One mailbox, one person.** `accounts_email_idx` is unique on email and `upsertAccount`
+  refuses a mailbox owned by somebody else rather than reassigning it. For a beta that is
+  correct, and it is why a second person connecting an already-connected address gets an error
+  instead of the first person's history.
+- **Removing someone is a delete.** Sessions, mailboxes, conversations and settings cascade from
+  `users`, so "uninvite" is one row — which is the answer to a question every beta eventually
+  asks.
+- **Not yet true, and needed before the first invite goes out:** `users.role`, the mode flag,
+  `/request-access`, `/join`, the request/invite/feedback/event tables, `/admin`, the invite
+  notification, and the throttle. That is the build order below.
+
+### Build order
+
+1. **Migration** — `access_requests`, `invites`, `invite_redemptions`, `feedback`,
+   `product_events`, plus `users.role` (default `member`; the first user is `admin`).
+2. **`lib/invites/`** — `createInvite`, `revokeInvite`, `redeemInvite` (hashed lookup,
+   single-use, address-bound reuse), `listInvites` with counts. Unit tests for every refusal:
+   unknown, expired, revoked, exhausted, wrong address, reused by the right one.
+3. **`LUMEN_ACCESS_MODE=invite`** — `/join`, the redirects on `/sign-in` and `/sign-up`, the
+   random password hash, the existing-user path that signs an invited address back in, and
+   `/admin/sign-in`.
+4. **`/request-access`** — the form, dedupe, throttle, and the one refusal sentence.
+5. **`lib/invites/notify.ts`** — send the invite through the operator's mailbox, the
+   no-mailbox path that offers the link to copy, and the failure that keeps the approval.
+6. **`/admin`** behind `requireOperator()` — the request queue, invites, and the funnel.
+7. **Feedback** — the after-Done prompt, the header link, and the list in `/admin`.
+8. **`product_events`** at the closed list of sites, with `active-day` on `getSession`.
+9. **`scripts/beta-report.ts`** (with `--prune`) and `LUMEN_BOOTSTRAP_INVITE`.
+10. **Tests** — redemption refusals, invite-mode signup (one user per redemption, never two),
+    the admin gate (404 for a member, allowlist override), approval email failure, feedback
+    validation, and a check that no raw code and no IP is stored.
+
 ## Auth
 
-`src/lib/auth/` — Google OAuth 2.0 with PKCE.
+`src/lib/auth/` — people, sessions and provider OAuth. Google and Microsoft OAuth 2.0 with PKCE
+sit alongside an email/password sign-in (`users.ts`, argon2id) and revocable server-side
+sessions (`session.ts`). For the beta the password flow is switched off — see "Access is
+request-only" above.
 
-| Module        | Role                                              |
-| ------------- | ------------------------------------------------- |
-| `crypto.ts`   | AES-256-GCM token encryption at rest              |
-| `session.ts`  | HMAC-signed cookie holding only an account id     |
-| `google.ts`   | OAuth2 + PKCE, token exchange, Gmail client       |
-| `accounts.ts` | persistence — the only place tokens are decrypted |
+| Module        | Role                                                     |
+| ------------- | -------------------------------------------------------- |
+| `crypto.ts`   | AES-256-GCM token encryption at rest                     |
+| `users.ts`    | people, argon2id hashes, bootstrap, sign-up rules        |
+| `session.ts`  | one revocable row per device; cookie is `<id>.<token>`    |
+| `google.ts`   | OAuth2 + PKCE, token exchange, Gmail client              |
+| `accounts.ts` | persistence — the only place tokens are decrypted        |
 
-Routes: `GET /auth/google`, `GET /auth/google/callback`, `GET /auth/logout`.
+Routes: `GET /sign-in`, `GET /sign-up`, `GET /auth/google`, `GET /auth/google/callback`,
+`GET /auth/microsoft`, `GET /auth/microsoft/callback`, `GET /auth/logout`. In `invite` mode
+the sign-in and sign-up pages redirect to `/request-access` (the operator's `/admin/sign-in`
+stays), and the rest are unchanged.
 
 Security decisions:
 
 - **Refresh tokens are encrypted before they touch the database.** Anyone with the
   database file gets permanent mailbox access otherwise. `encrypt()` is called inside
   `upsertAccount`, so the plaintext token never crosses the persistence boundary.
-- **The session cookie holds only an account id**, HMAC-signed. A stolen cookie grants
-  nothing without the server's encryption key.
+- **The session cookie holds an opaque id and a random token**, and only the token's SHA-256
+  is stored. Signing out deletes the row, so a copied cookie stops working on its next
+  request — which a self-contained signed cookie cannot do.
 - **GCM gives authenticated encryption.** A tampered ciphertext fails to decrypt rather
   than yielding garbage — covered by tests for a modified ciphertext, a modified auth tag,
   a wrong key, and an unknown envelope version.
@@ -671,8 +1055,11 @@ one place.
 
 ### Known gaps
 
-- Single-user: no session table, and the session cookie is not revocable server-side
-  (signing out clears the cookie, but a stolen cookie stays valid until expiry).
+- Multi-user, but one install: `users.role` is the only role (`LUMEN_ADMIN_EMAILS` is the
+  break-glass override), and there is no password reset or email verification. An address is
+  only proven when its mailbox is connected.
+- Invite mode has no second factor: the code is the whole credential, so a forwarded invite
+  link is access. That is why codes expire, are single-use by default, and are revocable.
 - `SESSION_SECRET` falls back to `TOKEN_ENCRYPTION_KEY` for local convenience.
 - Reconnect is surfaced on the inbox and on a failed send in the composer. The
   parsing-profile save in the conversation header still reports a re-parse failure as a
@@ -863,8 +1250,9 @@ Both are easy to get wrong in the direction of never syncing again:
 
 ## Multiple accounts, one inbox
 
-Accounts are **global to the install**, not a per-browser set, and there is no account
-switcher: every connected mailbox appears in one list. Two decisions shape the rest.
+Accounts are **owned by a user**, not by a browser session: every mailbox a signed-in person
+connects appears in one merged list, and no query reaches another person's row. There is no
+account switcher — the mailbox set is the set. Two decisions shape the rest.
 
 **1. Merge by shared `Message-ID`, always.** When both of your addresses are on a thread,
 Gmail stores it as two threads with different ids and overlapping messages.
@@ -985,10 +1373,12 @@ Step that is **not** done, and is what a second service needs first: `accounts.p
 plus renaming the `gmail_*` id columns to `provider_*` while there is still only one
 provider.
 
-**Security caveat, stated because it is a real property of this design:** with accounts
-global to the install, any successful Google sign-in unlocks every connected mailbox. That
-is accepted for a single-user local install, and it must become a per-user scope before
-this is exposed on a network or shared.
+**Scoping, stated because the beta depends on it:** mailboxes are per user
+(`accounts.user_id`), every listing and lookup is scoped by the session's user, and the two
+paths that take an account id from the client (`sendReplyAction`, `saveParsingProfileAction`)
+go through `assertOwnedAccount`. Two consequences worth keeping: an address can be connected
+to only one account on the install (`upsertAccount` refuses it rather than moving the row and
+its synced history), and deleting the user removes their mailboxes and conversations with it.
 
 ### A merged thread is a *cluster*, not a thread id — the detail view has to re-merge
 
