@@ -1,161 +1,212 @@
 /**
- * Session handling.
+ * Server-side sessions.
  *
- * The session cookie holds only the account id and expiry — never a token.
- * Tokens live in the database, encrypted. That way a stolen cookie grants
- * nothing without the server's encryption key.
+ * The cookie carries `<session id>.<random token>`; the database stores the
+ * SHA-256 of the token plus the user it belongs to. That is what makes signing
+ * out mean something and multi-device normal: each device is a row, deleting the
+ * row revokes that device on its next request, and a copied cookie stops working
+ * the moment its session is revoked — which a self-contained signed cookie
+ * cannot do.
  *
- * The cookie is signed with `SESSION_SECRET`. If unset we fall back to
- * `TOKEN_ENCRYPTION_KEY` so a single generated key is enough to run locally,
- * but the two are documented separately because they have different blast
- * radii: leaking the session secret should not decrypt stored tokens.
+ * The token is 32 random bytes. The cookie is httpOnly, SameSite=Lax, and
+ * `Secure` outside development.
  */
 
-import { getCookie, setCookie, deleteCookie } from '@tanstack/react-start/server'
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto'
+
+import {
+  deleteCookie,
+  getCookie,
+  getRequestHeader,
+  setCookie,
+} from '@tanstack/react-start/server'
+import { and, eq, lt, ne } from 'drizzle-orm'
+
+import { db } from '#/db/index.ts'
+import { sessions } from '#/db/schema.ts'
+
+import { ensureBootstrapUser } from './users.ts'
 
 const COOKIE_NAME = 'lumen_session'
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 30 // 30 days
 
+/** How stale `last_seen_at` may be before a request extends the session. */
+const TOUCH_INTERVAL_MS = 60 * 60_000
+
 export type SessionData = {
-  /** The connected account's email, lowercased. */
-  accountId: string
-  issuedAt: number
+  /** The one device this request came from. Revoking it signs that device out. */
+  sessionId: string
+  /** Lowercased email of the person signed in; owner of every mailbox here. */
+  userId: string
 }
 
-function sessionSecret(): string {
-  const secret = process.env.SESSION_SECRET ?? process.env.TOKEN_ENCRYPTION_KEY
-
-  if (!secret) {
-    throw new Error(
-      'SESSION_SECRET or TOKEN_ENCRYPTION_KEY must be set to use sessions',
-    )
-  }
-
-  return secret
-}
-
-/**
- * Sign the payload with HMAC-SHA256.
- *
- * Format: `<base64url payload>.<base64url signature>`. A constant-time compare
- * on verify keeps this from leaking the signature byte by byte.
- */
-async function sign(payload: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(sessionSecret()),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-
-  const sig = await crypto.subtle.sign(
-    'HMAC',
-    key,
-    new TextEncoder().encode(payload),
-  )
-
-  return `${payload}.${base64url(new Uint8Array(sig))}`
-}
-
-/** Verify and decode. Returns null on any tampering or expiry. */
-async function verify(signed: string): Promise<SessionData | null> {
-  const dot = signed.lastIndexOf('.')
-
-  if (dot === -1) return null
-
-  const payload = signed.slice(0, dot)
-  const signature = signed.slice(dot + 1)
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(sessionSecret()),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['verify'],
-  )
-
-  const ok = await crypto.subtle.verify(
-    'HMAC',
-    key,
-    toBufferSource(base64urlToBytes(signature)),
-    new TextEncoder().encode(payload),
-  )
-
-  if (!ok) return null
-
-  try {
-    const decoded = JSON.parse(
-      new TextDecoder().decode(base64urlToBytes(payload)),
-    ) as SessionData
-
-    if (typeof decoded.accountId !== 'string') return null
-
-    // Reject expired sessions server-side; the cookie max-age alone is not
-    // enough since a client can replay an old cookie verbatim.
-    if (Date.now() - decoded.issuedAt > MAX_AGE_SECONDS * 1000) return null
-
-    return decoded
-  } catch {
-    return null
-  }
-}
-
-/**
- * Copy into a plain ArrayBuffer.
- *
- * WebCrypto's `BufferSource` excludes `Uint8Array<ArrayBufferLike>` (which may
- * be backed by a SharedArrayBuffer), so we materialise a real ArrayBuffer.
- */
-function toBufferSource(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength)
-  copy.set(bytes)
-  return copy.buffer
-}
-
-function base64url(bytes: Uint8Array): string {
-  let binary = ''
-  for (const b of bytes) binary += String.fromCharCode(b)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function base64urlToBytes(value: string): Uint8Array {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/')
-  const binary = atob(padded + '='.repeat((4 - (padded.length % 4)) % 4))
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
-}
-
-/** Write the session cookie. */
-export async function setSession(accountId: string): Promise<void> {
-  const payload = base64url(
-    new TextEncoder().encode(
-      JSON.stringify({
-        accountId: accountId.toLowerCase(),
-        issuedAt: Date.now(),
-      } satisfies SessionData),
-    ),
-  )
-
-  setCookie(COOKIE_NAME, await sign(payload), {
+function cookieOptions() {
+  return {
     httpOnly: true,
     // Secure would break plain-HTTP local dev, so gate it on the protocol.
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
     maxAge: MAX_AGE_SECONDS,
-  })
+  } as const
 }
 
-/** Read the session, or null when not signed in. */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
+}
+
+/** Compare two hex digests without leaking where they first differ. */
+function hashesMatch(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'))
+}
+
+function expiryFrom(now: number): Date {
+  return new Date(now + MAX_AGE_SECONDS * 1000)
+}
+
+/** Best-effort browser hint for the device list; never used for authorisation. */
+function requestUserAgent(): string | null {
+  try {
+    return getRequestHeader('user-agent') ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Start a session for a user on this device.
+ *
+ * The caller has already checked the password. Other rows for this user are left
+ * alone: those are the user's other devices.
+ */
+export async function createSession(userId: string): Promise<SessionData> {
+  const id = randomUUID()
+  const token = randomBytes(32).toString('base64url')
+  const now = Date.now()
+
+  await db.insert(sessions).values({
+    id,
+    userId: userId.toLowerCase(),
+    tokenHash: hashToken(token),
+    userAgent: requestUserAgent(),
+    lastSeenAt: new Date(now),
+    expiresAt: expiryFrom(now),
+  })
+
+  // Cheap housekeeping on the write path: an expired row is never valid, so
+  // clearing it cannot sign anyone out.
+  await db.delete(sessions).where(lt(sessions.expiresAt, new Date(now)))
+
+  setCookie(COOKIE_NAME, `${id}.${token}`, cookieOptions())
+
+  return { sessionId: id, userId: userId.toLowerCase() }
+}
+
+/**
+ * Read and validate the current device's session.
+ *
+ * Also makes sure the environment's bootstrap user exists first, so every entry
+ * point sees the same state without each one remembering to do it.
+ */
 export async function getSession(): Promise<SessionData | null> {
+  await ensureBootstrapUser()
+
   const raw = getCookie(COOKIE_NAME)
   if (!raw) return null
-  return verify(raw)
+
+  const dot = raw.indexOf('.')
+  if (dot <= 0) return null
+
+  const sessionId = raw.slice(0, dot)
+  const token = raw.slice(dot + 1)
+  if (!token) return null
+
+  const row = await db.query.sessions.findFirst({
+    where: eq(sessions.id, sessionId),
+  })
+
+  if (!row || row.revokedAt) return null
+
+  const now = Date.now()
+  if (row.expiresAt.getTime() <= now) return null
+  if (!hashesMatch(row.tokenHash, hashToken(token))) return null
+
+  // Sliding expiry, written at most hourly so a busy tab is not a write per
+  // request. The session row is the authority; the cookie is refreshed at the
+  // same time so the browser keeps sending it.
+  if (now - row.lastSeenAt.getTime() > TOUCH_INTERVAL_MS) {
+    await db
+      .update(sessions)
+      .set({ lastSeenAt: new Date(now), expiresAt: expiryFrom(now) })
+      .where(eq(sessions.id, sessionId))
+
+    setCookie(COOKIE_NAME, raw, cookieOptions())
+  }
+
+  return { sessionId, userId: row.userId }
 }
 
-/** Clear the session cookie. */
-export function clearSession(): void {
+/** End this device's session. Other devices stay signed in. */
+export async function destroySession(): Promise<void> {
+  const raw = getCookie(COOKIE_NAME)
+
+  if (raw) {
+    const dot = raw.indexOf('.')
+    if (dot > 0) {
+      await db.delete(sessions).where(eq(sessions.id, raw.slice(0, dot)))
+    }
+  }
+
   deleteCookie(COOKIE_NAME, { path: '/' })
+}
+
+/**
+ * Revoke every session for a user, optionally keeping the current device.
+ *
+ * Real rather than a gesture because sessions are rows: "sign out everywhere
+ * else" deletes them and those devices fail their next request.
+ */
+export async function revokeAllSessions(
+  userId: string,
+  exceptSessionId?: string,
+): Promise<void> {
+  const owner = eq(sessions.userId, userId.toLowerCase())
+
+  await db
+    .delete(sessions)
+    .where(
+      exceptSessionId ? and(owner, ne(sessions.id, exceptSessionId)) : owner,
+    )
+}
+
+/** Signed-in devices, most recently active first. */
+export async function listSessions(userId: string): Promise<
+  Array<{
+    id: string
+    userAgent: string | null
+    lastSeenAt: Date
+    createdAt: Date
+    expiresAt: Date
+  }>
+> {
+  const rows = await db.query.sessions.findMany({
+    where: eq(sessions.userId, userId.toLowerCase()),
+    orderBy: (table, { desc }) => [desc(table.lastSeenAt)],
+  })
+
+  return rows
+    .filter((row) => !row.revokedAt && row.expiresAt.getTime() > Date.now())
+    .map((row) => ({
+      id: row.id,
+      userAgent: row.userAgent,
+      lastSeenAt: row.lastSeenAt,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+    }))
 }

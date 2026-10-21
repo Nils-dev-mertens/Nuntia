@@ -11,8 +11,9 @@
  * means inventing step numbers and fighting the connector lines.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { File, Image, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
 
 import type {
   ActionFailure,
@@ -23,7 +24,10 @@ import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
+import { dedupeMediaByHash, sha256Hex } from '#/lib/mail/media.ts'
+import type { ContactContextFields } from '#/lib/contacts/context.ts'
 
+import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
 import {
   DONE_META,
@@ -454,11 +458,359 @@ function formatBytes(bytes: number): string {
  * `-` and `_` but also `/` in the general case.
  */
 function attachmentHref(
-  gmailThreadId: string,
+  fallbackThreadId: string,
   file: ConversationDetail['attachments'][number],
 ): string {
-  const thread = new URLSearchParams({ thread: gmailThreadId })
-  return `/attachments/${encodeURIComponent(file.gmailAttachmentId)}?${thread}`
+  const thread = new URLSearchParams({
+    thread: file.providerThreadId || fallbackThreadId,
+  })
+  return `/attachments/${encodeURIComponent(file.providerAttachmentId)}?${thread}`
+}
+
+type MediaAttachment = ConversationDetail['attachments'][number]
+
+function MediaOverview({
+  attachments,
+  providerThreadId,
+  id,
+  onClose,
+  hashFailures,
+  checking,
+}: {
+  attachments: MediaAttachment[]
+  providerThreadId: string
+  id: string
+  onClose?: () => void
+  hashFailures: number
+  checking: boolean
+}) {
+  return (
+    <>
+      <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-4">
+        <div className="min-w-0">
+          <h2 className="font-semibold text-foreground">Thread media</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {attachments.length} {attachments.length === 1 ? 'file' : 'files'}{' '}
+            across this conversation
+            {checking ? ' · Checking repeated media…' : ''}
+          </p>
+          {hashFailures > 0 ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {hashFailures} {hashFailures === 1 ? 'media file' : 'media files'}{' '}
+              could not be checked and remain listed.
+            </p>
+          ) : null}
+        </div>
+        {onClose ? (
+          <button
+            type="button"
+            aria-label="Close media and attachments"
+            onClick={onClose}
+            className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <X className="size-4" />
+          </button>
+        ) : null}
+      </header>
+      <ul id={id} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {attachments.map((attachment) => {
+          const image = attachment.mimeType.startsWith('image/')
+          const href = attachmentHref(providerThreadId, attachment)
+          const sender = attachment.sender
+          const sentAt = attachment.sentAt
+
+          return (
+            <li
+              key={`${attachment.providerMessageId}:${attachment.providerAttachmentId}`}
+            >
+              <a
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                title={`Open ${attachment.filename}`}
+                className="group block overflow-hidden rounded-lg border border-border bg-background transition-colors hover:border-foreground/30"
+              >
+                {image ? (
+                  <img
+                    src={href}
+                    alt={attachment.filename}
+                    loading="lazy"
+                    className="max-h-40 w-full bg-muted/30 object-contain"
+                  />
+                ) : null}
+                <div className="flex items-start gap-2.5 p-3">
+                  <span className="mt-0.5 rounded-md bg-muted p-1.5 text-muted-foreground">
+                    {image ? (
+                      <Image className="size-4" />
+                    ) : (
+                      <File className="size-4" />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium text-foreground group-hover:underline">
+                      {attachment.filename}
+                    </span>
+                    <span className="mt-1 block truncate text-xs text-muted-foreground">
+                      {attachment.mimeType}
+                      {formatBytes(attachment.sizeBytes)
+                        ? ` · ${formatBytes(attachment.sizeBytes)}`
+                        : ''}
+                    </span>
+                    {sender && sentAt ? (
+                      <span className="mt-1 block truncate text-xs text-muted-foreground">
+                        {sender.name ?? sender.email} · {formatTime(sentAt)}
+                      </span>
+                    ) : null}
+                    {attachment.isInline ? (
+                      <span className="mt-1 block text-[10px] text-muted-foreground/80">
+                        Inline media
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+              </a>
+            </li>
+          )
+        })}
+      </ul>
+    </>
+  )
+}
+
+function ContactContextEditor({
+  email,
+  initialContext,
+  onSave,
+  onSuggest,
+}: {
+  email: string
+  initialContext: ConversationDetail['contactContext']
+  onSave: (context: ContactContextFields) => Promise<{ error: string | null }>
+  onSuggest: (current: ContactContextFields) => Promise<{
+    suggestion: ContactContextFields | null
+    error: string | null
+  }>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiSuggested, setAiSuggested] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [roleCompany, setRoleCompany] = useState(
+    initialContext?.roleCompany ?? '',
+  )
+  const [relationship, setRelationship] = useState(
+    initialContext?.relationship ?? '',
+  )
+  const [topics, setTopics] = useState(initialContext?.topics ?? '')
+  const [currentWork, setCurrentWork] = useState(
+    initialContext?.currentWork ?? '',
+  )
+
+  useEffect(() => {
+    setRoleCompany(initialContext?.roleCompany ?? '')
+    setRelationship(initialContext?.relationship ?? '')
+    setTopics(initialContext?.topics ?? '')
+    setCurrentWork(initialContext?.currentWork ?? '')
+    setEditing(false)
+    setAiSuggested(false)
+    setError(null)
+  }, [initialContext, email])
+
+  async function suggest() {
+    if (busy || aiBusy) return
+    setAiBusy(true)
+    setError(null)
+    try {
+      const result = await onSuggest({
+        roleCompany,
+        relationship,
+        topics,
+        currentWork,
+      })
+      if (result.error || !result.suggestion) {
+        setError(result.error ?? 'Could not generate contact context.')
+      } else {
+        setRoleCompany(result.suggestion.roleCompany)
+        setRelationship(result.suggestion.relationship)
+        setTopics(result.suggestion.topics)
+        setCurrentWork(result.suggestion.currentWork)
+        setAiSuggested(true)
+      }
+    } catch {
+      setError('Could not generate contact context.')
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onSave({
+        roleCompany,
+        relationship,
+        topics,
+        currentWork,
+      })
+      if (result.error) {
+        setError(result.error)
+      } else {
+        setEditing(false)
+      }
+    } catch {
+      setError('Could not save this contact profile.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const hasContext = Boolean(
+    initialContext?.roleCompany ||
+    initialContext?.relationship ||
+    initialContext?.topics ||
+    initialContext?.currentWork,
+  )
+
+  return (
+    <section className="border-b border-border bg-muted/20 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-xs font-semibold text-foreground">
+            About this person
+          </h2>
+          <p className="truncate text-xs text-muted-foreground">{email}</p>
+        </div>
+        {!editing ? (
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+          >
+            {hasContext ? 'Edit context' : 'Add context'}
+          </button>
+        ) : null}
+      </div>
+      {editing ? (
+        <form className="mt-3 space-y-2" onSubmit={(event) => void save(event)}>
+          <label className="block text-xs text-muted-foreground">
+            Role / company
+            <input
+              value={roleCompany}
+              onChange={(event) => setRoleCompany(event.target.value)}
+              maxLength={160}
+              placeholder="CEO of Acme"
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            />
+          </label>
+          <label className="block text-xs text-muted-foreground">
+            Relationship
+            <textarea
+              value={relationship}
+              onChange={(event) => setRelationship(event.target.value)}
+              maxLength={500}
+              rows={2}
+              placeholder="How you know or work with them"
+              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            />
+          </label>
+          <label className="block text-xs text-muted-foreground">
+            Topics discussed
+            <textarea
+              value={topics}
+              onChange={(event) => setTopics(event.target.value)}
+              maxLength={1000}
+              rows={2}
+              placeholder="Partnership, hiring, product launch…"
+              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            />
+          </label>
+          <label className="block text-xs text-muted-foreground">
+            Currently working on
+            <textarea
+              value={currentWork}
+              onChange={(event) => setCurrentWork(event.target.value)}
+              maxLength={1000}
+              rows={2}
+              placeholder="Current projects or priorities"
+              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            />
+          </label>
+          {error ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+          {aiSuggested ? (
+            <p className="text-xs text-muted-foreground">
+              AI suggestions are unsaved. Review and edit them before saving.
+            </p>
+          ) : null}
+          <div className="flex flex-wrap justify-end gap-2 pt-1">
+            <button
+              type="button"
+              disabled={busy || aiBusy}
+              onClick={() => void suggest()}
+              className="mr-auto rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+            >
+              {aiBusy ? 'Suggesting…' : 'Suggest with AI'}
+            </button>
+            <button
+              type="button"
+              disabled={busy || aiBusy}
+              onClick={() => {
+                setRoleCompany(initialContext?.roleCompany ?? '')
+                setRelationship(initialContext?.relationship ?? '')
+                setTopics(initialContext?.topics ?? '')
+                setCurrentWork(initialContext?.currentWork ?? '')
+                setEditing(false)
+                setAiSuggested(false)
+                setError(null)
+              }}
+              className="rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={busy || aiBusy}
+              className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+            >
+              {busy ? 'Saving…' : 'Save context'}
+            </button>
+          </div>
+        </form>
+      ) : hasContext ? (
+        <dl className="mt-3 space-y-2 text-sm">
+          {[
+            ['Role / company', initialContext?.roleCompany],
+            ['Relationship', initialContext?.relationship],
+            ['Topics discussed', initialContext?.topics],
+            ['Currently working on', initialContext?.currentWork],
+          ].map(([label, value]) =>
+            value ? (
+              <div key={label}>
+                <dt className="text-[10px] font-medium text-muted-foreground">
+                  {label}
+                </dt>
+                <dd className="whitespace-pre-wrap text-xs text-foreground">
+                  {value}
+                </dd>
+              </div>
+            ) : null,
+          )}
+        </dl>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          Add private notes or ask AI for a draft based on this thread. Review
+          suggestions before saving.
+        </p>
+      )}
+    </section>
+  )
 }
 
 function ParsingProfileEditor({
@@ -864,12 +1216,15 @@ function ConversationDetailsEditor({
  */
 function Composer({
   accounts,
+  provider,
   suggest,
   onDraft,
   onSend,
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
+  /** Which service the owning mailbox uses, for the reconnect link. */
+  provider: ConversationDetail['provider']
   /** Whether a draft can be generated, and why not when it cannot. */
   suggest: ConversationDetail['suggestReply']
   /** Generate one draft. Never sends: the result lands in this box. */
@@ -994,13 +1349,15 @@ function Composer({
           <p>{error}</p>
           {authRequired ? (
             <a
-              href="/auth/google"
+              href={
+                provider === 'microsoft' ? '/auth/microsoft' : '/auth/google'
+              }
               className={cn(
                 'mt-3 inline-flex h-8 items-center rounded-md bg-primary px-3',
                 'text-xs font-medium text-primary-foreground',
               )}
             >
-              Reconnect Google
+              Reconnect {provider === 'microsoft' ? 'Outlook' : 'Gmail'}
             </a>
           ) : null}
         </div>
@@ -1314,6 +1671,8 @@ function encodeFileBytes(bytes: Uint8Array): string {
 export function ConversationView({
   detail,
   onSaveDetails,
+  onSaveContactContext,
+  onSuggestContactContext,
   onSaveParsingProfile,
   onSend,
   onDraft,
@@ -1323,6 +1682,13 @@ export function ConversationView({
   onMarkSenderUnreplyable,
 }: {
   detail: ConversationDetail
+  onSaveContactContext: (
+    context: ContactContextFields,
+  ) => Promise<{ error: string | null }>
+  onSuggestContactContext: (current: ContactContextFields) => Promise<{
+    suggestion: ContactContextFields | null
+    error: string | null
+  }>
   onReanalyse: () => Promise<{ error: string | null }>
   /**
    * Generate a draft reply for this thread. The draft is returned, not stored,
@@ -1360,6 +1726,11 @@ export function ConversationView({
   ) => Promise<ActionFailure>
 }) {
   const bottom = useRef<HTMLDivElement>(null)
+  const [mediaOpen, setMediaOpen] = useState(false)
+  const [dedupedMedia, setDedupedMedia] = useState<MediaAttachment[] | null>(
+    null,
+  )
+  const [mediaHashFailures, setMediaHashFailures] = useState(0)
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: 'end' })
@@ -1375,15 +1746,100 @@ export function ConversationView({
     detail.ownerEmails.map((email) => email.trim().toLowerCase()),
   )
 
-  const attachmentsByMessage = new Map<
-    string,
-    ConversationDetail['attachments']
-  >()
-  for (const attachment of detail.attachments) {
-    const list = attachmentsByMessage.get(attachment.gmailMessageId) ?? []
-    list.push(attachment)
-    attachmentsByMessage.set(attachment.gmailMessageId, list)
-  }
+  const messagesById = useMemo(
+    () =>
+      new Map(
+        detail.messages.map((message) => [message.providerMessageId, message]),
+      ),
+    [detail.messages],
+  )
+  const attachmentsByMessage = useMemo(() => {
+    const grouped = new Map<string, ConversationDetail['attachments']>()
+    for (const attachment of detail.attachments) {
+      const list = grouped.get(attachment.providerMessageId) ?? []
+      list.push(attachment)
+      grouped.set(attachment.providerMessageId, list)
+    }
+    return grouped
+  }, [detail.attachments])
+  const mediaCandidates = useMemo(
+    () =>
+      detail.attachments
+        .filter((attachment) => {
+          const type = attachment.mimeType.toLowerCase()
+          return (
+            type.startsWith('image/') ||
+            type.startsWith('audio/') ||
+            type.startsWith('video/')
+          )
+        })
+        .map((attachment) => ({
+          ...attachment,
+          message: messagesById.get(attachment.providerMessageId),
+        })),
+    [detail.attachments, messagesById],
+  )
+  const otherAttachments = useMemo(
+    () =>
+      detail.attachments
+        .filter((attachment) => {
+          const type = attachment.mimeType.toLowerCase()
+          return (
+            !type.startsWith('image/') &&
+            !type.startsWith('audio/') &&
+            !type.startsWith('video/')
+          )
+        })
+        .map((attachment) => ({
+          ...attachment,
+          message: messagesById.get(attachment.providerMessageId),
+        })),
+    [detail.attachments, messagesById],
+  )
+
+  // Keep every media item visible while hashes are being calculated; once
+  // resolved, replace that provisional list with the content-deduped one.
+  const mediaAttachments = dedupedMedia
+    ? [...dedupedMedia, ...otherAttachments]
+    : [...mediaCandidates, ...otherAttachments]
+  const mediaCandidatesKey = useMemo(
+    () =>
+      mediaCandidates
+        .map((item) => `${item.providerThreadId}:${item.providerAttachmentId}`)
+        .join('|'),
+    [mediaCandidates],
+  )
+
+  useEffect(() => {
+    let cancelled = false
+
+    if (mediaCandidates.length === 0) {
+      setDedupedMedia([])
+      setMediaHashFailures(0)
+      return
+    }
+
+    setDedupedMedia(null)
+    setMediaHashFailures(0)
+
+    void dedupeMediaByHash(mediaCandidates, async (attachment) => {
+      const href = attachmentHref(detail.providerThreadId, attachment)
+      const response = await fetch(href, { credentials: 'same-origin' })
+      if (!response.ok) {
+        throw new Error(`Could not read media (${response.status}).`)
+      }
+      const bytes = await response.arrayBuffer()
+      return sha256Hex(bytes)
+    }).then(({ items, failedCount }) => {
+      if (cancelled) return
+      setDedupedMedia(items)
+      setMediaHashFailures(failedCount)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [detail.providerThreadId, mediaCandidates, mediaCandidatesKey])
 
   let lastDay = ''
   // `New messages` is drawn from the mark the loader sent, not from a fresh read:
@@ -1394,28 +1850,39 @@ export function ConversationView({
     !message.isFromOwner && Date.parse(message.sentAt) > seenAtMs
   let shownUnseenBoundary = false
 
+  // The header avatar belongs to the other party. In a thread between two of the
+  // user's own addresses that is still "the other side", which is why the
+  // owner's addresses are excluded rather than just taking the first entry.
+  const senderContact =
+    detail.participants.find(
+      (p) => !detail.ownerEmails.includes(p.email.toLowerCase()),
+    ) ?? detail.participants[0]
+
   return (
     <div className="flex h-dvh flex-col">
       <header className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-lg font-semibold text-foreground">
-            {detail.topic ?? detail.subject}
-          </h1>
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
-            {detail.participants.map((p) => p.name ?? p.email).join(', ')}
-          </p>
-          <ConversationDetailsEditor
-            topic={detail.topic}
-            goal={detail.goal}
-            onSave={onSaveDetails}
-          />
-          {detail.parsingProfile ? (
-            <ParsingProfileEditor
-              key={detail.parsingProfile.senderEmail}
-              profile={detail.parsingProfile}
-              onSave={onSaveParsingProfile}
+        <div className="flex min-w-0 gap-3">
+          <Avatar contact={senderContact} className="mt-0.5 size-9 text-xs" />
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold text-foreground">
+              {detail.topic ?? detail.subject}
+            </h1>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              {detail.participants.map((p) => p.name ?? p.email).join(', ')}
+            </p>
+            <ConversationDetailsEditor
+              topic={detail.topic}
+              goal={detail.goal}
+              onSave={onSaveDetails}
             />
-          ) : null}
+            {detail.parsingProfile ? (
+              <ParsingProfileEditor
+                key={detail.parsingProfile.senderEmail}
+                profile={detail.parsingProfile}
+                onSave={onSaveParsingProfile}
+              />
+            ) : null}
+          </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-2">
           <div className="flex items-center gap-2">
@@ -1469,117 +1936,209 @@ export function ConversationView({
         </p>
       ) : null}
 
-      <div className="flex-1 space-y-1 overflow-y-auto px-6 py-6">
-        {detail.messages.map((message) => {
-          const day = new Date(message.sentAt).toDateString()
-          const showDay = day !== lastDay
-          lastDay = day
+      <div className="flex min-h-0 flex-1">
+        <div className="min-w-0 flex-1 space-y-1 overflow-y-auto px-6 py-6">
+          {detail.messages.map((message) => {
+            const day = new Date(message.sentAt).toDateString()
+            const showDay = day !== lastDay
+            lastDay = day
 
-          const from = message.from.email.trim().toLowerCase()
-          const mine = from === ownerEmail
-          const speaker = mine
-            ? 'You'
-            : ownAddresses.has(from)
-              ? // Another of the user's addresses is still the user, so name the
-                // address rather than the display name — both are "Nils Mertens".
-                message.from.email
-              : (message.from.name ?? message.from.email)
-          const files = attachmentsByMessage.get(message.gmailMessageId) ?? []
+            const from = message.from.email.trim().toLowerCase()
+            const mine = from === ownerEmail
+            const speaker = mine
+              ? 'You'
+              : ownAddresses.has(from)
+                ? // Another of the user's addresses is still the user, so name the
+                  // address rather than the display name — both are "Nils Mertens".
+                  message.from.email
+                : (message.from.name ?? message.from.email)
+            const files =
+              attachmentsByMessage.get(message.providerMessageId) ?? []
 
-          const unseen = isUnseen(message)
-          const showUnseenBoundary = unseen && !shownUnseenBoundary
-          if (unseen) shownUnseenBoundary = true
+            const unseen = isUnseen(message)
+            const showUnseenBoundary = unseen && !shownUnseenBoundary
+            if (unseen) shownUnseenBoundary = true
 
-          return (
-            <div key={message.gmailMessageId}>
-              {showUnseenBoundary ? (
-                <div className="my-6 flex items-center gap-3">
-                  <span className="h-px flex-1 bg-border" />
-                  {/* The one place the read mark is visible in here, and it is a
+            return (
+              <div key={message.providerMessageId}>
+                {showUnseenBoundary ? (
+                  <div className="my-6 flex items-center gap-3">
+                    <span className="h-px flex-1 bg-border" />
+                    {/* The one place the read mark is visible in here, and it is a
                       divider rather than a tag on purpose: it marks *where* new
                       mail starts, not that the thread is new. */}
-                  <span
-                    title={READ_META.description}
-                    className="text-xs font-medium text-foreground"
-                  >
-                    {READ_META.label} messages
-                  </span>
-                  <span className="h-px flex-1 bg-border" />
-                </div>
-              ) : null}
-              {showDay ? (
-                <div className="my-6 flex items-center gap-3">
-                  <span className="h-px flex-1 bg-border" />
-                  <span className="text-xs text-muted-foreground">
-                    {dayLabel(message.sentAt)}
-                  </span>
-                  <span className="h-px flex-1 bg-border" />
-                </div>
-              ) : null}
+                    <span
+                      title={READ_META.description}
+                      className="text-xs font-medium text-foreground"
+                    >
+                      {READ_META.label} messages
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                ) : null}
+                {showDay ? (
+                  <div className="my-6 flex items-center gap-3">
+                    <span className="h-px flex-1 bg-border" />
+                    <span className="text-xs text-muted-foreground">
+                      {dayLabel(message.sentAt)}
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+                ) : null}
 
-              <div
-                className={cn(
-                  'flex flex-col gap-1 py-1',
-                  mine ? 'items-end' : 'items-start',
-                )}
-              >
                 <div
                   className={cn(
-                    'flex items-baseline gap-2 text-xs text-muted-foreground',
-                    mine && 'flex-row-reverse',
+                    'flex flex-col gap-1 py-1',
+                    mine ? 'items-end' : 'items-start',
                   )}
                 >
-                  <span className="font-medium text-foreground">{speaker}</span>
-                  <time dateTime={message.sentAt}>
-                    {formatTime(message.sentAt)}
-                  </time>
-                </div>
+                  <div
+                    className={cn(
+                      'flex items-baseline gap-2 text-xs text-muted-foreground',
+                      mine && 'flex-row-reverse',
+                    )}
+                  >
+                    <span className="font-medium text-foreground">
+                      {speaker}
+                    </span>
+                    <time dateTime={message.sentAt}>
+                      {formatTime(message.sentAt)}
+                    </time>
+                  </div>
 
-                <MessageBody
-                  html={message.bodyHtml}
-                  text={message.body}
-                  mine={mine}
-                />
-                <StrippedParts message={message} />
+                  <MessageBody
+                    html={message.bodyHtml}
+                    text={message.body}
+                    mine={mine}
+                  />
+                  <StrippedParts message={message} />
 
-                {files.length > 0 ? (
-                  <ul className="flex max-w-[80%] flex-wrap gap-2">
-                    {files.map((file) => (
-                      <li key={file.gmailAttachmentId}>
-                        {/* A link rather than a button: the bytes are served from
+                  {files.length > 0 ? (
+                    <ul className="flex max-w-[80%] flex-wrap gap-2">
+                      {files.map((file) => (
+                        <li key={file.providerAttachmentId}>
+                          {/* A link rather than a button: the bytes are served from
                             a real URL, so the browser opens or saves the file
                             itself and the app never handles the download. */}
-                        <a
-                          href={attachmentHref(detail.gmailThreadId, file)}
-                          target="_blank"
-                          rel="noreferrer"
-                          title={`Open ${file.filename}`}
-                          className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
-                        >
-                          <span className="max-w-56 truncate underline decoration-dotted underline-offset-2">
-                            {file.filename}
-                          </span>
-                          {formatBytes(file.sizeBytes) ? (
-                            <span className="text-muted-foreground/70">
-                              {formatBytes(file.sizeBytes)}
+                          <a
+                            href={attachmentHref(detail.providerThreadId, file)}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`Open ${file.filename}`}
+                            className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+                          >
+                            <span className="max-w-56 truncate underline decoration-dotted underline-offset-2">
+                              {file.filename}
                             </span>
-                          ) : null}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
+                            {formatBytes(file.sizeBytes) ? (
+                              <span className="text-muted-foreground/70">
+                                {formatBytes(file.sizeBytes)}
+                              </span>
+                            ) : null}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          )
-        })}
+            )
+          })}
 
-        <div ref={bottom} />
+          <div ref={bottom} />
+        </div>
+
+        {mediaAttachments.length > 0 || detail.senderEmail ? (
+          <>
+            <aside
+              aria-label="Thread overview"
+              id="thread-media-overview-desktop"
+              className="hidden w-80 shrink-0 flex-col overflow-y-auto border-l border-border bg-muted/20 lg:flex"
+            >
+              {detail.senderEmail ? (
+                <ContactContextEditor
+                  key={detail.senderEmail}
+                  email={detail.senderEmail}
+                  initialContext={detail.contactContext}
+                  onSave={onSaveContactContext}
+                  onSuggest={onSuggestContactContext}
+                />
+              ) : null}
+              {mediaAttachments.length > 0 ? (
+                <MediaOverview
+                  attachments={mediaAttachments}
+                  providerThreadId={detail.providerThreadId}
+                  id="thread-media-overview-desktop-list"
+                  hashFailures={mediaHashFailures}
+                  checking={mediaCandidates.length > 0 && dedupedMedia === null}
+                />
+              ) : null}
+            </aside>
+            {mediaOpen ? (
+              <div className="fixed inset-0 z-50 lg:hidden">
+                <button
+                  type="button"
+                  aria-label="Close media and attachments"
+                  onClick={() => setMediaOpen(false)}
+                  className="absolute inset-0 bg-black/40"
+                />
+                <aside
+                  aria-label="Thread overview"
+                  id="thread-media-overview-mobile"
+                  className="absolute inset-y-0 right-0 flex w-[min(22rem,90vw)] flex-col overflow-y-auto border-l border-border bg-background shadow-xl"
+                >
+                  {detail.senderEmail ? (
+                    <ContactContextEditor
+                      key={detail.senderEmail}
+                      email={detail.senderEmail}
+                      initialContext={detail.contactContext}
+                      onSave={onSaveContactContext}
+                      onSuggest={onSuggestContactContext}
+                    />
+                  ) : null}
+                  {mediaAttachments.length > 0 ? (
+                    <MediaOverview
+                      attachments={mediaAttachments}
+                      providerThreadId={detail.providerThreadId}
+                      id="thread-media-overview-mobile-list"
+                      onClose={() => setMediaOpen(false)}
+                      hashFailures={mediaHashFailures}
+                      checking={
+                        mediaCandidates.length > 0 && dedupedMedia === null
+                      }
+                    />
+                  ) : null}
+                </aside>
+              </div>
+            ) : null}
+          </>
+        ) : null}
       </div>
+
+      {mediaAttachments.length > 0 || detail.senderEmail ? (
+        <button
+          type="button"
+          aria-expanded={mediaOpen}
+          aria-controls="thread-media-overview-mobile"
+          onClick={() => setMediaOpen((open) => !open)}
+          className="fixed top-1/2 right-4 z-30 flex -translate-y-1/2 items-center gap-2 rounded-full border border-border bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg transition-colors hover:bg-muted lg:hidden"
+        >
+          {mediaOpen ? (
+            <PanelRightClose className="size-4" />
+          ) : (
+            <PanelRightOpen className="size-4" />
+          )}
+          Overview
+          {mediaAttachments.length > 0
+            ? ` (${dedupedMedia ? mediaAttachments.length : detail.attachments.length})`
+            : ''}
+        </button>
+      ) : null}
 
       {detail.replyable ? (
         <Composer
           accounts={detail.replyAccounts}
+          provider={detail.provider}
           suggest={detail.suggestReply}
           onDraft={onDraft}
           onSend={onSend}

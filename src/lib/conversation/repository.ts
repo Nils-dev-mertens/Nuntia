@@ -6,12 +6,13 @@
  * knows both.
  */
 
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
 import {
   attachments,
+  contacts,
   conversations,
   decisions,
   messages as messagesTable,
@@ -255,7 +256,7 @@ export async function saveConversation(
         .values({
           id,
           accountId: ownerEmail,
-          gmailThreadId: conversation.gmailThreadId,
+          providerThreadId: conversation.providerThreadId,
           subject: conversation.subject,
           participants: conversation.participants,
           state: conversation.state,
@@ -323,9 +324,9 @@ export async function saveConversation(
       if (conversation.messages.length > 0) {
         await tx.insert(messagesTable).values(
           conversation.messages.map((m) => ({
-            id: `${id}:${m.gmailMessageId}`,
+            id: `${id}:${m.providerMessageId}`,
             conversationId: id,
-            gmailMessageId: m.gmailMessageId,
+            providerMessageId: m.providerMessageId,
             internetMessageId: m.internetMessageId,
             from: m.from,
             to: m.to,
@@ -345,16 +346,43 @@ export async function saveConversation(
         )
       }
 
+      // Everyone this thread was addressed to or from, which is the address book
+      // the new-message composer offers. An address with no display name is still
+      // worth keeping — a recipient picker that only knew named senders would
+      // hide half the people the user has actually corresponded with. A later
+      // message that omits the name must not erase the one already learned, so
+      // the conflict update coalesces instead of overwriting with null.
+      const addressed = conversation.participants.filter((p) => p.email.trim())
+      if (addressed.length > 0) {
+        await tx
+          .insert(contacts)
+          .values(
+            addressed.map((p) => ({
+              accountId: ownerEmail,
+              email: p.email.trim().toLowerCase(),
+              name: p.name?.trim() || null,
+              updatedAt: now,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [contacts.accountId, contacts.email],
+            set: {
+              name: sql`coalesce(nullif(excluded.name, ''), ${contacts.name})`,
+              updatedAt: sql`excluded.updated_at`,
+            },
+          })
+      }
+
       if (conversation.attachments.length > 0) {
         await tx.delete(attachments).where(eq(attachments.conversationId, id))
 
         await tx.insert(attachments).values(
           conversation.attachments.map((a) => ({
-            id: `${id}:${a.gmailAttachmentId}`,
+            id: `${id}:${a.providerAttachmentId}`,
             conversationId: id,
             // Resolved to the message row id written above.
-            messageId: `${id}:${a.messageId ?? a.gmailMessageId}`,
-            gmailAttachmentId: a.gmailAttachmentId,
+            messageId: `${id}:${a.messageId ?? a.providerMessageId}`,
+            providerAttachmentId: a.providerAttachmentId,
             filename: a.filename,
             mimeType: a.mimeType,
             sizeBytes: a.sizeBytes,
@@ -365,6 +393,51 @@ export async function saveConversation(
       }
     })
   })
+}
+
+/**
+ * The greeting and signature on the user's own most recent message in a mailbox.
+ *
+ * The fallback for a *new* thread, where there is no conversation to read them
+ * from: how the user signed their last sent mail is the best available guess at
+ * how they sign this one. `detected_*` is the pair the parser always fills in,
+ * whether or not the text was stripped from the stored body.
+ */
+export async function getLastOwnMessageStyle(accountId: string): Promise<{
+  greeting: string | null
+  signature: string | null
+  detectedGreeting: string | null
+  detectedSignature: string | null
+} | null> {
+  const rows = await db
+    .select({
+      greeting: messagesTable.greetingText,
+      signature: messagesTable.signatureText,
+      detectedGreeting: messagesTable.detectedGreetingText,
+      detectedSignature: messagesTable.detectedSignatureText,
+    })
+    .from(messagesTable)
+    .innerJoin(
+      conversations,
+      eq(conversations.id, messagesTable.conversationId),
+    )
+    .where(
+      and(
+        eq(conversations.accountId, accountId),
+        eq(messagesTable.isFromAccountOwner, true),
+      ),
+    )
+    .orderBy(desc(messagesTable.sentAt))
+    .limit(1)
+
+  const row = rows.at(0)
+  if (!row) return null
+  return {
+    greeting: row.greeting,
+    signature: row.signature,
+    detectedGreeting: row.detectedGreeting,
+    detectedSignature: row.detectedSignature,
+  }
 }
 
 export type SenderProfileSettings = ParsingPreferences & {
@@ -731,7 +804,12 @@ export async function setReplyableForSender(
       await db
         .update(conversations)
         .set({ replyable: value, updatedAt: new Date() })
-        .where(and(eq(conversations.accountId, accountId), inArray(conversations.id, ids)))
+        .where(
+          and(
+            eq(conversations.accountId, accountId),
+            inArray(conversations.id, ids),
+          ),
+        )
     }
   })
 
@@ -797,11 +875,11 @@ export async function getStoredThreadIds(
   opts: { onlyMissingHtml?: boolean } = {},
 ): Promise<string[]> {
   const rows = await db
-    .selectDistinct({ gmailThreadId: conversations.gmailThreadId })
+    .selectDistinct({ providerThreadId: conversations.providerThreadId })
     .from(conversations)
     .where(eq(conversations.accountId, ownerEmail))
 
-  if (!opts.onlyMissingHtml) return rows.map((r) => r.gmailThreadId)
+  if (!opts.onlyMissingHtml) return rows.map((r) => r.providerThreadId)
 
   // `notExists` rather than a left join + null check: the subquery keeps this to
   // one round trip and states the intent directly.
@@ -813,7 +891,7 @@ export async function getStoredThreadIds(
         isNull(messagesTable.bodyHtml),
         inArray(
           messagesTable.conversationId,
-          rows.map((r) => conversationId(ownerEmail, r.gmailThreadId)),
+          rows.map((r) => conversationId(ownerEmail, r.providerThreadId)),
         ),
       ),
     )
@@ -821,7 +899,7 @@ export async function getStoredThreadIds(
   const missing = new Set(lackingHtml.map((r) => r.conversationId))
 
   return rows
-    .map((r) => r.gmailThreadId)
+    .map((r) => r.providerThreadId)
     .filter((threadId) => missing.has(conversationId(ownerEmail, threadId)))
 }
 
@@ -834,11 +912,33 @@ export async function getStoredThreadIds(
  * back alongside the conversation because the reply and the sender profile both
  * need to know whose mailbox they are working in.
  */
+/**
+ * The mailboxes this user owns.
+ *
+ * Empty for a signed-out or unknown user, which makes every query below return
+ * nothing rather than everything — the failure direction that matters.
+ */
+async function ownedAccountIds(userId: string): Promise<string[]> {
+  const rows = await db
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(eq(accounts.userId, userId.toLowerCase()))
+
+  return rows.map((row) => row.id)
+}
+
 export async function getConversationByThreadId(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<{ accountId: string; conversation: Conversation } | null> {
+  const owned = await ownedAccountIds(userId)
+  if (owned.length === 0) return null
+
   const row = await db.query.conversations.findFirst({
-    where: eq(conversations.gmailThreadId, gmailThreadId),
+    where: and(
+      eq(conversations.providerThreadId, providerThreadId),
+      inArray(conversations.accountId, owned),
+    ),
   })
   if (!row) return null
 
@@ -864,10 +964,22 @@ export async function getConversationByThreadId(
  * fragments only link to each other through the shared ids they carry.
  */
 export async function getConversationClusterByThreadId(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<AccountConversation[] | null> {
+  // Scoped to the reader's mailboxes, and the scope is applied to every hop of
+  // the walk — not only to the seed. Thread ids and `Message-ID`s are global
+  // values: two people on one install can perfectly well both have received the
+  // same message, and walking a shared id without the owner filter would fold a
+  // stranger's copy of it into this user's conversation.
+  const owned = await ownedAccountIds(userId)
+  if (owned.length === 0) return null
+
   const seed = await db.query.conversations.findFirst({
-    where: eq(conversations.gmailThreadId, gmailThreadId),
+    where: and(
+      eq(conversations.providerThreadId, providerThreadId),
+      inArray(conversations.accountId, owned),
+    ),
   })
   if (!seed) return null
 
@@ -891,7 +1003,16 @@ export async function getConversationClusterByThreadId(
     const neighbours = await db
       .selectDistinct({ conversationId: messagesTable.conversationId })
       .from(messagesTable)
-      .where(inArray(messagesTable.internetMessageId, messageIds))
+      .innerJoin(
+        conversations,
+        eq(conversations.id, messagesTable.conversationId),
+      )
+      .where(
+        and(
+          inArray(messagesTable.internetMessageId, messageIds),
+          inArray(conversations.accountId, owned),
+        ),
+      )
 
     for (const { conversationId: neighbourId } of neighbours) {
       if (visited.has(neighbourId)) continue
@@ -903,7 +1024,12 @@ export async function getConversationClusterByThreadId(
   const rows = await db
     .select()
     .from(conversations)
-    .where(inArray(conversations.id, [...visited]))
+    .where(
+      and(
+        inArray(conversations.id, [...visited]),
+        inArray(conversations.accountId, owned),
+      ),
+    )
 
   return Promise.all(
     rows.map(async (row) => ({
@@ -916,9 +1042,9 @@ export async function getConversationClusterByThreadId(
 /** Fetch one conversation with its messages and attachments. */
 export async function getConversation(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<Conversation | null> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
 
   const row = await db.query.conversations.findFirst({
     where: eq(conversations.id, id),
@@ -936,19 +1062,19 @@ export async function getConversation(
  */
 export async function setGoal(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   goal: string | null,
 ): Promise<void> {
-  await setConversationDetails(accountId, gmailThreadId, { goal })
+  await setConversationDetails(accountId, providerThreadId, { goal })
 }
 
 /** Persist both user-owned conversation details under the SQLite write lock. */
 export async function setConversationDetails(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   details: { topic?: string | null; goal?: string | null },
 ): Promise<void> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
 
   await withWriteLock(async () => {
     await db
@@ -963,10 +1089,10 @@ export async function setConversationDetails(
 /** Persist a user-edited topic. */
 export async function setTopic(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   topic: string | null,
 ): Promise<void> {
-  await setConversationDetails(accountId, gmailThreadId, { topic })
+  await setConversationDetails(accountId, providerThreadId, { topic })
 }
 
 /** Map a DB row back into the domain shape. */
@@ -983,7 +1109,7 @@ async function rowToConversation(
   ])
 
   const messages: ConversationMessage[] = msgs.map((m) => ({
-    gmailMessageId: m.gmailMessageId,
+    providerMessageId: m.providerMessageId,
     internetMessageId: m.internetMessageId,
     from: m.from,
     to: m.to,
@@ -1024,9 +1150,9 @@ async function rowToConversation(
       : a.messageId
 
     return {
-      gmailMessageId: identity,
+      providerMessageId: identity,
       messageId: identity,
-      gmailAttachmentId: a.gmailAttachmentId,
+      providerAttachmentId: a.providerAttachmentId,
       filename: a.filename,
       mimeType: a.mimeType,
       sizeBytes: a.sizeBytes,
@@ -1037,7 +1163,7 @@ async function rowToConversation(
 
   return {
     id: row.id,
-    gmailThreadId: row.gmailThreadId,
+    providerThreadId: row.providerThreadId,
     subject: row.subject,
     participants: row.participants,
     messages,
@@ -1090,10 +1216,10 @@ async function rowToConversation(
  */
 export async function setStateOverride(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   override: StateOverride | null,
 ): Promise<void> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
 
   await withWriteLock(async () => {
     await db
@@ -1134,7 +1260,7 @@ export type StoredUserFields = {
  */
 export async function getStoredUserFields(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<StoredUserFields> {
   const rows = await db
     .select({
@@ -1146,7 +1272,7 @@ export async function getStoredUserFields(
       lastMessageAt: conversations.lastMessageAt,
     })
     .from(conversations)
-    .where(eq(conversations.id, conversationId(accountId, gmailThreadId)))
+    .where(eq(conversations.id, conversationId(accountId, providerThreadId)))
     .limit(1)
 
   const found = rows.at(0)
@@ -1178,9 +1304,9 @@ export async function getStoredUserFields(
  */
 export async function getStateOverride(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<StateOverride | null> {
-  return (await getStoredUserFields(accountId, gmailThreadId)).stateOverride
+  return (await getStoredUserFields(accountId, providerThreadId)).stateOverride
 }
 
 /**
@@ -1198,16 +1324,18 @@ export async function getStateOverride(
  */
 export async function markConversationSeen(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   seenThrough: Date,
 ): Promise<void> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
 
   await withWriteLock(async () => {
     const rows = await db
       .select({ seenAt: conversations.seenAt })
       .from(conversations)
-      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
       .limit(1)
 
     const current = rows.at(0)?.seenAt ?? null
@@ -1216,7 +1344,9 @@ export async function markConversationSeen(
     await db
       .update(conversations)
       .set({ seenAt: seenThrough, updatedAt: new Date() })
-      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
   })
 }
 
@@ -1233,16 +1363,18 @@ export async function markConversationSeen(
  */
 export async function setConversationDone(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
   done: boolean,
 ): Promise<void> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
 
   await withWriteLock(async () => {
     const rows = await db
       .select({ lastMessageAt: conversations.lastMessageAt })
       .from(conversations)
-      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
       .limit(1)
 
     const found = rows.at(0)
@@ -1256,7 +1388,9 @@ export async function setConversationDone(
         doneMessageAt: done ? found.lastMessageAt : null,
         updatedAt: now,
       })
-      .where(and(eq(conversations.id, id), eq(conversations.accountId, accountId)))
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
   })
 }
 
@@ -1336,9 +1470,9 @@ export async function listIgnoredSenders(
 /** Delete a conversation and its children. */
 export async function deleteConversation(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<void> {
-  const id = conversationId(accountId, gmailThreadId)
+  const id = conversationId(accountId, providerThreadId)
   await db.delete(conversations).where(eq(conversations.id, id))
 }
 
@@ -1383,8 +1517,8 @@ export async function getByThreadIds(
 export type StoredAttachment = {
   id: string
   accountId: string
-  gmailThreadId: string
-  gmailAttachmentId: string
+  providerThreadId: string
+  providerAttachmentId: string
   filename: string
   mimeType: string
   sizeBytes: number
@@ -1402,17 +1536,22 @@ export type StoredAttachment = {
  * repeat its account, and the conversation already knows it.
  */
 export async function getStoredAttachment(
-  gmailThreadId: string,
-  gmailAttachmentId: string,
+  userId: string,
+  providerThreadId: string,
+  providerAttachmentId: string,
 ): Promise<StoredAttachment | null> {
+  const owned = await ownedAccountIds(userId)
+  if (owned.length === 0) return null
+
   const rows = await db
     .select({ attachment: attachments, accountId: conversations.accountId })
     .from(attachments)
     .innerJoin(conversations, eq(conversations.id, attachments.conversationId))
     .where(
       and(
-        eq(conversations.gmailThreadId, gmailThreadId),
-        eq(attachments.gmailAttachmentId, gmailAttachmentId),
+        eq(conversations.providerThreadId, providerThreadId),
+        eq(attachments.providerAttachmentId, providerAttachmentId),
+        inArray(conversations.accountId, owned),
       ),
     )
     .limit(1)
@@ -1426,8 +1565,8 @@ export async function getStoredAttachment(
   return {
     id: row.id,
     accountId: found.accountId,
-    gmailThreadId,
-    gmailAttachmentId: row.gmailAttachmentId,
+    providerThreadId,
+    providerAttachmentId: row.providerAttachmentId,
     filename: row.filename,
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,

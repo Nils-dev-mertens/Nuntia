@@ -1,19 +1,22 @@
 /**
- * Gmail message → ParsedMessage.
+ * Provider message → ParsedMessage.
  *
- * Gmail's structured payload is a MIME tree rather than raw RFC822, so it cannot
- * go straight through postal-mime. This module walks the tree and produces the
- * same `ParsedMessage` shape the rest of the app already consumes — that is the
- * whole point: the conversation model never learns where mail came from.
+ * Gmail's structured payload is a MIME tree rather than raw RFC822, and the
+ * Microsoft adapter synthesises the same tree from Graph's JSON. So one walk over
+ * that tree serves both providers and the conversation model never learns where
+ * the mail came from.
  */
 
 import type { ParsedMessage } from '#/lib/mail/index.ts'
 import type { AttachmentRef } from '#/lib/conversation/model.ts'
 
-import type { GmailMessage, GmailPart } from './client.ts'
+import type { ProviderMessage, ProviderPart } from './types.ts'
 
 /** An attachment found in the tree, before any download. */
-export type GmailAttachmentRef = {
+/** Backwards-compatible name for the Gmail-shaped call sites. */
+export type GmailAttachmentRef = ProviderAttachmentRef
+
+export type ProviderAttachmentRef = {
   /** The Gmail part id, used to fetch the bytes later. */
   attachmentId: string
   filename: string
@@ -35,7 +38,7 @@ export function decodeGmailData(data: string): Buffer {
 }
 
 /** Decode a part's text using its declared charset. */
-function decodeText(part: LooseGmailPart): string {
+function decodeText(part: LooseProviderPart): string {
   if (!part.data) return ''
 
   const bytes = decodeGmailData(part.data)
@@ -52,11 +55,11 @@ function decodeText(part: LooseGmailPart): string {
 /**
  * A payload part as it may actually arrive: Gmail omits `children` on leaf
  * parts, and `headers` can be missing on a malformed payload. The declared
- * `GmailPart` type says otherwise, so every tree walk takes this looser view.
+ * `ProviderPart` type says otherwise, so every tree walk takes this looser view.
  */
-type LooseGmailPart = Omit<GmailPart, 'children' | 'headers'> & {
-  children?: LooseGmailPart[]
-  // Gmail's part headers are sparse: any given key may simply be absent.
+type LooseProviderPart = Omit<ProviderPart, 'children' | 'headers'> & {
+  children?: LooseProviderPart[]
+  // Part headers are sparse: any given key may simply be absent.
   headers?: Record<string, string | undefined>
 }
 
@@ -64,12 +67,12 @@ type LooseGmailPart = Omit<GmailPart, 'children' | 'headers'> & {
  * Depth-first search for the first part matching a predicate.
  *
  * Tolerates parts without a `children` array — Gmail omits it for leaf parts,
- * and a caller may pass a tree that never went through `toGmailPart`.
+ * and a caller may pass a tree that never went through `toProviderPart`.
  */
 function findPart(
-  part: LooseGmailPart | undefined | null,
-  predicate: (p: LooseGmailPart) => boolean,
-): LooseGmailPart | null {
+  part: LooseProviderPart | undefined | null,
+  predicate: (p: LooseProviderPart) => boolean,
+): LooseProviderPart | null {
   if (!part) return null
   if (predicate(part)) return part
 
@@ -83,9 +86,9 @@ function findPart(
 
 /** Collect every leaf part that is an attachment or inline image. */
 function collectAttachments(
-  part: LooseGmailPart,
-  out: GmailAttachmentRef[] = [],
-): GmailAttachmentRef[] {
+  part: LooseProviderPart,
+  out: ProviderAttachmentRef[] = [],
+): ProviderAttachmentRef[] {
   const contentDisposition = part.headers?.['content-disposition'] ?? ''
   const hasFilename =
     typeof part.filename === 'string' && part.filename.length > 0
@@ -166,8 +169,8 @@ function addressesFrom(header: string | undefined): string[] {
  * Prefers `text/plain` because its quoting is already normalised and strips
  * more reliably; falls back to `text/html`, which the DOM extractor handles.
  */
-export function toParsedMessage(message: GmailMessage): ParsedMessage {
-  const root: LooseGmailPart | null = message.payload
+export function toParsedMessage(message: ProviderMessage): ParsedMessage {
+  const root: LooseProviderPart | null = message.payload
 
   // `root` may be null and `headers` may be absent on a malformed payload, so
   // both levels need guarding — `root?.headers[name]` only handles the first.
@@ -226,14 +229,16 @@ export function toParsedMessage(message: GmailMessage): ParsedMessage {
 }
 
 /** Attachment metadata for a message, without downloading anything. */
-export function toAttachmentRefs(message: GmailMessage): GmailAttachmentRef[] {
+export function toAttachmentRefs(
+  message: ProviderMessage,
+): ProviderAttachmentRef[] {
   return message.payload ? collectAttachments(message.payload) : []
 }
 
 /** The traits of a stored attachment that can be matched against a payload. */
 export type AttachmentTraits = {
   /** The id recorded when the attachment was synced; often, but not always, current. */
-  gmailAttachmentId: string
+  providerAttachmentId: string
   filename: string
   mimeType: string
   sizeBytes: number
@@ -255,9 +260,9 @@ export type AttachmentTraits = {
  * message, or a forward whose attachment was stripped in between.
  */
 export function findAttachmentPart(
-  messages: GmailMessage[],
+  messages: ProviderMessage[],
   wanted: AttachmentTraits,
-): { messageId: string; ref: GmailAttachmentRef } | null {
+): { messageId: string; ref: ProviderAttachmentRef } | null {
   const candidates = messages.flatMap((message) =>
     toAttachmentRefs(message).map((ref) => ({ messageId: message.id, ref })),
   )
@@ -265,7 +270,7 @@ export function findAttachmentPart(
   // Exact when the recorded id is still the current one — the common case, and
   // the only one that needs no guessing.
   const byId = candidates.find(
-    (candidate) => candidate.ref.attachmentId === wanted.gmailAttachmentId,
+    (candidate) => candidate.ref.attachmentId === wanted.providerAttachmentId,
   )
   if (byId) return byId
 
@@ -317,7 +322,7 @@ export function findAttachmentPart(
  * attachment rows and wrote none back.
  */
 export function toThreadAttachmentRefs(
-  messages: GmailMessage[],
+  messages: ProviderMessage[],
   parsed: ParsedMessage[],
 ): AttachmentRef[] {
   return messages.flatMap((message, index) => {
@@ -330,8 +335,8 @@ export function toThreadAttachmentRefs(
       : message.id
 
     return toAttachmentRefs(message).map((ref) => ({
-      gmailMessageId: messageKey,
-      gmailAttachmentId: ref.attachmentId,
+      providerMessageId: messageKey,
+      providerAttachmentId: ref.attachmentId,
       filename: ref.filename,
       mimeType: ref.mimeType,
       sizeBytes: ref.sizeBytes,
@@ -347,11 +352,11 @@ export function toThreadAttachmentRefs(
  * Drafts are excluded from the inbox: they are the user's own unsent text, not
  * something anyone else wrote.
  */
-export function isDraft(message: GmailMessage): boolean {
+export function isDraft(message: ProviderMessage): boolean {
   return message.labelIds.includes('DRAFT')
 }
 
 /** True when a message lives in the trash. */
-export function isTrashed(message: GmailMessage): boolean {
+export function isTrashed(message: ProviderMessage): boolean {
   return message.labelIds.includes('TRASHED')
 }

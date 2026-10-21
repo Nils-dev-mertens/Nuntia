@@ -6,111 +6,42 @@
  * here — it never imports `googleapis` types directly.
  */
 
+import { buildMimeMessage } from '#/lib/mail/index.ts'
 import type { ParsedMessage } from '#/lib/mail/index.ts'
 import type { createGmailClient } from '#/lib/auth/google.ts'
+import type {
+  AttachmentPayload,
+  HistoryPage,
+  MailboxClient,
+  ProviderMessage,
+  ProviderPart,
+  ProviderThread,
+  SendResult,
+  ThreadListPage,
+} from '#/lib/mailbox/types.ts'
 
 /** The authenticated Gmail client, as returned by `createGmailClient`. */
 type GmailApi = Awaited<ReturnType<typeof createGmailClient>>
 
-/** A single MIME part from Gmail's structured payload. */
-export type GmailPart = {
-  partId: string
-  mimeType: string
-  filename: string | null
-  /** base64url body data, absent when the part is empty */
-  data?: string
-  headers: Record<string, string>
-  children: GmailPart[]
-}
-
-/** A message from `threads.get` with `format: 'full'`. */
-export type GmailMessage = {
-  id: string
-  threadId: string
-  labelIds: string[]
-  internalDate: string | null
-  snippet: string | null
-  payload: GmailPart | null
-}
-
-export type GmailThread = {
-  id: string
-  historyId: string
-  messages: GmailMessage[]
-}
-
-/** One page of thread listings. */
-export type ThreadListPage = {
-  threads: Array<{ id: string; historyId: string }>
-  nextPageToken?: string | null
-  resultSizeEstimate?: number | null
-}
-
-export type HistoryPage = {
-  history: Array<{
-    id: string
-    messages: Array<{ id: string; threadId: string }>
-  }>
-  nextPageToken?: string | null
-  historyId?: string | null
-}
-
-export type AttachmentPayload = {
-  data: string
-  size: number
-}
-
-/** What Gmail returns after accepting a message. */
-export type SendResult = {
-  id: string
-  threadId: string | null
-  labelIds: string[]
-}
-
 /**
- * What sync needs from Gmail.
+ * Gmail's wire shapes are the neutral provider shapes.
  *
- * Deliberately narrow — six methods, no more. Anything the sync layer starts
- * needing gets added here so a fake stays easy to write.
+ * The mailbox seam expects a MIME tree, which is exactly what Gmail returns, so
+ * this adapter is a mapping rather than a translation. Re-exported under the old
+ * names so call sites that mean "Gmail's payload" still read that way.
  */
-export interface GmailClient {
-  /** Current mailbox history id, used as the incremental sync cursor. */
-  getProfileHistoryId: () => Promise<string>
-
-  /** List thread ids, newest first. */
-  listThreads: (opts: {
-    pageToken?: string
-    maxResults?: number
-    query?: string
-  }) => Promise<ThreadListPage>
-
-  /** Fetch a full thread with all message payloads. */
-  getThread: (threadId: string) => Promise<GmailThread>
-
-  /** Changes since a history id. */
-  listHistory: (opts: {
-    startHistoryId: string
-    pageToken?: string
-  }) => Promise<HistoryPage>
-
-  /** Download one attachment's bytes. */
-  getAttachment: (messageId: string, attachmentId: string) => Promise<AttachmentPayload>
-
-  /**
-   * Send a raw RFC 5322 message.
-   *
-   * `raw` is base64url-encoded by the caller-facing helper in `send.ts`; the
-   * interface takes the plain string so the fake does not have to know about
-   * Gmail's encoding. Passing `threadId` makes the reply land in the existing
-   * thread rather than starting a new one.
-   */
-  sendMessage: (
-    raw: string,
-    opts?: { threadId?: string },
-  ) => Promise<SendResult>
-
-  /** The authenticated account's address. */
-  getEmailAddress: () => Promise<string>
+export type GmailPart = ProviderPart
+export type GmailMessage = ProviderMessage
+export type GmailThread = ProviderThread
+export type {
+  AttachmentPayload,
+  HistoryPage,
+  MailboxClient,
+  ProviderMessage,
+  ProviderPart,
+  ProviderThread,
+  SendResult,
+  ThreadListPage,
 }
 
 /**
@@ -158,7 +89,7 @@ export function createGmailApiClient(
   gmail: GmailApi,
   userEmail: string,
   retry: GmailRetryPolicy = DEFAULT_RETRY,
-): GmailClient {
+): MailboxClient {
   /**
    * Run one request, retrying while Gmail is rate-limiting us.
    *
@@ -188,11 +119,45 @@ export function createGmailApiClient(
     }
   }
 
+  /**
+   * Send one raw RFC 5322 message.
+   *
+   * Shared by the reply path (which is handed a composed message) and the new-
+   * thread path (which builds one here), so Gmail's base64url requirement lives
+   * in one place.
+   */
+  const sendRaw = async (
+    raw: string,
+    opts?: { threadId?: string },
+  ): Promise<SendResult> => {
+    // Gmail wants base64url, not standard base64: `+` and `/` must be
+    // translated and the padding dropped, or the API rejects the request.
+    const encoded = Buffer.from(raw, 'utf-8')
+      .toString('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '')
+
+    const data = await req(() =>
+      gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw: encoded, threadId: opts?.threadId },
+      }),
+    )
+
+    return {
+      id: data.id ?? '',
+      threadId: data.threadId ?? null,
+      labelIds: data.labelIds ?? [],
+    }
+  }
+
   return {
+    provider: 'google',
+    capabilities: { structuredReply: false, delta: true },
+
     async getProfileHistoryId() {
-      const data = await req(() =>
-        gmail.users.getProfile({ userId: 'me' }),
-      )
+      const data = await req(() => gmail.users.getProfile({ userId: 'me' }))
       return data.historyId ?? ''
     },
 
@@ -206,14 +171,14 @@ export function createGmailApiClient(
         }),
       )
 
-  return {
-    threads: (data.threads ?? []).map((t) => ({
-      id: t.id ?? '',
-      historyId: t.historyId ?? '',
-    })),
-    nextPageToken: data.nextPageToken,
-    resultSizeEstimate: data.resultSizeEstimate,
-  }
+      return {
+        threads: (data.threads ?? []).map((t) => ({
+          id: t.id ?? '',
+          cursor: t.historyId ?? '',
+        })),
+        nextPageToken: data.nextPageToken,
+        resultSizeEstimate: data.resultSizeEstimate,
+      }
     },
 
     async getThread(threadId) {
@@ -227,7 +192,7 @@ export function createGmailApiClient(
 
       return {
         id: data.id ?? threadId,
-        historyId: data.historyId ?? '',
+        cursor: data.historyId ?? '',
         messages: (data.messages ?? []).map((m) => ({
           id: m.id ?? '',
           threadId: m.threadId ?? threadId,
@@ -258,7 +223,7 @@ export function createGmailApiClient(
             .filter((m) => m.threadId !== ''),
         })),
         nextPageToken: data.nextPageToken,
-        historyId: data.historyId,
+        cursor: data.historyId,
       }
     },
 
@@ -280,26 +245,43 @@ export function createGmailApiClient(
     },
 
     async sendMessage(raw, opts) {
-      // Gmail wants base64url, not standard base64: `+` and `/` must be
-      // translated and the padding dropped, or the API rejects the request.
-      const encoded = Buffer.from(raw, 'utf-8')
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '')
+      return sendRaw(raw, opts)
+    },
 
+    async startWatch({ topicName }) {
+      // `watch` is idempotent: calling it again on a live registration extends
+      // the expiry rather than creating a second one.
       const data = await req(() =>
-        gmail.users.messages.send({
+        gmail.users.watch({
           userId: 'me',
-          requestBody: { raw: encoded, threadId: opts?.threadId },
+          requestBody: { topicName, labelIds: ['INBOX'] },
         }),
       )
 
+      // `expiration` is epoch milliseconds as a string, and absent when Google
+      // is already watching: keep a conservative window rather than claiming an
+      // expiry we were not given.
+      const expiresAtMs = Number(data.expiration)
       return {
-        id: data.id ?? '',
-        threadId: data.threadId ?? null,
-        labelIds: data.labelIds ?? [],
+        expiresAt: Number.isFinite(expiresAtMs)
+          ? new Date(expiresAtMs)
+          : new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
       }
+    },
+
+    async sendNewMessage(payload) {
+      const { raw } = buildMimeMessage({
+        to: payload.to,
+        cc: payload.cc,
+        bcc: payload.bcc,
+        subject: payload.subject,
+        body: payload.text,
+        html: payload.html,
+        attachments: payload.attachments,
+      })
+
+      // No `threadId`: Gmail creates the thread from the message itself.
+      return sendRaw(raw)
     },
   }
 }
@@ -316,13 +298,13 @@ function toGmailPart(part: {
   } | null
   headers?: Array<{ name?: string | null; value?: string | null }> | null
   parts?: unknown[] | null
-}): GmailPart {
+}): ProviderPart {
   const headers: Record<string, string> = {}
   for (const h of part.headers ?? []) {
     if (h.name) headers[h.name.toLowerCase()] = h.value ?? ''
   }
 
-  const node: GmailPart = {
+  const node: ProviderPart = {
     partId: part.partId ?? '',
     mimeType: part.mimeType ?? 'application/octet-stream',
     filename: part.filename ?? null,
@@ -333,7 +315,8 @@ function toGmailPart(part: {
   // `body.data` is only present for non-ASCII text parts; attachments instead
   // carry an attachmentId and are fetched separately.
   if (part.body?.data) node.data = part.body.data
-  if (part.body?.attachmentId) node.headers['x-attachment-id'] = part.body.attachmentId
+  if (part.body?.attachmentId)
+    node.headers['x-attachment-id'] = part.body.attachmentId
 
   // The size lives on `body.size` and nowhere in the headers, but
   // `collectAttachments` reads a part's metadata from the header tree. Without
@@ -433,7 +416,9 @@ export class GmailAuthError extends Error {
  * Parse a `Retry-After` header, which may be a number of seconds or an HTTP
  * date. Returns null when absent or unrecognisable.
  */
-function retryAfterMsOf(headers: Record<string, unknown> | undefined): number | null {
+function retryAfterMsOf(
+  headers: Record<string, unknown> | undefined,
+): number | null {
   // Header names are case-insensitive; gaxios lowercases them, but be defensive.
   const raw = headers?.['retry-after'] ?? headers?.['Retry-After']
 

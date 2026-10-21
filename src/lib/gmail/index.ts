@@ -8,13 +8,13 @@
 
 export type {
   AttachmentPayload,
-  GmailClient,
+  MailboxClient,
   GmailMessage,
   GmailPart,
   GmailThread,
   HistoryPage,
   ThreadListPage,
-} from './client.ts'
+} from '#/lib/gmail/client.ts'
 
 export {
   createGmailApiClient,
@@ -22,7 +22,7 @@ export {
   GmailNotFoundError,
   GmailRateLimitError,
   wrapGmailError,
-} from './client.ts'
+} from '#/lib/gmail/client.ts'
 
 export {
   decodeGmailData,
@@ -30,16 +30,16 @@ export {
   isTrashed,
   toAttachmentRefs,
   toParsedMessage,
-} from './message.ts'
-export type { GmailAttachmentRef } from './message.ts'
+} from '#/lib/mailbox/message.ts'
+export type { GmailAttachmentRef } from '#/lib/mailbox/message.ts'
 
-export { backfill, sync, syncIncremental } from './sync.ts'
+export { backfill, sync, syncIncremental } from '#/lib/mailbox/sync.ts'
 export type {
   SyncEvent,
   SyncOptions,
   SyncProgress,
   SyncResult,
-} from './sync.ts'
+} from '#/lib/mailbox/sync.ts'
 
 export {
   attachmentPath,
@@ -49,14 +49,18 @@ export {
   MAX_ATTACHMENT_BYTES,
   removeAttachmentCache,
   safeFilename,
-} from './attachments.ts'
-export type { DownloadResult } from './attachments.ts'
+} from '#/lib/gmail/attachments.ts'
+export type { DownloadResult } from '#/lib/gmail/attachments.ts'
 
 export { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
 
-export { BACKFILL_QUERY, forgetAccount, loadInbox } from './service.ts'
+export {
+  BACKFILL_QUERY,
+  forgetAccount,
+  loadInbox,
+} from '#/lib/gmail/service.ts'
 export type {
   ConversationSummary,
   InboxPayload,
   LoadInboxOptions,
-} from './service.ts'
+} from '#/lib/gmail/service.ts'

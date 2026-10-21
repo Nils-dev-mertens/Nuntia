@@ -7,10 +7,13 @@
  *   LLM provider → the topic generator (prose)
  *
  * `pipelineFromConfig` is the pure part and is what tests exercise.
- * `loadDecisionPipeline` reads the settings row from the database; when nothing
- * is configured — or the settings cannot be read — it returns the all-rules
- * pipeline, so the app behaves exactly as it did before any key was set. That is
- * the "degrades per service" contract, not an error state.
+ * `loadDecisionPipeline` reads one user's settings row from the database; when
+ * nothing is configured — or the settings cannot be read — it returns the
+ * all-rules pipeline, so the app behaves exactly as it did before any key was
+ * set. That is the "degrades per service" contract, not an error state.
+ *
+ * The user id is always passed in rather than read from a session here, so the
+ * whole layer stays usable from a script or a test without a request.
  */
 
 import {
@@ -85,21 +88,23 @@ export function pipelineFromConfig(config: AiPipelineConfig): DecisionPipeline {
  * rotated encryption key) falls back to rules only, because classification
  * failing is worse than classification being basic.
  */
-export async function loadDecisionPipeline(): Promise<DecisionPipeline> {
+export async function loadDecisionPipeline(
+  userId: string,
+): Promise<DecisionPipeline> {
   try {
-    return pipelineFromConfig(await getAiPipelineConfig())
+    return pipelineFromConfig(await getAiPipelineConfig(userId))
   } catch (error) {
     console.error('[ai] could not load AI settings; using rules only:', error)
     return defaultDecisionPipeline()
   }
 }
 
-/** The reply drafter for this install, and the threshold it is gated on. */
+/** The reply drafter for one user, and the threshold it is gated on. */
 export type ReplyDrafting = {
   /**
-   * Null when no LLM key is stored. Not an error: an install without one simply
-   * has no drafts, and the conversation view says so rather than offering a
-   * button that would fail.
+   * Null when no LLM key is stored. Not an error: a user without one simply has
+   * no drafts, and the conversation view says so rather than offering a button
+   * that would fail.
    */
   drafter: ReplyDrafter | null
   /** 1–10, from the same row. */
@@ -115,9 +120,9 @@ export type ReplyDrafting = {
  * view's explanation of why it offered nothing always matches the gate the
  * server would apply.
  */
-export async function loadReplyDrafter(): Promise<ReplyDrafting> {
+export async function loadReplyDrafter(userId: string): Promise<ReplyDrafting> {
   try {
-    const config = await getAiPipelineConfig()
+    const config = await getAiPipelineConfig(userId)
     return {
       drafter: replyDrafterFromConfig(config.llm),
       minImportance: config.suggestReplyMinImportance,

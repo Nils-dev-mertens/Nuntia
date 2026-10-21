@@ -6,8 +6,8 @@ import {
   GmailNotFoundError,
   GmailRateLimitError,
   wrapGmailError,
-} from './client.ts'
-import { toAttachmentRefs } from './message.ts'
+} from '#/lib/gmail/client.ts'
+import { toAttachmentRefs } from '#/lib/mailbox/message.ts'
 
 /**
  * The shape Google actually throws for an exhausted quota.

@@ -23,6 +23,7 @@ import {
 } from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
 import { Link } from '@tanstack/react-router'
+import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
 
 const MINUTE = 60_000
@@ -67,7 +68,9 @@ function byState(
 }
 
 /** The threads the user has handled, in their own section. */
-function doneThreads(conversations: ConversationSummary[]): ConversationSummary[] {
+function doneThreads(
+  conversations: ConversationSummary[],
+): ConversationSummary[] {
   return conversations.filter((c) => c.done)
 }
 
@@ -169,8 +172,8 @@ function AutomatedRow({ conversation }: { conversation: ConversationSummary }) {
   return (
     <li>
       <Link
-        to="/conversations/$gmailThreadId"
-        params={{ gmailThreadId: conversation.gmailThreadId }}
+        to="/conversations/$providerThreadId"
+        params={{ providerThreadId: conversation.providerThreadId }}
         className="block rounded-md border border-border/60 bg-muted/20 px-3 py-2 transition-colors hover:border-foreground/25"
       >
         <div className="flex items-baseline justify-between gap-3">
@@ -211,36 +214,42 @@ function ConversationRow({
   return (
     <li>
       <Link
-        to="/conversations/$gmailThreadId"
-        params={{ gmailThreadId: conversation.gmailThreadId }}
+        to="/conversations/$providerThreadId"
+        params={{ providerThreadId: conversation.providerThreadId }}
         className="block rounded-lg border border-border bg-card p-4 transition-colors hover:border-foreground/25"
       >
         <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-card-foreground">
-              {/*
-               * Incoming mail the user has not opened. Only unseen mail earns
-               * this: a thread they have read but not answered is not new — it is
-               * the one case where looking away would lose a reply, so it keeps
-               * its row's weight and stays where it is.
-               */}
-              {conversation.unseen ? (
+          <div className="flex min-w-0 gap-3">
+            <Avatar contact={conversation.participants[0]} className="mt-0.5" />
+            <div className="min-w-0">
+              <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-card-foreground">
+                {/*
+                 * Incoming mail the user has not opened. Only unseen mail earns
+                 * this: a thread they have read but not answered is not new — it is
+                 * the one case where looking away would lose a reply, so it keeps
+                 * its row's weight and stays where it is.
+                 */}
+                {conversation.unseen ? (
+                  <span
+                    role="img"
+                    aria-label={READ_META.description}
+                    title={READ_META.description}
+                    className="size-2 shrink-0 rounded-full bg-primary"
+                  />
+                ) : null}
                 <span
-                  role="img"
-                  aria-label={READ_META.description}
-                  title={READ_META.description}
-                  className="size-2 shrink-0 rounded-full bg-primary"
-                />
-              ) : null}
-              <span
-                className={cn('truncate', conversation.unseen && 'font-semibold')}
-              >
-                {title}
-              </span>
-            </p>
-            <p className="mt-0.5 truncate text-xs text-muted-foreground">
-              {participantsOf(conversation)}
-            </p>
+                  className={cn(
+                    'truncate',
+                    conversation.unseen && 'font-semibold',
+                  )}
+                >
+                  {title}
+                </span>
+              </p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                {participantsOf(conversation)}
+              </p>
+            </div>
           </div>
 
           <time
@@ -382,18 +391,29 @@ function SignInPrompt() {
         Connect your mailbox
       </h2>
       <p className="mx-auto mt-2 max-w-sm text-sm text-muted-foreground">
-        Lumen reads your Gmail and shows it as a list of conversations grouped
-        by what needs your attention. It never writes to your mail.
+        Lumen reads your mail and shows it as a list of conversations grouped by
+        what needs your attention. It never writes to your mail.
       </p>
-      <a
-        href="/auth/google"
-        className={cn(
-          'mt-6 inline-flex h-9 items-center rounded-md bg-primary px-4',
-          'text-sm font-medium text-primary-foreground',
-        )}
-      >
-        Connect Gmail
-      </a>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+        <a
+          href="/auth/google"
+          className={cn(
+            'inline-flex h-9 items-center rounded-md bg-primary px-4',
+            'text-sm font-medium text-primary-foreground',
+          )}
+        >
+          Connect Gmail
+        </a>
+        <a
+          href="/auth/microsoft"
+          className={cn(
+            'inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
+            'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
+          )}
+        >
+          Connect Outlook
+        </a>
+      </div>
     </div>
   )
 }
@@ -471,7 +491,7 @@ export function Inbox({
               aria-hidden="true"
               className="mr-1.5 inline-block size-2 rounded-full bg-primary align-middle"
             />
-            {READ_META.label} — mail you have not opened. {' '}
+            {READ_META.label} — mail you have not opened.{' '}
             <span className="font-medium text-foreground">
               {DONE_META.label}
             </span>{' '}
@@ -486,6 +506,15 @@ export function Inbox({
           <span className="truncate text-xs text-muted-foreground">
             {accounts.map((account) => account.email).join(' · ')}
           </span>
+          <Link
+            to="/compose"
+            className={cn(
+              'shrink-0 inline-flex h-8 items-center rounded-md bg-primary px-3',
+              'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
+            )}
+          >
+            New message
+          </Link>
           <button
             type="button"
             onClick={() => void handleResync()}
@@ -506,7 +535,16 @@ export function Inbox({
               'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
             )}
           >
-            Add mailbox
+            Add Gmail
+          </a>
+          <a
+            href="/auth/microsoft"
+            className={cn(
+              'shrink-0 inline-flex h-8 items-center rounded-md border border-border bg-background px-3',
+              'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
+            )}
+          >
+            Add Outlook
           </a>
           <Link
             to="/settings"
@@ -526,20 +564,30 @@ export function Inbox({
           className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
         >
           <p>
-            Google no longer accepts the stored access for{' '}
+            The mail service no longer accepts the stored access for{' '}
             {authRequiredAccounts.map((account) => account.email).join(', ')} —
             you may have revoked it, or it expired. Sign in again to keep
             syncing. The other mailboxes are unaffected.
           </p>
-          <a
-            href="/auth/google"
-            className={cn(
-              'mt-3 inline-flex h-8 items-center rounded-md bg-primary px-3',
-              'text-xs font-medium text-primary-foreground',
-            )}
-          >
-            Reconnect Google
-          </a>
+          <span className="mt-3 flex flex-wrap gap-2">
+            {authRequiredAccounts.map((account) => (
+              <a
+                key={account.id}
+                href={
+                  account.provider === 'microsoft'
+                    ? '/auth/microsoft'
+                    : '/auth/google'
+                }
+                className={cn(
+                  'inline-flex h-8 items-center rounded-md bg-primary px-3',
+                  'text-xs font-medium text-primary-foreground',
+                )}
+              >
+                Reconnect{' '}
+                {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
+              </a>
+            ))}
+          </span>
         </div>
       ) : syncError ? (
         <p

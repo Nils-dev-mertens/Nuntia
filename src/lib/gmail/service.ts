@@ -2,12 +2,21 @@
  * The inbox, as the application sees it.
  *
  * Everything above this file is a library with no entry point — `sync.ts` takes
- * an injected `GmailClient`, and nothing knows how to build one from a stored
+ * an injected `MailboxClient`, and nothing knows how to build one from a stored
  * account. This module is that missing seam: session account id in, list of
  * conversations out, with the staleness policy applied.
  *
  * It is deliberately the only place that knows all three of: how to authenticate
- * against Google, when to sync, and what the UI needs.
+ * against a provider, when to sync, and what the UI needs.
+ *
+ * The `gmail/` path predates the provider seam. The code is provider-neutral now
+ * — `createMailboxClientFor` picks the adapter — and the Gmail-specific name was
+ * kept to avoid a second rename in the same change as the schema migration.
+ *
+ * Every entry point takes the signed-in user's id and scopes its work to that
+ * user's mailboxes. The id comes from the session, never from the request body:
+ * an account id in a payload is checked against it with `assertOwnedAccount`
+ * before anything is read or written.
  */
 
 import { readFile } from 'node:fs/promises'
@@ -15,15 +24,14 @@ import { readFile } from 'node:fs/promises'
 import type { ConversationState } from '#/db/schema.ts'
 
 import {
+  assertOwnedAccount,
   deleteAccount,
-  getAccountEnvelope,
+  getCursor,
   getDerivedVersion,
-  getHistoryId,
   getLastSyncedAt,
   listAccounts,
   setDerivedVersion,
 } from '#/lib/auth/accounts.ts'
-import { createGmailClient } from '#/lib/auth/google.ts'
 import {
   activeDone,
   activeStateOverride,
@@ -52,6 +60,7 @@ import {
   mergeAccountConversations,
   reparseStoredMessages,
 } from '#/lib/conversation/index.ts'
+import type { MailboxClient, Provider } from '#/lib/mailbox/types.ts'
 import type {
   AccountConversation,
   Conversation,
@@ -65,19 +74,30 @@ import type {
 // but `node:fs`.
 import { reportAiFailure } from '#/lib/ai/ai-log.ts'
 import { loadReplyDrafter } from '#/lib/ai/index.ts'
+import { contactNamesFor, enrichParticipants } from '#/lib/contacts/index.ts'
+import { getContactContext } from '#/lib/contacts/context.ts'
+import type { ContactContext } from '#/lib/contacts/context.ts'
+import { getPreferences } from '#/lib/settings/preferences.ts'
+import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
 import {
   downloadAttachment,
   isCached,
   removeAttachmentCache,
-} from './attachments.ts'
+} from '#/lib/gmail/attachments.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
 
-import { createGmailApiClient, GmailAuthError } from './client.ts'
-import type { GmailClient } from './client.ts'
+import { GmailAuthError } from '#/lib/gmail/client.ts'
+import { cursorKindFor } from '#/lib/mailbox/types.ts'
+import { createMailboxClientFor } from '#/lib/mailbox/provider.ts'
+import { MicrosoftAuthError } from '#/lib/microsoft/index.ts'
 import { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
-import { findAttachmentPart } from './message.ts'
-import { decideAndSave, redecideStoredConversations, sync } from './sync.ts'
-import type { SyncEvent } from './sync.ts'
+import { findAttachmentPart } from '#/lib/mailbox/message.ts'
+import {
+  decideAndSave,
+  redecideStoredConversations,
+  sync,
+} from '#/lib/mailbox/sync.ts'
+import type { SyncEvent } from '#/lib/mailbox/sync.ts'
 
 /**
  * The first backfill is bounded.
@@ -92,7 +112,7 @@ export const BACKFILL_QUERY = 'newer_than:30d'
 /** One row in the conversation list. */
 export type ConversationSummary = {
   id: string
-  gmailThreadId: string
+  providerThreadId: string
   subject: string
   state: ConversationState
   /** No human on the other side — rendered as a compact non-interactive card. */
@@ -109,7 +129,13 @@ export type ConversationSummary = {
   relation: MergeRelation
   /** Their other addresses that hold this thread only as a copy. */
   ccAccountEmails: string[]
-  participants: Array<{ name: string | null; email: string }>
+  /** Names filled in from stored mail, with initials and an optional avatar. */
+  participants: Array<{
+    name: string | null
+    email: string
+    initials: string
+    avatarUrl: string | null
+  }>
   messageCount: number
   attachmentCount: number
   /** ISO string — loader data crosses a serialization boundary. */
@@ -135,7 +161,7 @@ export type InboxPayload =
   | {
       signedIn: true
       /** Every connected mailbox, in connection order. */
-      accounts: Array<{ id: string; email: string }>
+      accounts: Array<{ id: string; email: string; provider: Provider }>
       conversations: ConversationSummary[]
       /** Every state is present, including zeroes, so the UI can render headers. */
       counts: Record<ConversationState, number>
@@ -161,7 +187,11 @@ export type InboxPayload =
        * need the "Reconnect" action — one broken mailbox must not blank the
        * others.
        */
-      authRequiredAccounts: Array<{ id: string; email: string }>
+      authRequiredAccounts: Array<{
+        id: string
+        email: string
+        provider: Provider
+      }>
     }
 
 type SyncOutcome = { error: string | null; authRequired: boolean }
@@ -191,7 +221,7 @@ export type ActionFailure = { error: string | null; authRequired: boolean }
 
 /** One message in the detail view. */
 export type ConversationMessageView = {
-  gmailMessageId: string
+  providerMessageId: string
   from: { name: string | null; email: string }
   body: string
   /**
@@ -214,10 +244,12 @@ export type ConversationMessageView = {
 
 /** Everything the chat view needs for one thread. */
 export type ConversationDetail = {
-  gmailThreadId: string
+  providerThreadId: string
   /** The mailbox that owns this thread — where a reply leaves from by default. */
   accountId: string
   accountEmail: string
+  /** Which service this mailbox belongs to; drives the reconnect link. */
+  provider: Provider
   /**
    * Every address a reply could leave from, best first. More than one when the
    * thread carries several of the user's connected addresses.
@@ -299,15 +331,25 @@ export type ConversationDetail = {
     /** The importance the thread was compared against, 1–10. */
     minImportance: number
   }
-  participants: Array<{ name: string | null; email: string }>
+  participants: Array<{
+    name: string | null
+    email: string
+    initials: string
+    avatarUrl: string | null
+  }>
   messages: ConversationMessageView[]
   attachments: Array<{
-    gmailMessageId: string
-    gmailAttachmentId: string
+    providerMessageId: string
+    providerAttachmentId: string
+    providerThreadId: string
     filename: string
     mimeType: string
     sizeBytes: number
+    isInline: boolean
+    sender: { name: string | null; email: string } | null
+    sentAt: string | null
   }>
+  contactContext: ContactContext | null
   parsingProfile: {
     senderEmail: string
     useAccountParsingDefaults: boolean
@@ -333,7 +375,8 @@ export type ConversationDetail = {
  * thread.
  */
 export async function loadConversation(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<ConversationDetail | null> {
   // Resolve the *cluster*, not just the one stored conversation this thread id
   // names. A thread id is mailbox-scoped, and the mailbox it points at may hold
@@ -341,10 +384,13 @@ export async function loadConversation(
   // the same way in the sender's and recipient's mailboxes. The inbox merges the
   // Message-ID-connected component; the detail view must render the same one, or
   // clicking a merged row shows one account's fragment and hides the rest.
-  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  const cluster = await getConversationClusterByThreadId(
+    userId,
+    providerThreadId,
+  )
   if (!cluster || cluster.length === 0) return null
 
-  const accountRows = await listAccounts()
+  const accountRows = await listAccounts(userId)
   const accounts = accountRows.map((account) => ({
     id: account.id,
     email: account.email,
@@ -357,6 +403,32 @@ export async function loadConversation(
   const accountId = merged.ownerAccountId
   const conversation = merged.conversation
   const messages = conversation.messages
+  // Keep a source-message lookup for sender/date details: the media list retains
+  // mailbox-scoped attachment ids so it can download each candidate to hash it.
+  const attachmentSourceByKey = new Map<
+    string,
+    {
+      sender: { name: string | null; email: string } | null
+      sentAt: string | null
+    }
+  >()
+  for (const source of cluster) {
+    for (const attachment of source.conversation.attachments) {
+      const key = `${source.conversation.providerThreadId}:${attachment.providerMessageId}:${attachment.providerAttachmentId}`
+      const sourceMessage = source.conversation.messages.find(
+        (message) => message.providerMessageId === attachment.providerMessageId,
+      )
+      attachmentSourceByKey.set(key, {
+        sender: sourceMessage
+          ? {
+              name: sourceMessage.from.name ?? null,
+              email: sourceMessage.from.email,
+            }
+          : null,
+        sentAt: sourceMessage?.sentAt.toISOString() ?? null,
+      })
+    }
+  }
 
   // "Mine" is the whole connected set, so a message from another of the user's
   // own addresses is theirs rather than a stranger's.
@@ -384,6 +456,9 @@ export async function loadConversation(
     .find((message) => !owners.has(message.from.email.trim().toLowerCase()))
     ?.from.email
   const senderEmail = otherSender?.trim().toLowerCase() ?? null
+  const contactContext = senderEmail
+    ? await getContactContext(userId, senderEmail)
+    : null
   const senderParsing = senderEmail
     ? profileContext.parsingProfiles[senderEmail]
     : undefined
@@ -398,7 +473,7 @@ export async function loadConversation(
   // whether a model is configured at all, and the importance threshold. Read
   // here rather than re-derived in the browser so the explanation on screen and
   // the guard in `draftReply` cannot disagree.
-  const drafting = await loadReplyDrafter()
+  const drafting = await loadReplyDrafter(userId)
   const draftEligibility = replyDraftEligibility({
     modelConfigured: drafting.drafter !== null,
     replyable: conversation.replyable,
@@ -408,11 +483,19 @@ export async function loadConversation(
     minImportance: drafting.minImportance,
   })
 
+  // Names learned from earlier mail, and whether avatars may leave the machine.
+  // Read once for the whole thread rather than per participant.
+  const names = await contactNamesFor(accountRows.map((account) => account.id))
+  const preferences = await getPreferences(userId)
+
   return {
-    gmailThreadId: conversation.gmailThreadId,
+    providerThreadId: conversation.providerThreadId,
     accountId,
     accountEmail:
       accounts.find((account) => account.id === accountId)?.email ?? accountId,
+    provider:
+      accountRows.find((account) => account.id === accountId)?.provider ??
+      'google',
     replyAccounts,
     ownerEmails: [...owners],
     subject: conversation.subject,
@@ -442,12 +525,13 @@ export async function loadConversation(
           : null,
       minImportance: drafting.minImportance,
     },
-    participants: conversation.participants.map((p) => ({
-      name: p.name ?? null,
-      email: p.email,
-    })),
+    participants: enrichParticipants(
+      conversation.participants,
+      names,
+      preferences.useGravatar,
+    ),
     messages: messages.map((m) => ({
-      gmailMessageId: m.gmailMessageId,
+      providerMessageId: m.providerMessageId,
       from: { name: m.from.name ?? null, email: m.from.email },
       body: m.body,
       bodyHtml: m.bodyHtml,
@@ -459,13 +543,24 @@ export async function loadConversation(
       strippedQuote: m.strippedQuote ?? null,
       sentAt: m.sentAt.toISOString(),
     })),
-    attachments: conversation.attachments.map((a) => ({
-      gmailMessageId: a.gmailMessageId,
-      gmailAttachmentId: a.gmailAttachmentId,
-      filename: a.filename,
-      mimeType: a.mimeType,
-      sizeBytes: a.sizeBytes,
-    })),
+    attachments: conversation.attachments.map((a) => {
+      const sourceThreadId = a.providerThreadId ?? conversation.providerThreadId
+      const details = attachmentSourceByKey.get(
+        `${sourceThreadId}:${a.providerMessageId}:${a.providerAttachmentId}`,
+      )
+      return {
+        providerMessageId: a.providerMessageId,
+        providerAttachmentId: a.providerAttachmentId,
+        providerThreadId: sourceThreadId,
+        filename: a.filename,
+        mimeType: a.mimeType,
+        sizeBytes: a.sizeBytes,
+        isInline: a.isInline,
+        sender: details?.sender ?? null,
+        sentAt: details?.sentAt ?? null,
+      }
+    }),
+    contactContext,
     parsingProfile: senderEmail
       ? {
           senderEmail,
@@ -512,9 +607,14 @@ export async function loadConversation(
  * attachments, decisions and history cursor (every one is declared `onDelete:
  * 'cascade'`), so nothing else has to be listed here.
  */
-export async function forgetAccount(accountId: string): Promise<void> {
+export async function forgetAccount(
+  userId: string,
+  accountId: string,
+): Promise<void> {
+  await assertOwnedAccount(userId, accountId)
+
   await withWriteLock(async () => {
-    await deleteAccount(accountId)
+    await deleteAccount(userId, accountId)
   })
 
   await removeAttachmentCache(accountId)
@@ -541,8 +641,9 @@ export type AttachmentLoad =
  * the copy on disk is what every click after that uses.
  */
 export async function loadAttachment(
-  gmailThreadId: string,
-  gmailAttachmentId: string,
+  userId: string,
+  providerThreadId: string,
+  providerAttachmentId: string,
   /**
    * The Gmail client to fetch with.
    *
@@ -550,9 +651,13 @@ export async function loadAttachment(
    * same way sync does. It exists so the download-and-cache path can be driven
    * against the fake client instead of a real mailbox.
    */
-  deps: { client?: GmailClient } = {},
+  deps: { client?: MailboxClient } = {},
 ): Promise<AttachmentLoad> {
-  const stored = await getStoredAttachment(gmailThreadId, gmailAttachmentId)
+  const stored = await getStoredAttachment(
+    userId,
+    providerThreadId,
+    providerAttachmentId,
+  )
   if (!stored) return { ok: false, reason: 'not-found' }
 
   let path: string | null = stored.localPath
@@ -560,14 +665,12 @@ export async function loadAttachment(
     let client = deps.client
 
     if (!client) {
-      const envelope = await getAccountEnvelope(stored.accountId)
-      if (!envelope) return { ok: false, reason: 'not-connected' }
-
-      const gmail = await createGmailClient(envelope)
-      client = createGmailApiClient(gmail, stored.accountId)
+      const resolved = await createMailboxClientFor(stored.accountId)
+      if (!resolved) return { ok: false, reason: 'not-connected' }
+      client = resolved
     }
 
-    const thread = await client.getThread(stored.gmailThreadId)
+    const thread = await client.getThread(stored.providerThreadId)
 
     // `getAttachment` addresses a message by Gmail's *own* message id, and the
     // message row is keyed by the RFC 5322 Message-ID instead — so the two ids
@@ -616,20 +719,27 @@ export async function loadAttachment(
  * up holding another's messages, so the resolution lives here once rather than
  * being re-derived by each caller.
  */
-async function ownerRowForThread(gmailThreadId: string): Promise<{
+async function ownerRowForThread(
+  userId: string,
+  providerThreadId: string,
+): Promise<{
   cluster: AccountConversation[]
   merged: MergedConversation
   accountId: string
   conversation: Conversation
 }> {
-  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  const cluster = await getConversationClusterByThreadId(
+    userId,
+    providerThreadId,
+  )
   if (!cluster || cluster.length === 0) {
     throw new Error('That conversation no longer exists.')
   }
 
-  const accounts = (await listAccounts()).map((account) => ({
+  const accounts = (await listAccounts(userId)).map((account) => ({
     id: account.id,
     email: account.email,
+    provider: account.provider,
   }))
   const merged = mergeAccountConversations(cluster, accounts).at(0)
   if (!merged) throw new Error('That conversation no longer exists.')
@@ -638,7 +748,8 @@ async function ownerRowForThread(gmailThreadId: string): Promise<{
     cluster.find(
       (entry) =>
         entry.accountId === merged.ownerAccountId &&
-        entry.conversation.gmailThreadId === merged.conversation.gmailThreadId,
+        entry.conversation.providerThreadId ===
+          merged.conversation.providerThreadId,
     ) ??
     cluster.find((entry) => entry.accountId === merged.ownerAccountId) ??
     cluster[0]
@@ -661,7 +772,8 @@ async function ownerRowForThread(gmailThreadId: string): Promise<{
  * newest message may include mail that synced in after the page was rendered.
  */
 export async function markConversationSeen(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
   seenThrough: string,
 ): Promise<void> {
   const at = new Date(seenThrough)
@@ -672,8 +784,11 @@ export async function markConversationSeen(
     throw new Error('That is not a valid time.')
   }
 
-  const { accountId, conversation } = await ownerRowForThread(gmailThreadId)
-  await applySeenMark(accountId, conversation.gmailThreadId, at)
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+  await applySeenMark(accountId, conversation.providerThreadId, at)
 }
 
 /**
@@ -696,16 +811,20 @@ export async function markConversationSeen(
  * here would hide the composer on the user's own mail.
  */
 export async function markThreadSenderUnreplyable(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<{ error: string | null }> {
-  const { accountId, merged } = await ownerRowForThread(gmailThreadId)
+  const { accountId, merged } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
   const senderEmail = otherPartyOf(merged.conversation)
 
   if (!senderEmail) {
     return { error: 'This conversation has no sender to mark.' }
   }
 
-  await applySenderReplyabilityToSender(accountId, senderEmail, false)
+  await applySenderReplyabilityToSender(userId, accountId, senderEmail, false)
   return { error: null }
 }
 
@@ -736,15 +855,16 @@ export type ReplyDraftOutcome =
  * the only thing that sends.
  */
 export async function draftReply(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
   instructions: string | null,
 ): Promise<ReplyDraftOutcome> {
-  const detail = await loadConversation(gmailThreadId)
+  const detail = await loadConversation(userId, providerThreadId)
   if (!detail) {
     return { draft: null, error: 'That conversation no longer exists.' }
   }
 
-  const { drafter, minImportance } = await loadReplyDrafter()
+  const { drafter, minImportance } = await loadReplyDrafter(userId)
 
   const eligibility = replyDraftEligibility({
     modelConfigured: drafter !== null,
@@ -876,11 +996,15 @@ function replyDraftRequestFor(
  * mail needs. No Gmail call and no AI call, so there is no auth failure to report.
  */
 export async function setConversationDone(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
   done: boolean,
 ): Promise<void> {
-  const { accountId, conversation } = await ownerRowForThread(gmailThreadId)
-  await applyDoneMark(accountId, conversation.gmailThreadId, done)
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+  await applyDoneMark(accountId, conversation.providerThreadId, done)
 }
 
 /**
@@ -896,11 +1020,15 @@ export async function setConversationDone(
  * messages are never written into one account's row.
  */
 export async function reanalyseConversation(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<void> {
-  const { accountId, conversation } = await ownerRowForThread(gmailThreadId)
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
 
-  await decideAndSave(accountId, conversation)
+  await decideAndSave(accountId, conversation, { userId })
 }
 
 /**
@@ -928,23 +1056,26 @@ export async function reanalyseConversation(
  * decision, and it is the case the user is watching.
  */
 export async function applyUserStateOverride(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
   state: ConversationState | null,
 ): Promise<void> {
-  const { merged, accountId, conversation } =
-    await ownerRowForThread(gmailThreadId)
+  const { merged, accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
   const sender = [...conversation.messages]
     .reverse()
     .find((message) => !message.isFromOwner)?.from.email
 
   if (state === null) {
     if (sender) await recordSenderSignal(accountId, sender, 'restored')
-    await setStateOverride(accountId, conversation.gmailThreadId, null)
-    await decideAndSave(accountId, conversation)
+    await setStateOverride(accountId, conversation.providerThreadId, null)
+    await decideAndSave(accountId, conversation, { userId })
     return
   }
 
-  await setStateOverride(accountId, conversation.gmailThreadId, {
+  await setStateOverride(accountId, conversation.providerThreadId, {
     state,
     // Against the thread as the *merged* view has it, which is what the user was
     // looking at when they picked, and which is the same clock a later sync
@@ -986,10 +1117,12 @@ export async function applyUserStateOverride(
  * identical pair of writes.
  */
 export async function applySenderReplyabilityToSender(
+  userId: string,
   accountId: string,
   senderEmail: string,
   replyable: boolean,
 ): Promise<void> {
+  await assertOwnedAccount(userId, accountId)
   await setSenderReplyable(accountId, senderEmail, replyable)
   await setReplyableForSender(accountId, senderEmail, replyable)
 }
@@ -1012,6 +1145,7 @@ export async function applySenderReplyabilityToSender(
  * the list actually holds, or the reason it was refused.
  */
 export async function addUnreplyableSender(
+  userId: string,
   accountId: string,
   rawAddress: string,
 ): Promise<{ added: string | null; error: string | null }> {
@@ -1019,7 +1153,7 @@ export async function addUnreplyableSender(
   // every call below needs, and shadowing is how the raw one gets passed by
   // accident.
   const mailbox = accountId.trim().toLowerCase()
-  const account = (await listAccounts()).find(
+  const account = (await listAccounts(userId)).find(
     (candidate) => candidate.id === mailbox,
   )
   if (!account) {
@@ -1045,7 +1179,7 @@ export async function addUnreplyableSender(
     return { added: null, error: `${senderEmail} is already on the list.` }
   }
 
-  await applySenderReplyabilityToSender(mailbox, senderEmail, false)
+  await applySenderReplyabilityToSender(userId, mailbox, senderEmail, false)
   return { added: senderEmail, error: null }
 }
 
@@ -1058,11 +1192,12 @@ export async function addUnreplyableSender(
  * which is a stronger statement than any shape rule.
  */
 export async function removeUnreplyableSender(
+  userId: string,
   accountId: string,
   rawAddress: string,
 ): Promise<{ error: string | null }> {
   const mailbox = accountId.trim().toLowerCase()
-  const connected = await listAccounts()
+  const connected = await listAccounts(userId)
   if (!connected.some((candidate) => candidate.id === mailbox)) {
     return { error: 'That mailbox is not connected.' }
   }
@@ -1072,7 +1207,7 @@ export async function removeUnreplyableSender(
     return { error: 'That sender is not marked as one you cannot reply to.' }
   }
 
-  await applySenderReplyabilityToSender(mailbox, senderEmail, true)
+  await applySenderReplyabilityToSender(userId, mailbox, senderEmail, true)
   return { error: null }
 }
 
@@ -1142,17 +1277,21 @@ function describeError(error: unknown): string {
 }
 
 /**
- * True when the failure can only be fixed by signing in to Google again.
+ * True when the failure can only be fixed by signing in to the provider again.
  *
- * `GmailAuthError` covers a revoked or expired grant. The decrypt failure is
+ * `GmailAuthError` and `MicrosoftAuthError` cover a revoked or expired grant —
+ * one per adapter, both meaning the same thing here. The decrypt failure is
  * listed too: it means the stored token can no longer be read (a rotated
  * encryption key, say), which is just as unrecoverable without a fresh login.
  */
-export function needsGoogleLogin(error: unknown): boolean {
-  if (error instanceof GmailAuthError) return true
+export function needsReconnect(error: unknown): boolean {
+  if (error instanceof GmailAuthError || error instanceof MicrosoftAuthError) {
+    return true
+  }
   if (error instanceof Error) {
     return (
       error.name === 'GmailAuthError' ||
+      error.name === 'MicrosoftAuthError' ||
       error.message.includes('could not be decrypted')
     )
   }
@@ -1175,10 +1314,10 @@ export function describeActionFailure(
   error: unknown,
   fallback: string,
 ): ActionFailure {
-  if (needsGoogleLogin(error)) {
+  if (needsReconnect(error)) {
     return {
       error:
-        'Google no longer accepts the stored access — you may have revoked it, or it expired.',
+        'The mailbox no longer accepts the stored access — you may have revoked it, or it expired.',
       authRequired: true,
     }
   }
@@ -1190,6 +1329,7 @@ export function describeActionFailure(
 }
 
 async function runSync(
+  userId: string,
   accountId: string,
   full = false,
   email = accountId,
@@ -1212,23 +1352,23 @@ async function runSync(
 
   const started = (async (): Promise<SyncOutcome> => {
     try {
-      const envelope = await getAccountEnvelope(accountId)
-      if (!envelope) {
+      const client = await createMailboxClientFor(accountId)
+      if (!client) {
         return {
-          error: 'No Google account is connected.',
+          error: 'No mailbox is connected.',
           authRequired: true,
         }
       }
 
-      const gmail = await createGmailClient(envelope)
-      // The account id is the email address, which is all the client wants for
-      // identifying whose mailbox it is reading.
-      const client = createGmailApiClient(gmail, accountId)
-
       await sync(client, accountId, {
+        userId,
         // A null cursor forces a backfill; otherwise resume incrementally.
-        startHistoryId: full ? null : await getHistoryId(accountId),
-        query: BACKFILL_QUERY,
+        startHistoryId: full
+          ? null
+          : await getCursor(accountId, cursorKindFor(client.provider)),
+        // Only Gmail understands its search syntax; Graph's adapter applies its
+        // own backfill window inside `listThreads`.
+        query: client.provider === 'google' ? BACKFILL_QUERY : undefined,
         // A thread that fails to save is counted and skipped, never thrown, so
         // without this a sync that quietly drops mail looks like a clean run.
         // `message` is the underlying cause (a constraint, not the SQL).
@@ -1249,7 +1389,7 @@ async function runSync(
       console.error('[sync] failed:', error)
       const outcome: SyncOutcome = {
         error: describeError(error),
-        authRequired: needsGoogleLogin(error),
+        authRequired: needsReconnect(error),
       }
       lastOutcome.set(accountId, outcome)
       return outcome
@@ -1261,6 +1401,21 @@ async function runSync(
 
   inFlight.set(accountId, started)
   return started
+}
+
+/**
+ * Start an incremental sync for one mailbox, without waiting for it.
+ *
+ * Used by the push webhook: Pub/Sub has to be answered quickly, and the same
+ * `inFlight` map that deduplicates polls covers overlapping notifications, so a
+ * burst of messages costs one sync rather than one each.
+ */
+export function startBackgroundSync(
+  userId: string,
+  accountId: string,
+  email: string,
+): void {
+  void runSync(userId, accountId, false, email)
 }
 
 /** One line of preview text, collapsed to something list-sized. */
@@ -1279,12 +1434,14 @@ function previewOf(conversation: {
 function toSummary(
   merged: MergedConversation,
   emailById: Map<string, string>,
+  names: Map<string, string>,
+  useGravatar: boolean,
 ): ConversationSummary {
   const conversation = merged.conversation
 
   return {
     id: conversation.id,
-    gmailThreadId: conversation.gmailThreadId,
+    providerThreadId: conversation.providerThreadId,
     subject: conversation.subject,
     state: conversation.state,
     isAutomated: conversation.isAutomated,
@@ -1293,10 +1450,11 @@ function toSummary(
     accountEmail: emailById.get(merged.ownerAccountId) ?? merged.ownerAccountId,
     relation: merged.relation,
     ccAccountEmails: merged.ccAccountIds.map((id) => emailById.get(id) ?? id),
-    participants: conversation.participants.map((p) => ({
-      name: p.name ?? null,
-      email: p.email,
-    })),
+    participants: enrichParticipants(
+      conversation.participants,
+      names,
+      useGravatar,
+    ),
     messageCount: conversation.messageCount,
     attachmentCount: conversation.attachmentCount,
     lastMessageAt: conversation.lastMessageAt.toISOString(),
@@ -1332,7 +1490,10 @@ export type LoadInboxOptions = {
  * bump. Without it, a column added today would sit at its migration default on
  * every conversation synced yesterday, and no error would ever point at why.
  */
-async function ensureDerivedFields(accountId: string): Promise<void> {
+async function ensureDerivedFields(
+  userId: string,
+  accountId: string,
+): Promise<void> {
   const version = await getDerivedVersion(accountId)
   if (version >= DERIVED_VERSION) return
 
@@ -1355,7 +1516,7 @@ async function ensureDerivedFields(accountId: string): Promise<void> {
   // columns it can, but `state`, `importance` and `urgency` are decisions, and a
   // decision change only lands when the thread is re-decided. Without this, a
   // classifier change would reach only mail Gmail reports as changed afterwards.
-  const redecided = await redecideStoredConversations(accountId)
+  const redecided = await redecideStoredConversations(accountId, userId)
   await setDerivedVersion(accountId, DERIVED_VERSION)
 
   console.log(
@@ -1371,27 +1532,45 @@ async function ensureDerivedFields(accountId: string): Promise<void> {
  * inbox.
  */
 export async function loadInbox(
+  userId: string,
   opts: LoadInboxOptions = {},
 ): Promise<InboxPayload> {
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS
 
-  const accounts = (await listAccounts()).map((account) => ({
+  const accounts = (await listAccounts(userId)).map((account) => ({
     id: account.id,
     email: account.email,
+    provider: account.provider,
   }))
   const emailById = new Map(
     accounts.map((account) => [account.id, account.email]),
   )
 
+  // One read for every mailbox, and the avatar setting for this user. A thread
+  // whose newest message has no display name still shows the person's name.
+  const names = await contactNamesFor(accounts.map((account) => account.id))
+  const preferences = await getPreferences(userId)
+
+  // Push registration is renewed in the background when it is close to lapsing.
+  // Deliberately not awaited: a Google round trip must never be what the inbox
+  // is waiting for, and the poll still covers the mailbox if it fails.
+  void ensurePushRegistrations(userId, accounts).catch((error) => {
+    console.warn('[push] renewing a watch failed:', error)
+  })
+
   let syncError: string | null = null
   let syncedNow = false
   let latestSyncedAt: Date | null = null
-  const authRequiredAccounts: Array<{ id: string; email: string }> = []
+  const authRequiredAccounts: Array<{
+    id: string
+    email: string
+    provider: Provider
+  }> = []
 
   // Each mailbox is synced and freshness-checked on its own: one revoked grant
   // or one stale cursor must not stop the others from appearing.
   for (const account of accounts) {
-    await ensureDerivedFields(account.id)
+    await ensureDerivedFields(userId, account.id)
 
     const lastSyncedAt = await getLastSyncedAt(account.id)
     if (lastSyncedAt && (!latestSyncedAt || lastSyncedAt > latestSyncedAt)) {
@@ -1425,12 +1604,17 @@ export async function loadInbox(
 
       // A forced run takes the same background path: the page still should not
       // block on a backfill, whoever asked for it.
-      void runSync(account.id, opts.full === true, account.email)
+      void runSync(userId, account.id, opts.full === true, account.email)
       syncedNow = true
       continue
     }
 
-    const outcome = await runSync(account.id, opts.full === true, account.email)
+    const outcome = await runSync(
+      userId,
+      account.id,
+      opts.full === true,
+      account.email,
+    )
     if (outcome.authRequired) authRequiredAccounts.push(account)
     if (outcome.error) {
       syncError = syncError ?? outcome.error
@@ -1479,7 +1663,9 @@ export async function loadInbox(
   return {
     signedIn: true,
     accounts,
-    conversations: merged.map((row) => toSummary(row, emailById)),
+    conversations: merged.map((row) =>
+      toSummary(row, emailById, names, preferences.useGravatar),
+    ),
     counts,
     doneCount,
     lastSyncedAt: latestSyncedAt ? latestSyncedAt.toISOString() : null,

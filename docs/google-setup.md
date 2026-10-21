@@ -177,6 +177,37 @@ Independently of OAuth, Gmail discards history ids after about a week. `sync()` 
 404 and re-backfills automatically, so this needs no action — it just means a long-dormant
 account does a full 30-day backfill on its next load.
 
+## Real-time push (optional)
+
+By default Lumen polls. Gmail can instead tell it when a mailbox changes, which is what
+makes new mail appear within seconds rather than within two minutes. It needs a Pub/Sub
+topic and somewhere for Google to deliver to — which a plain `localhost` install does not
+have, so this is worth doing only for a deployed instance (or through a tunnel such as
+`ngrok http 3000`).
+
+1. In Google Cloud, create a topic, e.g. `projects/my-project/topics/lumen-gmail`.
+2. Grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role on it.
+3. Create a **push subscription** on that topic with the endpoint
+   `https://your-host/webhooks/gmail?token=<GMAIL_PUSH_TOKEN>`.
+4. Set both variables in `.env.local` and restart:
+
+```bash
+GOOGLE_PUBSUB_TOPIC="projects/my-project/topics/lumen-gmail"
+GMAIL_PUSH_TOKEN="$(openssl rand -hex 32)"
+```
+
+The token is the whole defence on that endpoint — Pub/Sub cannot carry a session, and
+OIDC verification needs a service account — so treat it as a secret. Without a token the
+endpoint answers `503`, and with a wrong one `403`.
+
+How it behaves: the registration is created (and renewed) on inbox loads and is stored per
+mailbox, expiring after at most seven days. A notification only says *which mailbox*
+changed, so Lumen resolves it to a connected account, starts that mailbox's sync in the
+background, and answers `204` immediately — including for an address it does not hold, so
+Pub/Sub never retries a notification that will never match. The poll stays on regardless:
+it is the fallback when the registration has lapsed, and the only path for Outlook, whose
+subscriptions need their own lifetime and renewal.
+
 ---
 
 ## Security notes

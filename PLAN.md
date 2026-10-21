@@ -15,7 +15,7 @@ source of truth; Lumen is a presentation + composition layer.
 | Components        | **ReUI registry over shadcn/ui**                                                                  | See "ReUI notes" below. Radix UI as the primitive layer (ReUI ships both Radix and Base UI variants; Radix is more mature). |
 | DB                | SQLite via **`@libsql/client`** + Drizzle ORM                                                     | Single-user, local-first. **Changed from the original `better-sqlite3`** — see below.                                       |
 | Auth              | Google OAuth 2.0, refresh token AES-encrypted at rest                                             | Gmail is the only provider in MVP.                                                                                          |
-| Mail              | `googleapis` — `threads.get`, `messages.attachments.get`, `history.list`; inbox polling           | Gmail API is the source of truth. Push watch is not implemented in the MVP.                                                 |
+| Mail              | `googleapis` for Gmail; plain `fetch` for Microsoft Graph — both behind the `MailboxClient` seam | Two providers, one sync/conversation pipeline. Push watch is not implemented for either.                                    |
 | AI decisions      | Deterministic rules first, then **Jev** for importance / urgency / state-when-unset / replyability (a sender the user has marked outranks it) | See "Deviations".                                                                                                           |
 | AI generation     | **LLM** (Gemini, OpenAI or Anthropic, BYO key): topic now, suggested replies / drafts in Phase 2                                                                   | Phase 2. Draft-only, never auto-send.                                                                                       |
 | Runtime / tooling | bun 1.3.10, TypeScript 6.x (`^6.0.2`)                                                             | Matches the `forma` project conventions.                                                                                    |
@@ -135,8 +135,9 @@ In scope:
 - Basic importance + urgency
 - Conversations grouped by state, not chronology
 
-Cut (Phase 2+): suggested reply generation, AI-generated topics, real-time push, contact
-enrichment, user-defined organization rules, other providers.
+Shipped beyond the original cut: suggested replies, AI-generated topics, a second provider
+(Outlook), and basic contact names/avatars. Cut (Phase 2+): real-time push, richer contact
+enrichment (editable per-address context), user-defined organization rules, IMAP/SMTP.
 
 ---
 
@@ -155,7 +156,9 @@ enrichment, user-defined organization rules, other providers.
 ## Setup
 
 Full Google Cloud walkthrough — including the console step order and the failure modes each
-mistake produces — is in [`docs/google-setup.md`](docs/google-setup.md).
+mistake produces — is in [`docs/google-setup.md`](docs/google-setup.md). The Microsoft
+counterpart, including the app-registration permissions and the Graph limits, is in
+[`docs/outlook-setup.md`](docs/outlook-setup.md).
 
 ```bash
 bun install
@@ -217,7 +220,33 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] **First sync runs in the background** — adding a mailbox no longer blocks the page on a 30-day backfill; the inbox shows per-mailbox progress and polls fast until it lands (see "A first sync is not something to wait for")
 - [x] **Suggested replies** — a draft generated on demand for a thread that asks for a reply and clears an importance threshold, shown in the composer to edit or use; never stored and never sent (see "Suggested replies are drafts, not sends")
 - [x] **Multiple accounts in one merged inbox** — accounts global to the install, `loadInbox` fanning out and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
-- [ ] **A second mailbox service** — the provider seam, `accounts.provider` and the `provider_*` rename (see "A second service")
+- [x] **A second mailbox service** — Outlook / Microsoft 365 through Graph, behind the same `MailboxClient` seam; `accounts.provider`, the `provider_*` rename and `sync_cursors(account, kind, value)` land together (see "Outlook is the second service")
+
+## Remaining work and requested features
+
+The MVP checklist above is complete. These are deferred or newly requested follow-ups; the
+existing per-message attachment chips and mail-learned contact names are useful foundations,
+but do not count as the consolidated media overview or editable contact context below.
+
+- [ ] **Right-side thread media overview** — add a sidebar to the conversation view that
+  collects media and attachments from every message in the thread, rather than making the
+  user find each message's attachment chip. Show useful file details (name, type, size, and
+  the message/date it came from), with previews or open/download actions where supported.
+  Deduplicate copies introduced when mailbox threads are merged. Keep the panel usable on
+  narrow screens (for example, as a collapsible drawer).
+- [ ] **Editable context for an email address** — let the user save and edit a profile for a
+  correspondent, with fields such as role/company (e.g. "CEO of Acme"), how they relate to
+  the user, topics discussed, and what they are currently working on. Show the selected
+  correspondent's context alongside the thread. Key profiles by normalised email address
+  and signed-in user so the same profile is shared across that user's connected mailboxes,
+  without exposing it to another user. Keep this context explicitly user-authored; incoming
+  mail and AI decisions must not silently overwrite it.
+- [ ] **Real-time mailbox updates** — replace or complement inbox polling with provider push
+  notifications, while retaining a safe recovery path when notifications are missed.
+- [ ] **User-defined organization rules** — let users define rules for grouping or organizing
+  conversations beyond the current fixed state groups.
+- [ ] **IMAP/SMTP provider** — add a provider that reconstructs threads from email headers
+  and supports sending through SMTP; unlike Gmail and Graph, IMAP does not supply a thread id.
 
 ## Mail parser
 
@@ -1002,29 +1031,43 @@ is what lets the view tell an own-address from a stranger. This is a rendering d
 leaves `isFromOwner` — and therefore state derivation — untouched; the two only coincide
 for single-account installs.
 
-### A second service
+### Outlook is the second service
 
-Everything above is provider-neutral, so a non-Gmail mailbox is a separate and later piece
-of work:
+Outlook.com and Microsoft 365 are the second provider, through Microsoft Graph. The work was
+mostly making the seam real rather than writing a second app:
 
-- **The client seam already exists.** `GmailClient`'s six methods are all `sync` and `send`
-  see, and nothing above `lib/gmail` imports a Gmail type. But the interface is
-  Gmail-shaped: `getProfileHistoryId` / `listHistory` _are_ its cursor, `listThreads` takes
-  Gmail search syntax, and `BACKFILL_QUERY = 'newer_than:30d'` lives in `service.ts`, outside
-  the adapter.
-- **Cursors generalise to `sync_cursors(accountId, kind, value)`** — Gmail `historyId`, Graph
-  `deltaLink`, IMAP `UIDVALIDITY` + `UIDNEXT`.
-- **Threading is the expensive part.** Gmail and Graph hand you a thread/conversation id;
-  IMAP does not, so an IMAP adapter has to rebuild threads from `References` / `In-Reply-To`
-  and subject. That, not the column renames, is the work.
-- **Sending differs.** Graph sends server-side; IMAP needs SMTP, so the client wants
-  capability flags (`supportsDelta`, `hasThreadIds`, `canSend`) and a separate send
-  transport rather than one `sendMessage`.
-- **Auth generalises to an `OAuthProvider` seam** (`buildAuthUrl` / `exchangeCode` /
-  `fetchProfile` / `createClient` / `scopes`) with `google.ts` and a `microsoft.ts` behind
-  it. Token encryption is unchanged and stays per-install, not per-provider.
-- **Already neutral, and worth keeping that way:** the MIME parser, HTML sanitiser, quote /
-  greeting / signature stripping, no-reply detection (address-based), the conversation
+- **One interface, two adapters.** `src/lib/mailbox/types.ts` defines `MailboxClient` — the
+  six methods sync needs, plus an optional `sendReply` for providers that model a reply
+  instead of a raw message. Gmail implements it in `lib/gmail/client.ts`; Graph in
+  `lib/microsoft/client.ts`. `createMailboxClientFor` is the only place an account row turns
+  into a client.
+- **Graph is JSON, so the adapter synthesises MIME.** `microsoft/message.ts` turns a Graph
+  message into the same tree Gmail returns: a text or HTML part, headers, and one leaf per
+  attachment. The parser, the quote/greeting/signature stripping and the attachment walker
+  therefore have one implementation, not two.
+- **Cursors are `sync_cursors(account_id, kind, value)`.** Gmail's value is its `historyId`
+  (`kind='history'`); Graph's is an ISO timestamp (`kind='received'`). The table also carries
+  `updated_at`, which is the staleness clock — the old `accounts.history_id` could not be,
+  because token refreshes bump that row too. The migration renames the Gmail-shaped columns
+  (`provider_thread_id`, `provider_message_id`, `provider_attachment_id`) and copies the old
+  cursor rows across; it does not drop and recreate them.
+- **Graph's cursor is a timestamp on purpose.** Delta endpoints need a `deltaLink`, and
+  establishing one means enumerating the mailbox first. `receivedDateTime ge <cursor>` is
+  exact for the case the app has — new mail, including a new message in an old conversation —
+  and costs one page. A cursor that is not an ISO timestamp is refused so the next sync
+  backfills instead of filtering on a value from the other provider.
+- **Sending differs and the seam says so.** Gmail takes a raw MIME message built by
+  `send.ts`; Graph takes `createReply`, a body `PATCH`, optional attachment uploads and
+  `send`, so its adapter implements `sendReply`. Both receive the same composed body —
+  greeting, signature and quote — so the recipient gets the same mail either way. Graph's
+  simple-attachment ceiling is 3 MB, which is checked before an upload rather than after.
+- **Auth shares the round trip.** `lib/auth/oauth.ts` owns the state cookie, the PKCE
+  verifier and the challenge; `google.ts` and `microsoft.ts` supply endpoints and scopes.
+- **What is still not done:** IMAP. Gmail and Graph both give a thread id and a cursor, so
+  neither needs threading reconstruction; IMAP does, and that is the expensive part. Graph
+  attachments over 3 MB need an upload session. Both are recorded rather than pretended.
+- **Already neutral, and still worth keeping that way:** the MIME parser, HTML sanitiser,
+  quote / greeting / signature stripping, no-reply detection (address-based), the conversation
   model, and the decision layer.
 
 ## Machine mail is not a chat

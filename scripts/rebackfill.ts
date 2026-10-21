@@ -25,9 +25,9 @@
 
 import { createGmailApiClient } from '../src/lib/gmail/client.ts'
 import { createGmailClient } from '../src/lib/auth/google.ts'
-import { getAccountEnvelope } from '../src/lib/auth/accounts.ts'
+import { getAccount, getAccountEnvelope } from '../src/lib/auth/accounts.ts'
 import { getStoredThreadIds } from '../src/lib/conversation/repository.ts'
-import { syncThread } from '../src/lib/gmail/sync.ts'
+import { syncThread } from '../src/lib/mailbox/sync.ts'
 import { initDatabase } from '../src/db/index.ts'
 
 const [accountId, flag] = process.argv.slice(2)
@@ -47,7 +47,14 @@ if (!envelope) {
   process.exit(1)
 }
 
-const client = createGmailApiClient(await createGmailClient(envelope), accountId)
+// The pipeline is built from the mailbox owner's AI settings, so a re-parse has
+// to run as them. A pre-accounts row with no owner gets the rules-only pipeline.
+const owner = (await getAccount(accountId))?.userId ?? ''
+
+const client = createGmailApiClient(
+  await createGmailClient(envelope),
+  accountId,
+)
 
 const onlyMissingHtml = flag === '--missing-html'
 const threadIds = await getStoredThreadIds(accountId, { onlyMissingHtml })
@@ -70,7 +77,7 @@ let skipped = 0
 for (const id of threadIds) {
   try {
     const thread = await client.getThread(id)
-    const outcome = await syncThread(accountId, thread)
+    const outcome = await syncThread(accountId, thread, { userId: owner })
 
     if (outcome === 'synced') {
       synced++

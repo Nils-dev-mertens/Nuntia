@@ -155,17 +155,31 @@ export function relationOf(
 
 /** Dedupe key for a message, mirroring the parser's own identity for it. */
 function messageKey(accountId: string, message: ConversationMessage): string {
-  return message.internetMessageId ?? `${accountId}:${message.gmailMessageId}`
+  return (
+    message.internetMessageId ?? `${accountId}:${message.providerMessageId}`
+  )
 }
 
 /**
- * Dedupe key for an attachment that survives a copy between mailboxes.
+ * Dedupe key for a non-media attachment that survives a copy between mailboxes.
  *
- * Deliberately not keyed on `gmailAttachmentId`/`gmailMessageId`: those differ
- * between two mailboxes holding the same message, which is exactly the copy this
- * is meant to collapse.
+ * Media is returned without a metadata key and left for byte-hash deduplication
+ * in the detail view. Non-media retains the prior metadata behavior.
  */
-function attachmentKey(attachment: ConversationAttachment): string {
+function attachmentKey(attachment: ConversationAttachment): string | null {
+  const mimeType = attachment.mimeType.trim().toLowerCase()
+  // Metadata cannot prove two media files are identical: the same image can be
+  // renamed, and two distinct images can share a name and byte size. Leave media
+  // for the detail view's content-hash dedupe instead.
+  if (
+    mimeType.startsWith('image/') ||
+    mimeType.startsWith('audio/') ||
+    mimeType.startsWith('video/')
+  ) {
+    // Keep full media rows so content can be hashed and a working source URL can
+    // be chosen for each copy in the detail view.
+    return null
+  }
   return `${attachment.filename}|${attachment.sizeBytes}|${attachment.contentId ?? ''}`
 }
 
@@ -314,8 +328,8 @@ function rebuildConversation(
       .sort(
         (a, b) =>
           b.conversation.messages.length - a.conversation.messages.length ||
-          a.conversation.gmailThreadId.localeCompare(
-            b.conversation.gmailThreadId,
+          a.conversation.providerThreadId.localeCompare(
+            b.conversation.providerThreadId,
           ),
       )
       .at(0) ?? cluster.at(0)
@@ -351,7 +365,12 @@ function rebuildConversation(
   }))
 
   const attachments = dedupeAttachments(
-    cluster.flatMap((source) => source.conversation.attachments),
+    cluster.flatMap((source) =>
+      source.conversation.attachments.map((attachment) => ({
+        ...attachment,
+        providerThreadId: source.conversation.providerThreadId,
+      })),
+    ),
   )
   const participants = dedupeParticipants(
     messages.flatMap((message) => [message.from, ...message.to, ...message.cc]),
@@ -397,7 +416,8 @@ function rebuildConversation(
     if (sourceAt > bestAt) return source
     // A tie is the common case — both mailboxes hold the same newest message —
     // and the owner's own row is the one replies and details edits point at.
-    if (sourceAt === bestAt && source.accountId === ownerAccountId) return source
+    if (sourceAt === bestAt && source.accountId === ownerAccountId)
+      return source
     return best
   }, owner).conversation
 
@@ -492,7 +512,7 @@ function rebuildConversation(
 
   return {
     id: owner.conversation.id,
-    gmailThreadId: owner.conversation.gmailThreadId,
+    providerThreadId: owner.conversation.providerThreadId,
     subject: owner.conversation.subject,
     participants,
     messages,
@@ -571,8 +591,8 @@ function dedupeAttachments(
   const out: ConversationAttachment[] = []
   for (const attachment of attachments) {
     const key = attachmentKey(attachment)
-    if (seen.has(key)) continue
-    seen.add(key)
+    if (key !== null && seen.has(key)) continue
+    if (key !== null) seen.add(key)
     out.push(attachment)
   }
   return out

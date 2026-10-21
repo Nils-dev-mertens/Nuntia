@@ -32,6 +32,7 @@ export {
 } from './model.ts'
 export type { ReplyStyle, StateOverride } from './model.ts'
 
+export { getLastOwnMessageStyle } from './repository.ts'
 export {
   buildReplyDraftPrompt,
   NoReplyDrafter,

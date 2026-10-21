@@ -1,13 +1,17 @@
 /**
  * AI service settings, stored in the database and edited from the UI.
  *
- * These are per-install secrets, not environment variables: the user sets them in
- * Settings, and the keys are encrypted at rest with the same AES-256-GCM envelope
- * as the OAuth refresh tokens. Nothing above this module sees ciphertext, and the
- * plaintext key only ever exists in memory while a client is being built.
+ * These are per-user secrets, not environment variables: each person sets their
+ * own keys in Settings, and they are encrypted at rest with the same AES-256-GCM
+ * envelope as the OAuth refresh tokens. Nothing above this module sees
+ * ciphertext, and the plaintext key only ever exists in memory while a client is
+ * being built.
  *
  * There is deliberately no `getAiSettings()` that returns keys. The UI reads a
  * *summary* (is it configured, which model) and never the secret itself.
+ *
+ * Every function takes the owner's user id, so two people on one install never
+ * share a paid API key, a model choice or a reply threshold.
  */
 
 import { eq } from 'drizzle-orm'
@@ -23,9 +27,6 @@ import {
 
 import { DEFAULT_LLM_MODELS, LLM_PROVIDERS } from './llm.ts'
 import type { LlmProvider } from './llm.ts'
-
-/** The single settings row. */
-const SETTINGS_ID = 'app'
 
 export type AiSettingsSummary = {
   /** A Jev key is stored (regardless of whether it still decrypts). */
@@ -87,22 +88,26 @@ export function normaliseMinImportance(
 
 type SettingsRow = typeof appSettings.$inferSelect
 
-function settingsRow(): Promise<SettingsRow | undefined> {
+function settingsRow(userId: string): Promise<SettingsRow | undefined> {
   return db.query.appSettings.findFirst({
-    where: eq(appSettings.id, SETTINGS_ID),
+    where: eq(appSettings.userId, userId.toLowerCase()),
   })
 }
 
-function normaliseProvider(value: string | null | undefined): LlmProvider | null {
+function normaliseProvider(
+  value: string | null | undefined,
+): LlmProvider | null {
   if (!value) return null
   return (LLM_PROVIDERS as readonly string[]).includes(value)
     ? (value as LlmProvider)
     : null
 }
 
-/** Non-secret summary for the settings UI. */
-export async function getAiSettings(): Promise<AiSettingsSummary> {
-  const row = await settingsRow()
+/** Non-secret summary for the settings UI, for one user. */
+export async function getAiSettings(
+  userId: string,
+): Promise<AiSettingsSummary> {
+  const row = await settingsRow(userId)
   const provider = normaliseProvider(row?.llmProvider)
 
   return {
@@ -118,9 +123,11 @@ export async function getAiSettings(): Promise<AiSettingsSummary> {
   }
 }
 
-/** Decrypted config for building the pipeline. Server-only. */
-export async function getAiPipelineConfig(): Promise<AiPipelineConfig> {
-  const row = await settingsRow()
+/** Decrypted config for building the pipeline, for one user. Server-only. */
+export async function getAiPipelineConfig(
+  userId: string,
+): Promise<AiPipelineConfig> {
+  const row = await settingsRow(userId)
   if (!row) {
     return {
       jev: null,
@@ -162,13 +169,23 @@ function applyKey(
   return encrypt(trimmed)
 }
 
-/** Upsert the settings row. */
-export async function saveAiSettings(input: AiSettingsInput): Promise<void> {
-  const current = await settingsRow()
+/** Upsert one user's settings row. */
+export async function saveAiSettings(
+  userId: string,
+  input: AiSettingsInput,
+): Promise<void> {
+  const owner = userId.toLowerCase()
+  const current = await settingsRow(owner)
 
   const values = {
-    id: SETTINGS_ID,
-    jevApiKeyEncrypted: applyKey(current?.jevApiKeyEncrypted ?? null, input.jevApiKey),
+    // The row id is the owner's id: stable, already unique, and it keeps the
+    // primary key meaningful for a table that is now one row per person.
+    id: owner,
+    userId: owner,
+    jevApiKeyEncrypted: applyKey(
+      current?.jevApiKeyEncrypted ?? null,
+      input.jevApiKey,
+    ),
     jevModel: input.jevModel,
     llmProvider: input.llmProvider,
     llmModel: input.llmModel,
@@ -182,8 +199,10 @@ export async function saveAiSettings(input: AiSettingsInput): Promise<void> {
     updatedAt: new Date(),
   }
 
-  await db
-    .insert(appSettings)
-    .values(values)
-    .onConflictDoUpdate({ target: appSettings.id, set: values })
+  await db.insert(appSettings).values(values).onConflictDoUpdate({
+    // Conflict on the owner, not the id: a row adopted from the pre-accounts
+    // era still carries the old `id`, and updating *that* row is the point.
+    target: appSettings.userId,
+    set: values,
+  })
 }

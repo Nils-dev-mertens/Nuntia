@@ -13,7 +13,7 @@ function sender(email: string, name?: string): Participant {
 
 function message(from: Participant, sentAt = new Date(0)): ConversationMessage {
   return {
-    gmailMessageId: `msg-${from.email}-${sentAt.getTime()}`,
+    providerMessageId: `msg-${from.email}-${sentAt.getTime()}`,
     internetMessageId: null,
     from,
     to: [sender(OWNER)],

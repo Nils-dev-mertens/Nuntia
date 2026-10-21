@@ -10,6 +10,9 @@ import { google } from 'googleapis'
 import { CodeChallengeMethod } from 'google-auth-library'
 
 import { encrypt, tryDecrypt } from './crypto.ts'
+import { codeChallenge, stashOAuthRoundTrip } from './oauth.ts'
+
+export { readState, readVerifier } from './oauth.ts'
 
 /**
  * Scopes for the MVP.
@@ -22,12 +25,6 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/userinfo.email',
 ]
-
-/** State cookie name for the CSRF round-trip. */
-const STATE_COOKIE = 'lumen_oauth_state'
-/** PKCE verifier cookie name. */
-const VERIFIER_COOKIE = 'lumen_oauth_verifier'
-const OAUTH_COOKIE_TTL = 600 // 10 minutes
 
 function clientId(): string {
   const id = process.env.GOOGLE_CLIENT_ID
@@ -42,7 +39,10 @@ function clientSecret(): string {
 }
 
 function redirectUri(): string {
-  return process.env.GOOGLE_REDIRECT_URI ?? 'http://localhost:3000/auth/google/callback'
+  return (
+    process.env.GOOGLE_REDIRECT_URI ??
+    'http://localhost:3000/auth/google/callback'
+  )
 }
 
 /**
@@ -55,28 +55,6 @@ function createClient() {
   return new google.auth.OAuth2(clientId(), clientSecret(), redirectUri())
 }
 
-/** Cryptographically random, URL-safe token. */
-export function randomToken(bytes = 32): string {
-  const buf = new Uint8Array(bytes)
-  crypto.getRandomValues(buf)
-  return base64url(buf)
-}
-
-function base64url(bytes: Uint8Array): string {
-  let binary = ''
-  for (const b of bytes) binary += String.fromCharCode(b)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-/** SHA-256 of the verifier, base64url — the PKCE `code_challenge`. */
-async function codeChallenge(verifier: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(verifier),
-  )
-  return base64url(new Uint8Array(digest))
-}
-
 /**
  * Build the Google consent URL.
  *
@@ -85,21 +63,13 @@ async function codeChallenge(verifier: string): Promise<string> {
  * PKCE stops an intercepted auth code from being redeemed without our secret.
  */
 export async function buildAuthUrl(
-  setCookie: (name: string, value: string, opts: Record<string, unknown>) => void,
+  setCookie: (
+    name: string,
+    value: string,
+    opts: Record<string, unknown>,
+  ) => void,
 ): Promise<string> {
-  const state = randomToken()
-  const verifier = randomToken(48)
-
-  const cookieOpts = {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax' as const,
-    path: '/',
-    maxAge: OAUTH_COOKIE_TTL,
-  }
-
-  setCookie(STATE_COOKIE, state, cookieOpts)
-  setCookie(VERIFIER_COOKIE, verifier, cookieOpts)
+  const { state, verifier } = stashOAuthRoundTrip(setCookie)
 
   return createClient().generateAuthUrl({
     access_type: 'offline', // ask for a refresh token
@@ -114,16 +84,6 @@ export async function buildAuthUrl(
     code_challenge_method: CodeChallengeMethod.S256,
     include_granted_scopes: true,
   })
-}
-
-/** The PKCE verifier stashed at the start of the flow. */
-export function readVerifier(getCookie: (name: string) => string | undefined) {
-  return getCookie(VERIFIER_COOKIE)
-}
-
-/** The CSRF state stashed at the start of the flow. */
-export function readState(getCookie: (name: string) => string | undefined) {
-  return getCookie(STATE_COOKIE)
 }
 
 export type TokenResult = {
@@ -165,7 +125,9 @@ export async function exchangeCode(
  * Google omits the refresh token when the user has already granted access, so
  * this is a no-op for null rather than an error.
  */
-export function encryptRefreshToken(refreshToken: string | null): string | null {
+export function encryptRefreshToken(
+  refreshToken: string | null,
+): string | null {
   return refreshToken ? encrypt(refreshToken) : null
 }
 

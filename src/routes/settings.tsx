@@ -1,26 +1,36 @@
 /**
- * AI settings.
+ * Account and AI settings.
  *
- * The two services are configured here rather than in the environment: the keys
- * are per-install secrets set by the user, stored encrypted, and editable without
- * a redeploy. Each service is independent — you can configure Jev without an LLM,
- * or an LLM without Jev, and an unconfigured service simply falls back to the
- * rule-based behaviour.
+ * The two AI services are configured here rather than in the environment: the
+ * keys are per-user secrets set by the signed-in person, stored encrypted, and
+ * editable without a redeploy. Each service is independent — you can configure
+ * Jev without an LLM, or an LLM without Jev, and an unconfigured service simply
+ * falls back to the rule-based behaviour.
+ *
+ * Identity lives here too: who is signed in, which devices hold a session, and
+ * the two ways out — this device, or every other one.
  *
  * The loader returns a *summary* only (is it configured, which model). The keys
  * are never sent to the browser.
  */
 
 import { createServerFn } from '@tanstack/react-start'
-import { createFileRoute, Link, useRouter } from '@tanstack/react-router'
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useRouter,
+} from '@tanstack/react-router'
 import { useState } from 'react'
 import type { FormEvent } from 'react'
 
 import {
-  clearSession,
+  destroySession,
   getSession,
+  getUser,
   listAccounts,
-  setSession,
+  listSessions,
+  revokeAllSessions,
 } from '#/lib/auth/index.ts'
 import {
   aiLogPath,
@@ -51,6 +61,7 @@ import {
   REPLY_DRAFT_MIN_IMPORTANCE_MIN,
 } from '#/lib/conversation/draft.ts'
 import { cn } from '#/lib/utils'
+import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
 
 /** Provider choices for the topic generator. Labels only — no server code. */
 const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
@@ -68,7 +79,22 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     | {
         signedIn: true
         settings: AiSettingsSummary /** Connected mailboxes, so they can be listed and cleared out. */
-        accounts: Array<{ id: string; email: string }>
+        accounts: Array<{
+          id: string
+          email: string
+          provider: 'google' | 'microsoft'
+        }>
+        /** Whether avatars may be fetched from Gravatar (opt-in, off by default). */
+        useGravatar: boolean
+        /** Who is signed in, and the devices holding a session for them. */
+        viewer: { id: string; email: string; name: string | null }
+        devices: Array<{
+          id: string
+          userAgent: string | null
+          lastSeenAt: string
+          /** True for the device making this request, so it cannot revoke itself by accident. */
+          current: boolean
+        }>
         /** Recent AI calls, with the file they were written to. */
         aiLog: { path: string; events: AiLogRecord[] }
         /**
@@ -99,7 +125,11 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     const session = await getSession()
     if (!session) return { signedIn: false }
 
-    const accounts = await listAccounts()
+    const accounts = await listAccounts(session.userId)
+    const [viewer, devices] = await Promise.all([
+      getUser(session.userId),
+      listSessions(session.userId),
+    ])
 
     // Read per mailbox rather than in one query: the same call the sync path
     // uses, so the list on screen cannot disagree with what a decision reads.
@@ -135,14 +165,33 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       )
     ).flat()
 
+    if (!viewer) {
+      // The session outlived the user row (deleted out of band). Treat it as
+      // signed out rather than rendering half a page about a stranger.
+      return { signedIn: false }
+    }
+
     return {
       signedIn: true,
-      settings: await getAiSettings(),
+      settings: await getAiSettings(session.userId),
       accounts: accounts.map((account) => ({
         id: account.id,
         email: account.email,
+        provider: account.provider,
+      })),
+      viewer: {
+        id: viewer.id,
+        email: viewer.email,
+        name: viewer.name,
+      },
+      devices: devices.map((device) => ({
+        id: device.id,
+        userAgent: device.userAgent,
+        lastSeenAt: device.lastSeenAt.toISOString(),
+        current: device.id === session.sessionId,
       })),
       aiLog: { path: aiLogPath(), events: await readRecentAiEvents(20) },
+      useGravatar: (await getPreferences(session.userId)).useGravatar,
       unreplyableSenders,
       recentSenders,
     }
@@ -152,51 +201,96 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
 /**
  * Disconnect a mailbox and delete everything synced from it.
  *
- * The id arrives from the browser, so it is checked against the connected
- * mailboxes rather than trusted. Signing out is about the *install* having no
- * mailbox left, not about which row the cookie happens to name: with another
- * mailbox still connected there is nothing to sign out of, so the session is
- * re-pointed at it. Clearing it regardless stranded an install that still had
- * mail on the "connect a mailbox" screen and made the user re-authorise an
- * account they already had.
+ * The id arrives from the browser, so ownership is checked rather than trusted —
+ * `forgetAccount` refuses a mailbox that is not this user's. Deleting the last
+ * mailbox does *not* sign the user out any more: they still have an account,
+ * their AI keys and their own list of senders, and re-authorising a mailbox they
+ * happen to have removed must not cost them all of that.
  */
 const forgetAccountAction = createServerFn({ method: 'POST' })
   // `validator`, not `inputValidator`: the latter is deprecated. The other
   // actions in this app still use the old name and should be renamed too.
   .validator((data: { accountId: string }) => data)
-  .handler(
-    async ({ data }): Promise<{ error: string | null; signedOut: boolean }> => {
-      const session = await getSession()
-      if (!session) return { error: 'You are not signed in.', signedOut: false }
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
 
-      const wanted = data.accountId.trim().toLowerCase()
-      const connected = await listAccounts()
-      if (!connected.some((account) => account.id === wanted)) {
-        return { error: 'That mailbox is not connected.', signedOut: false }
+    try {
+      await forgetAccount(session.userId, data.accountId.trim().toLowerCase())
+      return { error: null }
+    } catch (error) {
+      console.error('[settings] deleting stored mail failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not delete the stored mail.',
       }
+    }
+  })
 
-      try {
-        await forgetAccount(wanted)
+/**
+ * Turn avatars from Gravatar on or off.
+ *
+ * Off by default, and the only setting here that contacts a third party: the
+ * request carries an MD5 of each address, which is why it is an explicit choice
+ * rather than an opt-out nobody notices.
+ */
+const saveGravatarAction = createServerFn({ method: 'POST' })
+  .validator((data: { useGravatar: boolean }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
 
-        const remaining = await listAccounts()
-        const signedOut = remaining.length === 0
+    try {
+      await savePreferences(session.userId, {
+        useGravatar: Boolean(data.useGravatar),
+      })
+      return { error: null }
+    } catch (error) {
+      console.error('[settings] saving the avatar preference failed:', error)
+      return { error: 'Could not save that setting.' }
+    }
+  })
 
-        if (signedOut) {
-          clearSession()
-        } else if (session.accountId === wanted) {
-          // The cookie is only a signed-in gate — every screen resolves its own
-          // account — but leaving it naming a row that no longer exists is stale
-          // state for no reason. Point it at one that still does.
-          await setSession(remaining[0].id)
-        }
+/** Sign out on this device: one session row deleted, the others left alone. */
+const signOutAction = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<{ error: string | null }> => {
+    try {
+      await destroySession()
+      return { error: null }
+    } catch (error) {
+      console.error('[settings] sign out failed:', error)
+      return { error: 'Could not sign out.' }
+    }
+  },
+)
 
-        return { error: null, signedOut }
-      } catch (error) {
-        console.error('[settings] deleting stored mail failed:', error)
-        return { error: 'Could not delete the stored mail.', signedOut: false }
-      }
-    },
-  )
+/**
+ * Sign out every *other* device.
+ *
+ * The current session is kept, which is what makes this safe to click: the user
+ * stays where they are and the devices they no longer have are the ones that
+ * lose access. Revoking all of them, including this one, would sign the user out
+ * of the page they are looking at — that is the plain Sign out button.
+ */
+const signOutEverywhereAction = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<{ error: string | null; revoked: number }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.', revoked: 0 }
+
+    try {
+      const others = (await listSessions(session.userId)).filter(
+        (device) => device.id !== session.sessionId,
+      )
+      await revokeAllSessions(session.userId, session.sessionId)
+      return { error: null, revoked: others.length }
+    } catch (error) {
+      console.error('[settings] revoking other sessions failed:', error)
+      return { error: 'Could not sign the other devices out.', revoked: 0 }
+    }
+  },
+)
 
 /**
  * Take a sender off the can't-reply list, from the settings page.
@@ -213,7 +307,11 @@ const clearSenderReplyabilityAction = createServerFn({ method: 'POST' })
     if (!session) return { error: 'You are not signed in.' }
 
     try {
-      return await removeUnreplyableSender(data.accountId, data.senderEmail)
+      return await removeUnreplyableSender(
+        session.userId,
+        data.accountId,
+        data.senderEmail,
+      )
     } catch (error) {
       console.error('[replyable] lifting the mark failed:', error)
       return { error: 'Could not update that sender.' }
@@ -240,7 +338,11 @@ const markSenderReplyabilityAction = createServerFn({ method: 'POST' })
       }
 
       try {
-        return await addUnreplyableSender(data.accountId, data.senderEmail)
+        return await addUnreplyableSender(
+          session.userId,
+          data.accountId,
+          data.senderEmail,
+        )
       } catch (error) {
         console.error('[replyable] adding a sender failed:', error)
         return { error: 'Could not add that sender.', added: null }
@@ -309,7 +411,7 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
     if (invalid) return { error: invalid }
 
     try {
-      await saveAiSettings({
+      await saveAiSettings(session.userId, {
         jevModel: blankToNull(data.jevModel),
         llmProvider: data.llmProvider
           ? (data.llmProvider as LlmProvider)
@@ -332,7 +434,13 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
   })
 
 export const Route = createFileRoute('/settings')({
-  loader: () => fetchAiSettings(),
+  loader: async () => {
+    const result = await fetchAiSettings()
+    // Signed out is a redirect, like the inbox: there is no per-install settings
+    // page to show any more, only a person's own.
+    if (!result.signedIn) throw redirect({ to: '/sign-in' })
+    return result
+  },
   component: Settings,
 })
 
@@ -361,47 +469,34 @@ type SignedInSettings = Extract<
 >
 
 /**
- * Settings, split in two so the signed-out branch cannot change a hook list.
+ * Settings, one component.
  *
- * The branch used to sit above the form's twenty-odd `useState` calls inside a
- * single component. Re-rendering it in place — which is exactly what invalidating
- * after deleting the session's own mailbox did, flipping the loader from signed in
- * to signed out — then rendered fewer hooks than the pass before and React
- * refused the update. One component per branch keeps each hook list fixed.
+ * There used to be a signed-out branch here, split out so flipping the loader's
+ * state did not change a hook list. The loader redirects a signed-out visitor
+ * now, so the only variable left is how many mailboxes the user has — and a user
+ * with none still has an account, keys to set, and devices to sign out.
  */
 function Settings() {
-  const result = Route.useLoaderData()
-
-  return result.signedIn ? (
-    <SettingsForm result={result} />
-  ) : (
-    <SignedOutSettings />
-  )
-}
-
-/** What this page shows when no mailbox is connected at all. */
-function SignedOutSettings() {
-  return (
-    <div className="mx-auto max-w-2xl p-8">
-      <h1 className="text-2xl font-bold">Settings</h1>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Connect a mailbox before configuring AI services.
-      </p>
-      <a
-        href="/auth/google"
-        className="mt-4 inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground"
-      >
-        Connect Gmail
-      </a>
-    </div>
-  )
+  return <SettingsForm result={Route.useLoaderData()} />
 }
 
 function SettingsForm({ result }: { result: SignedInSettings }) {
   const router = useRouter()
 
-  const { settings, accounts, aiLog, unreplyableSenders, recentSenders } =
-    result
+  const {
+    settings,
+    accounts,
+    aiLog,
+    unreplyableSenders,
+    recentSenders,
+    viewer,
+    devices,
+    useGravatar,
+  } = result
+
+  // Own state so the checkbox responds before the save comes back; the server
+  // value arrives on the next loader run and would otherwise be the only truth.
+  const [gravatar, setGravatar] = useState(useGravatar)
 
   const [jevModel, setJevModel] = useState(settings.jevModel ?? '')
   const [jevApiKey, setJevApiKey] = useState('')
@@ -433,6 +528,10 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   // about a sender reported above the AI settings would read as being about them.
   const [senderError, setSenderError] = useState<string | null>(null)
   const [senderMessage, setSenderMessage] = useState<string | null>(null)
+
+  // And again for the account section, for the same reason.
+  const [accountError, setAccountError] = useState<string | null>(null)
+  const [accountMessage, setAccountMessage] = useState<string | null>(null)
 
   // The can't-reply form's own two fields. The mailbox is picked rather than
   // implied by a thread — there is no open thread on this page — and defaults to
@@ -478,11 +577,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
       }
 
       setPendingDelete(null)
-      setMailboxMessage(
-        forgotten.signedOut
-          ? 'Deleted. Connect a mailbox to sync it fresh.'
-          : 'Deleted.',
-      )
+      setMailboxMessage('Deleted. Connect it again to sync it fresh.')
       // Both the mailbox list and the signed-in state come from the loader.
       await router.invalidate()
     } catch {
@@ -536,6 +631,51 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   }
 
   /**
+   * Sign out of this device, or of every other one.
+   *
+   * The plain sign-out is a full navigation rather than a router navigate: the
+   * session cookie is gone, and every loader on every route would have to be
+   * re-run anyway.
+   */
+  async function signOut(everywhereElse: boolean) {
+    if (busy) return
+    setBusy(true)
+    setAccountError(null)
+    setAccountMessage(null)
+
+    try {
+      if (everywhereElse) {
+        const revoked = await signOutEverywhereAction()
+        if (revoked.error) {
+          setAccountError(revoked.error)
+          return
+        }
+        setAccountMessage(
+          revoked.revoked === 0
+            ? 'No other devices were signed in.'
+            : `Signed out ${revoked.revoked} other ${
+                revoked.revoked === 1 ? 'device' : 'devices'
+              }.`,
+        )
+        await router.invalidate()
+        return
+      }
+
+      const result = await signOutAction()
+      if (result.error) {
+        setAccountError(result.error)
+        return
+      }
+
+      window.location.assign('/sign-in')
+    } catch {
+      setAccountError('Could not sign out.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
    * Take a sender off the can't-reply list.
    *
    * The counterpart of the button on a conversation, for the case where the user
@@ -566,6 +706,37 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
       setSenderError('Could not update that sender.')
     } finally {
       setBusy(false)
+    }
+  }
+
+  /**
+   * Save the avatar preference as it is toggled.
+   *
+   * Optimistic, and rolled back when the save fails — a checkbox that only moves
+   * after a round trip feels broken, and one that stays moved after a failure is
+   * worse.
+   */
+  async function toggleGravatar(next: boolean) {
+    setGravatar(next)
+    setAccountError(null)
+    setAccountMessage(null)
+
+    try {
+      const saved = await saveGravatarAction({ data: { useGravatar: next } })
+      if (saved.error) {
+        setAccountError(saved.error)
+        setGravatar(!next)
+        return
+      }
+
+      setAccountMessage(
+        next
+          ? 'Avatars load from Gravatar when an address has one.'
+          : 'Avatars now use initials only.',
+      )
+    } catch {
+      setAccountError('Could not save that setting.')
+      setGravatar(!next)
     }
   }
 
@@ -627,8 +798,100 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
         </Link>
       </div>
 
-      <p className="mt-2 text-sm text-muted-foreground">
-        Both services are optional. Without them Lumen classifies with rules
+      <section className="mt-6 rounded-lg border border-border bg-card p-4">
+        <h2 className="text-sm font-semibold text-foreground">Account</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Signed in as{' '}
+          <span className="text-foreground">
+            {viewer.name ? `${viewer.name} — ` : ''}
+            {viewer.email}
+          </span>
+          . Your mailboxes, keys and sender marks belong to this account alone.
+        </p>
+
+        <h3 className="mt-4 text-xs font-medium text-foreground">
+          Signed-in devices
+        </h3>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          One row per browser that signed in. Signing out here ends this
+          browser's session only, so a phone left signed in can be cut off
+          without disturbing this laptop.
+        </p>
+
+        <ul className="mt-2 space-y-1">
+          {devices.map((device) => (
+            <li
+              key={device.id}
+              className="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground"
+            >
+              <span className="min-w-0 truncate" title={device.userAgent ?? ''}>
+                {device.userAgent ?? 'Unknown device'}
+              </span>
+              <span className="shrink-0">
+                {device.current ? 'this device — ' : ''}
+                {/* UTC and stable: this renders on the server too, and a
+                    locale-formatted time would differ between the two. */}
+                {device.lastSeenAt.slice(0, 16).replace('T', ' ')} UTC
+              </span>
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void signOut(false)}
+            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+          >
+            Sign out
+          </button>
+          <button
+            type="button"
+            disabled={busy || devices.length <= 1}
+            onClick={() => void signOut(true)}
+            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+          >
+            Sign out everywhere else
+          </button>
+        </div>
+
+        <label className="mt-4 flex items-start gap-2 text-[11px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={gravatar}
+            disabled={busy}
+            onChange={(event) => void toggleGravatar(event.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="text-foreground">Load avatars from Gravatar</span>{' '}
+            — contacts always get initials; this sends an MD5 of each sender's
+            address to gravatar.com. Leave it off to keep addresses on this
+            machine.
+          </span>
+        </label>
+
+        {accountError ? (
+          <p
+            role="alert"
+            className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          >
+            {accountError}
+          </p>
+        ) : null}
+        {accountMessage ? (
+          <p
+            role="status"
+            className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+          >
+            {accountMessage}
+          </p>
+        ) : null}
+      </section>
+
+      <p className="mt-6 text-sm text-muted-foreground">
+        Both AI services are optional. Without them Lumen classifies with rules
         only and conversations have no topic. Keys are encrypted at rest.
       </p>
 
@@ -1020,7 +1283,14 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
               key={account.id}
               className="flex items-center justify-between gap-3 text-xs"
             >
-              <span className="truncate text-foreground">{account.email}</span>
+              <span className="flex min-w-0 items-center gap-2">
+                <span className="truncate text-foreground">
+                  {account.email}
+                </span>
+                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
+                </span>
+              </span>
 
               {pendingDelete === account.id ? (
                 <span className="flex shrink-0 items-center gap-2">
@@ -1054,6 +1324,21 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             </li>
           ))}
         </ul>
+
+        <div className="mt-3 flex flex-wrap gap-2 text-xs">
+          <a
+            href="/auth/google"
+            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
+          >
+            Add Gmail
+          </a>
+          <a
+            href="/auth/microsoft"
+            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
+          >
+            Add Outlook
+          </a>
+        </div>
 
         {mailboxError ? (
           <p

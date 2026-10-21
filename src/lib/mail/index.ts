@@ -45,6 +45,7 @@ export {
 
 export {
   buildMimeMessage,
+  composeNewMessage,
   composeReply,
   encodeQuotedPrintable,
 } from './compose.ts'

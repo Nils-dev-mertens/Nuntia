@@ -5,14 +5,14 @@ import type {
   ConversationMessage,
 } from '#/lib/conversation/index.ts'
 
-import { FakeGmailClient } from './fake.ts'
-import { ReplyNotPossibleError, sendReply } from './send.ts'
+import { FakeMailboxClient } from '#/lib/mailbox/fake.ts'
+import { ReplyNotPossibleError, sendReply } from '#/lib/gmail/send.ts'
 
 const OWNER = 'me@example.com'
 
 function message(overrides: Partial<ConversationMessage>): ConversationMessage {
   return {
-    gmailMessageId: 'g1',
+    providerMessageId: 'g1',
     internetMessageId: null,
     from: { email: 'alice@example.com', name: 'Alice' },
     to: [{ email: OWNER, name: null }],
@@ -34,7 +34,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
 
   return {
     id: 'me@example.com:thread-1',
-    gmailThreadId: 'thread-1',
+    providerThreadId: 'thread-1',
     subject: 'Project launch',
     participants: [
       { email: OWNER, name: null },
@@ -81,7 +81,7 @@ function headersOf(raw: string): string {
 
 describe('sendReply', () => {
   test('sends into the existing thread', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await sendReply(client, OWNER, conversation(), 'Yes, Tuesday works.')
 
     expect(client.sent).toHaveLength(1)
@@ -89,7 +89,7 @@ describe('sendReply', () => {
   })
 
   test('uses sender-specific reply greeting and signature overrides', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       messages: [
         message({
@@ -106,7 +106,7 @@ describe('sendReply', () => {
   })
 
   test('an explicit empty sender style suppresses guessed defaults', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       messages: [
         message({
@@ -125,7 +125,7 @@ describe('sendReply', () => {
   })
 
   test('addresses everyone except the owner', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       participants: [
         { email: OWNER, name: null },
@@ -147,7 +147,7 @@ describe('sendReply', () => {
   test('keeps everyone on the thread even if the last message is your own', async () => {
     // Reading only the newest message's To: header would drop Alice here,
     // because a reply-to-one carries just that one address.
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       participants: [
         { email: OWNER, name: null },
@@ -174,7 +174,7 @@ describe('sendReply', () => {
   })
 
   test('does not double up the Re: prefix', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
 
     await sendReply(client, OWNER, conversation(), 'Hi')
     expect(headersOf(client.sent[0]?.raw ?? '')).toContain(
@@ -194,7 +194,7 @@ describe('sendReply', () => {
   })
 
   test('restores the greeting and signature the user actually uses', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       messages: [
         message({ internetMessageId: '<a@mail.example.com>' }),
@@ -223,7 +223,7 @@ describe('sendReply', () => {
   })
 
   test('omits the greeting when the user has never written in the thread', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await sendReply(client, OWNER, conversation(), 'Just this.')
 
     const body = bodyOf(client.sent[0]?.raw ?? '')
@@ -232,7 +232,7 @@ describe('sendReply', () => {
   })
 
   test('sets In-Reply-To and References so other clients thread it', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       messages: [
         message({ internetMessageId: '<first@mail.example.com>' }),
@@ -253,7 +253,7 @@ describe('sendReply', () => {
   })
 
   test('quotes the thread so the recipient has the context', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await sendReply(client, OWNER, conversation(), 'Confirmed.')
 
     const body = bodyOf(client.sent[0]?.raw ?? '')
@@ -262,7 +262,7 @@ describe('sendReply', () => {
   })
 
   test('can be told not to quote', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await sendReply(client, OWNER, conversation(), 'Confirmed.', {
       quoteOriginal: false,
     })
@@ -271,7 +271,7 @@ describe('sendReply', () => {
   })
 
   test('sends uploaded files as MIME attachments', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const bytes = Uint8Array.from([0, 255, 1, 128])
     const data = Buffer.from(bytes).toString('base64')
 
@@ -293,7 +293,7 @@ describe('sendReply', () => {
   })
 
   test('allows an attachment-only reply', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await sendReply(client, OWNER, conversation(), '', {
       attachments: [
         {
@@ -309,7 +309,7 @@ describe('sendReply', () => {
   })
 
   test('rejects malformed and oversized attachment uploads before sending', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
 
     await expect(
       sendReply(client, OWNER, conversation(), 'See attached.', {
@@ -322,7 +322,7 @@ describe('sendReply', () => {
   })
 
   test('refuses an empty reply', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     await expect(
       sendReply(client, OWNER, conversation(), '   \n  '),
     ).rejects.toThrow(ReplyNotPossibleError)
@@ -332,7 +332,7 @@ describe('sendReply', () => {
   test('refuses to reply to an automated thread', async () => {
     // The whole point of the automated classification: no reply box, and the
     // server refuses too, so a stale UI cannot send into a void.
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({ isAutomated: true, replyable: false })
 
     await expect(sendReply(client, OWNER, conv, 'Thanks!')).rejects.toThrow(
@@ -344,7 +344,7 @@ describe('sendReply', () => {
   test('refuses when the conversation has no reply address', async () => {
     // A human thread the decision layer judged unanswerable — a broadcast with
     // no return address. The composer is hidden, and the server refuses too.
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({ replyable: false })
 
     await expect(sendReply(client, OWNER, conv, 'Hello?')).rejects.toThrow(
@@ -354,7 +354,7 @@ describe('sendReply', () => {
   })
 
   test('refuses when no recipient can be found', async () => {
-    const client = new FakeGmailClient()
+    const client = new FakeMailboxClient()
     const conv = conversation({
       participants: [{ email: OWNER, name: null }],
     })

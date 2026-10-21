@@ -29,15 +29,21 @@ export const Route = createFileRoute('/attachments/$attachmentId')({
 
         // The attachment is only unique within its thread, so the thread travels
         // with the request.
-        const gmailThreadId = new URL(request.url).searchParams.get('thread')
-        if (!gmailThreadId) {
+        const providerThreadId = new URL(request.url).searchParams.get('thread')
+        if (!providerThreadId) {
           return textResponse(
             'Missing the thread this attachment belongs to.',
             400,
           )
         }
 
-        const result = await loadAttachment(gmailThreadId, params.attachmentId)
+        // Scoped to the signed-in user: the thread id and attachment id come
+        // from the URL, so ownership is checked against them rather than assumed.
+        const result = await loadAttachment(
+          session.userId,
+          providerThreadId,
+          params.attachmentId,
+        )
 
         if (!result.ok) {
           if (result.reason === 'too-large') {

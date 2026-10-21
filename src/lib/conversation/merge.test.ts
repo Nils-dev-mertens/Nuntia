@@ -21,7 +21,7 @@ function message(
   overrides: Partial<ConversationMessage> & { from: Participant },
 ): ConversationMessage {
   return {
-    gmailMessageId: 'msg',
+    providerMessageId: 'msg',
     internetMessageId: null,
     to: [],
     cc: [],
@@ -42,7 +42,7 @@ function conversation(
 ): Conversation {
   return {
     id: 'conversation',
-    gmailThreadId: 'thread',
+    providerThreadId: 'thread',
     subject: 'Subject',
     participants: [],
     attachments: [],
@@ -120,13 +120,13 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             replyable: false,
             isAutomated: false,
             state: 'low-priority',
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -138,11 +138,11 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             replyable: true,
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -166,7 +166,7 @@ describe('mergeAccountConversations', () => {
     const read = new Date('2026-02-02T12:00:00Z')
     const messages = [
       message({
-        gmailMessageId: 'a1',
+        providerMessageId: 'a1',
         internetMessageId: shared,
         from: ALICE,
         to: [A, B],
@@ -179,7 +179,7 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             seenAt: null,
             messages,
           }),
@@ -188,7 +188,7 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             seenAt: read,
             messages,
           }),
@@ -198,7 +198,9 @@ describe('mergeAccountConversations', () => {
     )
 
     expect(merged).toHaveLength(1)
-    expect(merged[0].conversation.seenAt?.toISOString()).toBe(read.toISOString())
+    expect(merged[0].conversation.seenAt?.toISOString()).toBe(
+      read.toISOString(),
+    )
   })
 
   test('a done mark is carried until the union has moved past it', () => {
@@ -217,11 +219,11 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             done: mark,
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -234,10 +236,10 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -260,11 +262,11 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             done: mark,
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -277,10 +279,10 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -308,18 +310,18 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             replyable: false,
             isAutomated: true,
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: { name: 'GitHub', email: 'noreply@github.com' },
                 to: [A],
               }),
               message({
-                gmailMessageId: 'a2',
+                providerMessageId: 'a2',
                 internetMessageId: '<answer@example.com>',
                 from: ALICE,
                 to: [A],
@@ -332,10 +334,10 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: { name: 'GitHub', email: 'noreply@github.com' },
                 to: [B],
@@ -360,10 +362,10 @@ describe('mergeAccountConversations', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -375,10 +377,10 @@ describe('mergeAccountConversations', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -442,14 +444,14 @@ describe('mergeAccountConversations', () => {
             id: `${A.id}:t1`,
             messages: [
               message({
-                gmailMessageId: 'm1',
+                providerMessageId: 'm1',
                 internetMessageId: '<m1@example.com>',
                 from: ALICE,
                 to: [A],
               }),
               // Written from the user's *other* connected mailbox.
               message({
-                gmailMessageId: 'm2',
+                providerMessageId: 'm2',
                 internetMessageId: '<m2@example.com>',
                 from: { name: 'Me', email: B.email },
                 to: [ALICE, A],
@@ -598,9 +600,9 @@ describe('mergeAccountConversations', () => {
   test('collapses a shared attachment instead of showing it twice', () => {
     const shared = '<shared@example.com>'
     const attachment = {
-      gmailMessageId: 'm1',
+      providerMessageId: 'm1',
       messageId: 'm1',
-      gmailAttachmentId: 'att-1',
+      providerAttachmentId: 'att-1',
       filename: 'report.pdf',
       mimeType: 'application/pdf',
       sizeBytes: 1024,
@@ -627,7 +629,7 @@ describe('mergeAccountConversations', () => {
             messages: [
               message({ internetMessageId: shared, from: ALICE, to: [A, B] }),
             ],
-            attachments: [{ ...attachment, gmailAttachmentId: 'att-2' }],
+            attachments: [{ ...attachment, providerAttachmentId: 'att-2' }],
           }),
         ),
       ],
@@ -636,6 +638,62 @@ describe('mergeAccountConversations', () => {
 
     expect(merged[0]?.conversation.attachments).toHaveLength(1)
     expect(merged[0]?.conversation.attachmentCount).toBe(1)
+  })
+
+  test('keeps media copies from each mailbox for content-hash deduplication', () => {
+    const shared = '<shared-media@example.com>'
+    const image = {
+      providerMessageId: 'm1',
+      messageId: 'm1',
+      providerAttachmentId: 'image-a',
+      filename: 'logo.png',
+      mimeType: 'image/png',
+      sizeBytes: 1024,
+      isInline: true,
+      contentId: 'logo',
+    }
+    const merged = mergeAccountConversations(
+      [
+        source(
+          A.id,
+          conversation({
+            id: `${A.id}:media1`,
+            providerThreadId: 'media1',
+            messages: [
+              message({ internetMessageId: shared, from: ALICE, to: [A, B] }),
+            ],
+            attachments: [image],
+          }),
+        ),
+        source(
+          B.id,
+          conversation({
+            id: `${B.id}:media2`,
+            providerThreadId: 'media2',
+            messages: [
+              message({ internetMessageId: shared, from: ALICE, to: [A, B] }),
+            ],
+            attachments: [
+              {
+                ...image,
+                providerAttachmentId: 'image-b',
+                filename: 'renamed.png',
+              },
+            ],
+          }),
+        ),
+      ],
+      ACCOUNTS,
+    )
+
+    expect(merged[0]?.conversation.attachments).toHaveLength(2)
+    expect(
+      new Set(
+        merged[0]?.conversation.attachments.map(
+          (attachment) => attachment.providerThreadId,
+        ),
+      ),
+    ).toEqual(new Set(['media1', 'media2']))
   })
 })
 
@@ -658,11 +716,11 @@ describe('partitionByState', () => {
       A.id,
       conversation({
         id: `${A.id}:${id}`,
-        gmailThreadId: id,
+        providerThreadId: id,
         state: 'needs-action',
         messages: [
           message({
-            gmailMessageId: messageId,
+            providerMessageId: messageId,
             internetMessageId: `<${messageId}@example.com>`,
             from: ALICE,
             to: [A],
@@ -680,12 +738,12 @@ describe('partitionByState', () => {
           A.id,
           conversation({
             id: `${A.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             state: 'needs-action',
             done: mark,
             messages: [
               message({
-                gmailMessageId: 'm2',
+                providerMessageId: 'm2',
                 internetMessageId: '<m2@example.com>',
                 from: ALICE,
                 to: [A],
@@ -712,12 +770,12 @@ describe('partitionByState', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             state: 'needs-action',
             done: mark,
             messages: [
               message({
-                gmailMessageId: 'm1',
+                providerMessageId: 'm1',
                 internetMessageId: '<m1@example.com>',
                 from: ALICE,
                 to: [A],
@@ -748,14 +806,14 @@ describe('a merged thread keeps the stored decision', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             state: 'needs-action',
             requiresReply: true,
             importance: 9,
             urgency: 8,
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -767,10 +825,10 @@ describe('a merged thread keeps the stored decision', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -796,12 +854,12 @@ describe('a merged thread keeps the stored decision', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             state: 'needs-action',
             requiresReply: true,
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -813,10 +871,10 @@ describe('a merged thread keeps the stored decision', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -824,7 +882,7 @@ describe('a merged thread keeps the stored decision', () => {
               // The user answered it from their other mailbox, so the stored
               // `needs-action` on the owner's row is simply out of date.
               message({
-                gmailMessageId: 'b2',
+                providerMessageId: 'b2',
                 internetMessageId: '<b2@example.com>',
                 from: { name: 'Me', email: B.email },
                 to: [ALICE],
@@ -852,12 +910,12 @@ describe('a merged thread keeps the stored decision', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             state: 'low-priority',
             stateOverride: { state: 'low-priority', messageAt: saidAt },
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -870,10 +928,10 @@ describe('a merged thread keeps the stored decision', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -899,7 +957,7 @@ describe('a merged thread keeps the stored decision', () => {
           A.id,
           conversation({
             id: `${A.id}:t1`,
-            gmailThreadId: 't1',
+            providerThreadId: 't1',
             state: 'low-priority',
             stateOverride: {
               state: 'low-priority',
@@ -907,7 +965,7 @@ describe('a merged thread keeps the stored decision', () => {
             },
             messages: [
               message({
-                gmailMessageId: 'a1',
+                providerMessageId: 'a1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
@@ -919,16 +977,16 @@ describe('a merged thread keeps the stored decision', () => {
           B.id,
           conversation({
             id: `${B.id}:t2`,
-            gmailThreadId: 't2',
+            providerThreadId: 't2',
             messages: [
               message({
-                gmailMessageId: 'b1',
+                providerMessageId: 'b1',
                 internetMessageId: shared,
                 from: ALICE,
                 to: [A, B],
               }),
               message({
-                gmailMessageId: 'b2',
+                providerMessageId: 'b2',
                 internetMessageId: '<b2@example.com>',
                 from: ALICE,
                 to: [B],

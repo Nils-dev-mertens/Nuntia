@@ -83,6 +83,29 @@ export function composeReply(input: ComposeInput): ComposedReply {
 }
 
 /**
+ * A brand-new message: the same restoration, without a thread to quote.
+ *
+ * The user types only what they want to say — no "Hi Nils,", no sign-off — and
+ * this puts back the greeting and signature the reply path already restores, so
+ * a new thread reads exactly like every reply the app sends.
+ *
+ * The HTML part is always produced here, unlike a reply's: with nothing to
+ * quote, `composeHtml` has no rich content to justify a part, but a new message
+ * still needs one for Graph (which sends HTML bodies only) and for the plain
+ * formatting of a signature block.
+ */
+export function composeNewMessage(input: {
+  body: string
+  greeting?: string | null
+  signature?: string | null
+}): ComposedReply {
+  return {
+    text: composeText(input),
+    html: `<div>${bodyHtml(input)}</div>`,
+  }
+}
+
+/**
  * Plain-text representation: greeting, body, signature, quoted history.
  *
  * The signature belongs to the user's own message, so it sits directly under
@@ -153,24 +176,40 @@ function composeHtml(input: ComposeInput): string | null {
   const originalHtml = input.originalHtml?.trim()
   if (!input.quoteOriginal || !originalHtml || !input.original) return null
 
-  const greeting = input.greeting?.trim()
-  const body = input.body.trim()
-  const signature = input.signature?.trim()
-
-  const sections: string[] = ['<div>']
-  if (greeting) sections.push(`<p>${escapeHtml(greeting)}</p>`)
-  if (body) sections.push(`<p>${escapeHtml(body).replace(/\n/g, '<br>')}</p>`)
-
-  // Signature before the quote, matching the plain-text part: it belongs to the
-  // reply, not to the message being quoted.
-  if (signature)
-    sections.push(`<p>${escapeHtml(signature).replace(/\n/g, '<br>')}</p>`)
+  const sections: string[] = ['<div>', bodyHtml(input)]
 
   sections.push(
     `<blockquote>${escapeHtml(attributionLine(input.original))}${originalHtml}</blockquote>`,
   )
 
   sections.push('</div>')
+
+  return sections.join('')
+}
+
+/**
+ * The user's own words as HTML: greeting, body, signature.
+ *
+ * Shared by replies and new messages so the two cannot format a signature
+ * differently — the same block is what makes a new thread look like the rest of
+ * the user's mail.
+ */
+function bodyHtml(input: {
+  body: string
+  greeting?: string | null
+  signature?: string | null
+}): string {
+  const greeting = input.greeting?.trim()
+  const body = input.body.trim()
+  const signature = input.signature?.trim()
+
+  const sections: string[] = []
+  if (greeting) sections.push(`<p>${escapeHtml(greeting)}</p>`)
+  if (body) sections.push(`<p>${escapeHtml(body).replace(/\n/g, '<br>')}</p>`)
+  // Signature before the quote (when there is one), matching the plain-text part:
+  // it belongs to the user's own message, not to what they are quoting.
+  if (signature)
+    sections.push(`<p>${escapeHtml(signature).replace(/\n/g, '<br>')}</p>`)
 
   return sections.join('')
 }
@@ -209,6 +248,8 @@ export function buildMimeMessage(args: {
   html?: string | null
   from?: string
   cc?: string[]
+  /** Blind copies. Only the SMTP envelope sees these; no `To` header is derived. */
+  bcc?: string[]
   threadId?: string
   inReplyTo?: string
   references?: string[]
@@ -221,6 +262,7 @@ export function buildMimeMessage(args: {
     html,
     from,
     cc,
+    bcc,
     threadId,
     inReplyTo,
     references,
@@ -231,6 +273,9 @@ export function buildMimeMessage(args: {
   if (from) headers.push(`From: ${from}`)
   headers.push(`To: ${to.join(', ')}`)
   if (cc?.length) headers.push(`Cc: ${cc.join(', ')}`)
+  // RFC 5322 allows a Bcc header; Gmail strips it when delivering, which is the
+  // behaviour a blind copy is supposed to have.
+  if (bcc?.length) headers.push(`Bcc: ${bcc.join(', ')}`)
   // Subjects carry emoji and accents ("Re: 🖤 LAATSTE KANS"), so they have to be
   // RFC 2047 encoded — a raw UTF-8 header is not legal and clients mangle it.
   headers.push(`Subject: ${encodeHeaderValue(subject)}`)

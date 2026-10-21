@@ -8,10 +8,13 @@
 
 import { useEffect } from 'react'
 import { createServerFn } from '@tanstack/react-start'
-import { createFileRoute, useRouter } from '@tanstack/react-router'
+import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
 
 import { ConversationView } from '#/components/conversation'
 import { getSession } from '#/lib/auth/index.ts'
+import { getAiPipelineConfig } from '#/lib/ai/settings.ts'
+import { suggestContactContext } from '#/lib/contacts/context-ai.ts'
+import type { ContactContextSource } from '#/lib/contacts/context-ai.ts'
 import {
   applyUserStateOverride,
   describeActionFailure,
@@ -39,10 +42,16 @@ import {
   setConversationDetails,
 } from '#/lib/conversation/index.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
-import { syncThread } from '#/lib/gmail/sync.ts'
-import { createGmailClient } from '#/lib/auth/google.ts'
-import { getAccountEnvelope, listAccounts } from '#/lib/auth/accounts.ts'
-import { createGmailApiClient } from '#/lib/gmail/client.ts'
+import { syncThread } from '#/lib/mailbox/sync.ts'
+import { createMailboxClientFor } from '#/lib/mailbox/provider.ts'
+import { listAccounts } from '#/lib/auth/accounts.ts'
+import {
+  CONTACT_CONTEXT_LIMITS,
+  normaliseContactContextFields,
+  saveContactContext,
+} from '#/lib/contacts/context.ts'
+import type { ContactContextFields } from '#/lib/contacts/context.ts'
+import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
 
 /**
  * How long a draft instruction may be.
@@ -55,7 +64,7 @@ const MAX_DRAFT_INSTRUCTION_CHARS = 500
 const saveParsingProfileAction = createServerFn({ method: 'POST' })
   .inputValidator(
     (data: {
-      gmailThreadId: string
+      providerThreadId: string
       profile: SenderProfileSettings
       defaultReplyGreeting: string
       defaultReplySignature: string
@@ -67,10 +76,11 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
-    // The thread's own mailbox, not the session's: accounts are global and the
-    // row came from whichever account owns it.
+    // The thread's own mailbox, resolved within the signed-in user's mailboxes:
+    // a thread id from the browser is not evidence of anything by itself.
     const { accountId, conversation } = await requireConversationByThreadId(
-      data.gmailThreadId,
+      session.userId,
+      data.providerThreadId,
     )
     const sender = [...conversation.messages]
       .reverse()
@@ -125,23 +135,17 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
     )
 
     try {
-      const envelope = await getAccountEnvelope(accountId)
-      if (!envelope)
+      const client = await createMailboxClientFor(accountId)
+      if (!client)
         return {
-          error: 'Preferences saved, but no Google account is connected.',
+          error: 'Preferences saved, but this mailbox is no longer connected.',
         }
-      const client = createGmailApiClient(
-        await createGmailClient(envelope),
-        accountId,
-      )
-      const thread = await client.getThread(conversation.gmailThreadId)
+      const thread = await client.getThread(conversation.providerThreadId)
       const profileContext = await getParsingProfileContext(accountId)
-      const synced = await syncThread(
-        accountId,
-        thread,
-        undefined,
+      const synced = await syncThread(accountId, thread, {
+        userId: session.userId,
         profileContext,
-      )
+      })
       if (synced !== 'synced') {
         return {
           error:
@@ -157,23 +161,231 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
     }
   })
 
+const saveContactContextAction = createServerFn({ method: 'POST' })
+  .validator(
+    (
+      data: unknown,
+    ): { providerThreadId: string; context: ContactContextFields } => {
+      if (!data || typeof data !== 'object') {
+        throw new Error('Contact context is invalid.')
+      }
+      const candidate = data as {
+        providerThreadId?: unknown
+        context?: unknown
+      }
+      if (
+        typeof candidate.providerThreadId !== 'string' ||
+        !candidate.context ||
+        typeof candidate.context !== 'object'
+      ) {
+        throw new Error('Contact context is invalid.')
+      }
+      const context = candidate.context as Record<string, unknown>
+      if (
+        typeof context.roleCompany !== 'string' ||
+        typeof context.relationship !== 'string' ||
+        typeof context.topics !== 'string' ||
+        typeof context.currentWork !== 'string'
+      ) {
+        throw new Error('Contact context must contain text fields.')
+      }
+      return {
+        providerThreadId: candidate.providerThreadId,
+        context: {
+          roleCompany: context.roleCompany,
+          relationship: context.relationship,
+          topics: context.topics,
+          currentWork: context.currentWork,
+        },
+      }
+    },
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    const context = data.context
+    if (
+      typeof context.roleCompany !== 'string' ||
+      typeof context.relationship !== 'string' ||
+      typeof context.topics !== 'string' ||
+      typeof context.currentWork !== 'string'
+    ) {
+      return { error: 'Contact context must contain text fields.' }
+    }
+    if (
+      context.roleCompany.length > CONTACT_CONTEXT_LIMITS.roleCompany ||
+      context.relationship.length > CONTACT_CONTEXT_LIMITS.relationship ||
+      context.topics.length > CONTACT_CONTEXT_LIMITS.topics ||
+      context.currentWork.length > CONTACT_CONTEXT_LIMITS.currentWork
+    ) {
+      return { error: 'One or more contact context fields are too long.' }
+    }
+
+    try {
+      const { conversation } = await requireConversationByThreadId(
+        session.userId,
+        data.providerThreadId,
+      )
+      const owners = new Set(
+        (await listAccounts(session.userId)).map((account) =>
+          account.email.trim().toLowerCase(),
+        ),
+      )
+      const correspondent = [...conversation.messages]
+        .reverse()
+        .find((message) => !owners.has(message.from.email.trim().toLowerCase()))
+        ?.from.email
+      if (!correspondent) {
+        return { error: 'This conversation has no external correspondent.' }
+      }
+
+      // Resolve the target from stored thread data, never from an address supplied
+      // by the browser, and key the profile to the signed-in user.
+      const email = normaliseContactEmail(correspondent)
+      await saveContactContext(session.userId, email, context)
+      return { error: null }
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not save contact context.',
+      }
+    }
+  })
+
+const suggestContactContextAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => {
+    if (!data || typeof data !== 'object') {
+      throw new Error('Contact context suggestion request is invalid.')
+    }
+    const candidate = data as {
+      providerThreadId?: unknown
+      current?: unknown
+    }
+    if (
+      typeof candidate.providerThreadId !== 'string' ||
+      !candidate.current ||
+      typeof candidate.current !== 'object'
+    ) {
+      throw new Error('Contact context suggestion request is invalid.')
+    }
+    const current = candidate.current as Record<string, unknown>
+    if (
+      typeof current.roleCompany !== 'string' ||
+      typeof current.relationship !== 'string' ||
+      typeof current.topics !== 'string' ||
+      typeof current.currentWork !== 'string'
+    ) {
+      throw new Error('Contact context must contain text fields.')
+    }
+    return {
+      providerThreadId: candidate.providerThreadId,
+      current: {
+        roleCompany: current.roleCompany,
+        relationship: current.relationship,
+        topics: current.topics,
+        currentWork: current.currentWork,
+      },
+    }
+  })
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      suggestion: ContactContextFields | null
+      error: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) return { suggestion: null, error: 'You are not signed in.' }
+
+      const current = normaliseContactContextFields(data.current)
+      if (!current) {
+        return {
+          suggestion: null,
+          error: 'One or more contact context fields are too long.',
+        }
+      }
+
+      try {
+        const config = await getAiPipelineConfig(session.userId)
+        if (!config.llm) {
+          return {
+            suggestion: null,
+            error:
+              'Configure an LLM provider in AI settings to use this feature.',
+          }
+        }
+
+        const { conversation } = await requireConversationByThreadId(
+          session.userId,
+          data.providerThreadId,
+        )
+        const owners = new Set(
+          (await listAccounts(session.userId)).map((account) =>
+            account.email.trim().toLowerCase(),
+          ),
+        )
+        const correspondent = [...conversation.messages]
+          .reverse()
+          .find(
+            (message) => !owners.has(message.from.email.trim().toLowerCase()),
+          )
+        if (!correspondent) {
+          return {
+            suggestion: null,
+            error: 'This conversation has no external correspondent.',
+          }
+        }
+
+        // Use only this authenticated thread plus the user's current profile draft.
+        // The model proposes fields; this action never writes them to the database.
+        const source: ContactContextSource = {
+          subject: conversation.subject,
+          current,
+          messages: conversation.messages.map((message) => ({
+            sender: message.from.name ?? message.from.email,
+            sentAt: message.sentAt.toISOString(),
+            body: message.body,
+          })),
+        }
+        const suggestion = await suggestContactContext(config.llm, source)
+        return { suggestion, error: null }
+      } catch (error) {
+        return {
+          suggestion: null,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not generate contact context.',
+        }
+      }
+    },
+  )
+
 const fetchConversation = createServerFn({ method: 'GET' })
-  .inputValidator((data: { gmailThreadId: string }) => data)
+  .inputValidator((data: { providerThreadId: string }) => data)
   .handler(
     async ({
       data,
     }): Promise<
-      | { found: false }
+      | { found: false; signedOut: boolean }
       | {
           found: true
           detail: NonNullable<Awaited<ReturnType<typeof loadConversation>>>
         }
     > => {
       const session = await getSession()
-      if (!session) return { found: false }
+      // Told apart from "no such conversation": one is a redirect, the other a
+      // not-found page.
+      if (!session) return { found: false, signedOut: true }
 
-      const detail = await loadConversation(data.gmailThreadId)
-      if (!detail) return { found: false }
+      const detail = await loadConversation(
+        session.userId,
+        data.providerThreadId,
+      )
+      if (!detail) return { found: false, signedOut: false }
 
       return { found: true, detail }
     },
@@ -183,7 +395,7 @@ const fetchConversation = createServerFn({ method: 'GET' })
 const saveConversationDetailsAction = createServerFn({ method: 'POST' })
   .inputValidator(
     (data: {
-      gmailThreadId: string
+      providerThreadId: string
       topic: string | null
       goal: string | null
     }) => data,
@@ -200,9 +412,10 @@ const saveConversationDetailsAction = createServerFn({ method: 'POST' })
 
     try {
       const { accountId, conversation } = await requireConversationByThreadId(
-        data.gmailThreadId,
+        session.userId,
+        data.providerThreadId,
       )
-      await setConversationDetails(accountId, conversation.gmailThreadId, {
+      await setConversationDetails(accountId, conversation.providerThreadId, {
         topic: topic.value,
         goal: goal.value,
       })
@@ -245,7 +458,7 @@ function normaliseEditableField(
 const sendReplyAction = createServerFn({ method: 'POST' })
   .inputValidator(
     (data: {
-      gmailThreadId: string
+      providerThreadId: string
       body: string
       attachments: ReplyAttachmentUpload[]
       /** Which of the user's addresses to send from; validated below. */
@@ -259,11 +472,14 @@ const sendReplyAction = createServerFn({ method: 'POST' })
 
     try {
       const { accountId: ownerAccountId, conversation } =
-        await requireConversationByThreadId(data.gmailThreadId)
+        await requireConversationByThreadId(
+          session.userId,
+          data.providerThreadId,
+        )
 
       // Never trust the client's choice of sender: recompute the addresses that
       // are actually on this thread and fall back to the owning mailbox.
-      const accounts = (await listAccounts()).map((account) => ({
+      const accounts = (await listAccounts(session.userId)).map((account) => ({
         id: account.id,
         email: account.email,
       }))
@@ -275,18 +491,13 @@ const sendReplyAction = createServerFn({ method: 'POST' })
           ? data.fromAccountId
           : ownerAccountId
 
-      const envelope = await getAccountEnvelope(accountId)
-      if (!envelope) {
+      const client = await createMailboxClientFor(accountId)
+      if (!client) {
         return {
-          error: 'No Google account is connected.',
+          error: 'No mailbox is connected.',
           authRequired: true,
         }
       }
-
-      const client = createGmailApiClient(
-        await createGmailClient(envelope),
-        accountId,
-      )
 
       const profileContext = await getParsingProfileContext(accountId)
       const incoming = [...conversation.messages]
@@ -318,7 +529,7 @@ const sendReplyAction = createServerFn({ method: 'POST' })
       // Sending does not touch our database, and the sync cursor has already
       // moved past this thread. Re-fetching is what makes the sent reply appear
       // immediately instead of whenever the next sync happens to run.
-      await refreshThread(client, accountId, data.gmailThreadId)
+      await refreshThread(client, accountId, data.providerThreadId)
 
       return { error: null, authRequired: false }
     } catch (error) {
@@ -336,19 +547,21 @@ const sendReplyAction = createServerFn({ method: 'POST' })
  * is no auth failure to report.
  */
 const reanalyseAction = createServerFn({ method: 'POST' })
-  .inputValidator((data: { gmailThreadId: string }) => data)
+  .inputValidator((data: { providerThreadId: string }) => data)
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
 
     try {
-      await reanalyseConversation(data.gmailThreadId)
+      await reanalyseConversation(session.userId, data.providerThreadId)
       return { error: null }
     } catch (error) {
       console.error('[reanalyse] failed:', error)
       return {
-        error: describeActionFailure(error, 'Could not re-analyse this conversation.')
-          .error,
+        error: describeActionFailure(
+          error,
+          'Could not re-analyse this conversation.',
+        ).error,
       }
     }
   })
@@ -362,7 +575,8 @@ const reanalyseAction = createServerFn({ method: 'POST' })
  */
 const setStateOverrideAction = createServerFn({ method: 'POST' })
   .inputValidator(
-    (data: { gmailThreadId: string; state: ConversationState | null }) => data,
+    (data: { providerThreadId: string; state: ConversationState | null }) =>
+      data,
   )
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
@@ -373,7 +587,11 @@ const setStateOverrideAction = createServerFn({ method: 'POST' })
     }
 
     try {
-      await applyUserStateOverride(data.gmailThreadId, data.state)
+      await applyUserStateOverride(
+        session.userId,
+        data.providerThreadId,
+        data.state,
+      )
       return { error: null }
     } catch (error) {
       console.error('[state] override failed:', error)
@@ -395,7 +613,7 @@ const setStateOverrideAction = createServerFn({ method: 'POST' })
  * there is no auth failure to report.
  */
 const setDoneAction = createServerFn({ method: 'POST' })
-  .validator((data: { gmailThreadId: string; done: boolean }) => data)
+  .validator((data: { providerThreadId: string; done: boolean }) => data)
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
@@ -405,7 +623,11 @@ const setDoneAction = createServerFn({ method: 'POST' })
     }
 
     try {
-      await setConversationDone(data.gmailThreadId, data.done)
+      await setConversationDone(
+        session.userId,
+        data.providerThreadId,
+        data.done,
+      )
       return { error: null }
     } catch (error) {
       console.error('[done] marking the thread failed:', error)
@@ -428,18 +650,23 @@ const setDoneAction = createServerFn({ method: 'POST' })
  * not a second place it is managed.
  */
 const markSenderUnreplyableAction = createServerFn({ method: 'POST' })
-  .validator((data: { gmailThreadId: string }) => data)
+  .validator((data: { providerThreadId: string }) => data)
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
 
     try {
-      return await markThreadSenderUnreplyable(data.gmailThreadId)
+      return await markThreadSenderUnreplyable(
+        session.userId,
+        data.providerThreadId,
+      )
     } catch (error) {
       console.error('[replyability] marking the sender failed:', error)
       return {
         error:
-          error instanceof Error ? error.message : 'Could not mark this sender.',
+          error instanceof Error
+            ? error.message
+            : 'Could not mark this sender.',
       }
     }
   })
@@ -454,7 +681,7 @@ const markSenderUnreplyableAction = createServerFn({ method: 'POST' })
  */
 const draftReplyAction = createServerFn({ method: 'POST' })
   .validator(
-    (data: { gmailThreadId: string; instructions: string | null }) => data,
+    (data: { providerThreadId: string; instructions: string | null }) => data,
   )
   .handler(async ({ data }): Promise<ReplyDraftOutcome> => {
     const session = await getSession()
@@ -473,7 +700,11 @@ const draftReplyAction = createServerFn({ method: 'POST' })
       }
     }
 
-    return await draftReply(data.gmailThreadId, data.instructions)
+    return await draftReply(
+      session.userId,
+      data.providerThreadId,
+      data.instructions,
+    )
   })
 
 /**
@@ -485,13 +716,17 @@ const draftReplyAction = createServerFn({ method: 'POST' })
  * costs the unread dot and nothing else, so it is not surfaced to the user.
  */
 const markSeenAction = createServerFn({ method: 'POST' })
-  .validator((data: { gmailThreadId: string; seenThrough: string }) => data)
+  .validator((data: { providerThreadId: string; seenThrough: string }) => data)
   .handler(async ({ data }): Promise<{ error: string | null }> => {
     const session = await getSession()
     if (!session) return { error: 'You are not signed in.' }
 
     try {
-      await markConversationSeen(data.gmailThreadId, data.seenThrough)
+      await markConversationSeen(
+        session.userId,
+        data.providerThreadId,
+        data.seenThrough,
+      )
       return { error: null }
     } catch (error) {
       console.error('[seen] marking the thread read failed:', error)
@@ -499,9 +734,18 @@ const markSeenAction = createServerFn({ method: 'POST' })
     }
   })
 
-export const Route = createFileRoute('/conversations/$gmailThreadId')({
-  loader: ({ params }) =>
-    fetchConversation({ data: { gmailThreadId: params.gmailThreadId } }),
+export const Route = createFileRoute('/conversations/$providerThreadId')({
+  loader: async ({ params }) => {
+    const result = await fetchConversation({
+      data: { providerThreadId: params.providerThreadId },
+    })
+
+    // A missing session is a redirect; a missing conversation is the not-found
+    // page below, and the two must not be confused.
+    if (!result.found && result.signedOut) throw redirect({ to: '/sign-in' })
+
+    return result
+  },
   notFoundComponent: ConversationMissing,
   component: ConversationRoute,
 })
@@ -530,7 +774,7 @@ function ConversationRoute() {
   // divider the view is drawing comes from the loader's `seenAt`, and re-running
   // the loader the instant the mark lands would erase it as it appeared. The next
   // load of this thread is the one that shows it as read.
-  const openedThreadId = result.found ? result.detail.gmailThreadId : null
+  const openedThreadId = result.found ? result.detail.providerThreadId : null
   const seenThrough = result.found
     ? (result.detail.messages.at(-1)?.sentAt ?? null)
     : null
@@ -538,7 +782,7 @@ function ConversationRoute() {
   useEffect(() => {
     if (!openedThreadId || !seenThrough) return
     void markSeenAction({
-      data: { gmailThreadId: openedThreadId, seenThrough },
+      data: { providerThreadId: openedThreadId, seenThrough },
     })
   }, [openedThreadId, seenThrough])
 
@@ -554,7 +798,7 @@ function ConversationRoute() {
       onSaveParsingProfile={async (profile, defaults) => {
         const saved = await saveParsingProfileAction({
           data: {
-            gmailThreadId: detail.gmailThreadId,
+            providerThreadId: detail.providerThreadId,
             profile,
             defaultReplyGreeting: defaults.greeting,
             defaultReplySignature: defaults.signature,
@@ -566,10 +810,22 @@ function ConversationRoute() {
         if (!saved.error) await router.invalidate()
         return saved
       }}
+      onSaveContactContext={async (context) => {
+        const saved = await saveContactContextAction({
+          data: { providerThreadId: detail.providerThreadId, context },
+        })
+        if (!saved.error) await router.invalidate()
+        return saved
+      }}
+      onSuggestContactContext={async (current) =>
+        suggestContactContextAction({
+          data: { providerThreadId: detail.providerThreadId, current },
+        })
+      }
       onSaveDetails={async (topic: string | null, goal: string | null) => {
         const saved = await saveConversationDetailsAction({
           data: {
-            gmailThreadId: detail.gmailThreadId,
+            providerThreadId: detail.providerThreadId,
             topic,
             goal,
           },
@@ -578,34 +834,34 @@ function ConversationRoute() {
         return saved
       }}
       onReanalyse={async () => {
-        const result = await reanalyseAction({
-          data: { gmailThreadId: detail.gmailThreadId },
+        const reanalysis = await reanalyseAction({
+          data: { providerThreadId: detail.providerThreadId },
         })
-        if (!result.error) await router.invalidate()
-        return result
+        if (!reanalysis.error) await router.invalidate()
+        return reanalysis
       }}
       onSetStateOverride={async (state) => {
         const saved = await setStateOverrideAction({
-          data: { gmailThreadId: detail.gmailThreadId, state },
+          data: { providerThreadId: detail.providerThreadId, state },
         })
         if (!saved.error) await router.invalidate()
         return saved
       }}
       onDraft={async (instructions: string | null) =>
         draftReplyAction({
-          data: { gmailThreadId: detail.gmailThreadId, instructions },
+          data: { providerThreadId: detail.providerThreadId, instructions },
         })
       }
       onMarkSenderUnreplyable={async () => {
         const marked = await markSenderUnreplyableAction({
-          data: { gmailThreadId: detail.gmailThreadId },
+          data: { providerThreadId: detail.providerThreadId },
         })
         if (!marked.error) await router.invalidate()
         return marked
       }}
       onSetDone={async (done) => {
         const saved = await setDoneAction({
-          data: { gmailThreadId: detail.gmailThreadId, done },
+          data: { providerThreadId: detail.providerThreadId, done },
         })
         if (!saved.error) await router.invalidate()
         return saved
@@ -617,7 +873,7 @@ function ConversationRoute() {
       ) => {
         const sent = await sendReplyAction({
           data: {
-            gmailThreadId: detail.gmailThreadId,
+            providerThreadId: detail.providerThreadId,
             body,
             attachments,
             fromAccountId,

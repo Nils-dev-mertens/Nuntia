@@ -1,27 +1,23 @@
 import { describe, expect, test } from 'bun:test'
 
-import { GmailAuthError, GmailRateLimitError } from './client.ts'
-import { describeActionFailure, needsGoogleLogin } from './service.ts'
+import { GmailAuthError, GmailRateLimitError } from '#/lib/gmail/client.ts'
+import { describeActionFailure, needsReconnect } from '#/lib/gmail/service.ts'
 
-describe('needsGoogleLogin', () => {
+describe('needsReconnect', () => {
   test('is true for a revoked or rejected grant', () => {
-    expect(needsGoogleLogin(new GmailAuthError('revoked'))).toBe(true)
+    expect(needsReconnect(new GmailAuthError('revoked'))).toBe(true)
   })
 
   test('is true when the stored token can no longer be decrypted', () => {
     expect(
-      needsGoogleLogin(
-        new Error('Stored refresh token could not be decrypted'),
-      ),
+      needsReconnect(new Error('Stored refresh token could not be decrypted')),
     ).toBe(true)
   })
 
   test('is false for failures that a retry can fix', () => {
-    expect(needsGoogleLogin(new GmailRateLimitError('slow down'))).toBe(false)
-    expect(needsGoogleLogin(new Error('Gmail request failed (503)'))).toBe(
-      false,
-    )
-    expect(needsGoogleLogin(undefined)).toBe(false)
+    expect(needsReconnect(new GmailRateLimitError('slow down'))).toBe(false)
+    expect(needsReconnect(new Error('Gmail request failed (503)'))).toBe(false)
+    expect(needsReconnect(undefined)).toBe(false)
   })
 })
 

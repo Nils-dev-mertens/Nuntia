@@ -1,12 +1,13 @@
 /**
- * OAuth callback.
+ * Google connect callback.
  *
- * Verifies CSRF state, exchanges the code for tokens, encrypts the refresh
- * token before it reaches the database, and sets a session cookie that holds
- * only the account id.
+ * Verifies CSRF state, exchanges the code for tokens, encrypts the refresh token
+ * before it reaches the database, and attaches the mailbox to the *signed-in
+ * user*. Connecting a mailbox is not signing in: the session already exists, and
+ * this only adds a mailbox to whoever owns it.
  *
- * Every failure path lands on the sign-in page with a reason rather than a blank
- * screen — an OAuth failure with no explanation is miserable to debug.
+ * Every failure path answers with a reason rather than a blank screen — an OAuth
+ * failure with no explanation is miserable to debug.
  */
 
 import { createFileRoute } from '@tanstack/react-router'
@@ -15,9 +16,9 @@ import { getCookie, deleteCookie } from '@tanstack/react-start/server'
 import {
   exchangeCode,
   fetchProfile,
+  getSession,
   readState,
   readVerifier,
-  setSession,
   upsertAccount,
 } from '#/lib/auth/index.ts'
 
@@ -45,10 +46,7 @@ export const Route = createFileRoute('/auth/google/callback')({
 
         // The user declined, or Google refused.
         if (error) {
-          return fail(
-            url.searchParams.get('error_description') ?? error,
-            400,
-          )
+          return fail(url.searchParams.get('error_description') ?? error, 400)
         }
 
         const code = url.searchParams.get('code')
@@ -67,6 +65,15 @@ export const Route = createFileRoute('/auth/google/callback')({
           return fail('Sign-in session expired. Please try again.', 400)
         }
 
+        // The mailbox belongs to whoever is signed in. Checked here rather than
+        // before the redirect because the session cookie is what the callback
+        // actually writes against, and it is the only place that knows the
+        // connection completed.
+        const session = await getSession()
+        if (!session) {
+          return fail('Sign in to Lumen before connecting a mailbox.', 401)
+        }
+
         try {
           const tokens = await exchangeCode(code, verifier)
 
@@ -79,12 +86,13 @@ export const Route = createFileRoute('/auth/google/callback')({
           // Encryption happens inside upsertAccount — the plaintext token does
           // not reach the database.
           await upsertAccount({
+            userId: session.userId,
             email: profile.email,
+            provider: 'google',
             refreshToken: tokens.refreshToken,
             scopes: tokens.scopes,
           })
 
-          await setSession(profile.email)
           clearOAuthCookies()
 
           // Plain Response for the same reason as the login route: keeps the

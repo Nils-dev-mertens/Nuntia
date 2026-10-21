@@ -11,7 +11,7 @@
  */
 
 import { createServerFn } from '@tanstack/react-start'
-import { createFileRoute, useRouter } from '@tanstack/react-router'
+import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
 import { useEffect } from 'react'
 
 import { Inbox } from '#/components/inbox'
@@ -40,9 +40,9 @@ const fetchInbox = createServerFn({ method: 'GET' }).handler(async () => {
 
   if (!session) return { signedIn: false } as const
 
-  // Accounts are global to the install, so the loader does not name one: every
-  // connected mailbox is read and merged into a single list.
-  return loadInbox()
+  // Scoped to the signed-in user: every mailbox they own is read and merged into
+  // one list, and no other account's mail is reachable from here.
+  return loadInbox(session.userId)
 })
 
 /**
@@ -59,7 +59,10 @@ const resyncInbox = createServerFn({ method: 'POST' }).handler(
     if (!session) return { error: 'You are not signed in.' }
 
     try {
-      const payload = await loadInbox({ force: true, full: true })
+      const payload = await loadInbox(session.userId, {
+        force: true,
+        full: true,
+      })
       if (!payload.signedIn) return { error: 'No mailbox is connected.' }
       // A failed sync does not throw — it is reported on the payload.
       return { error: payload.syncError }
@@ -73,7 +76,13 @@ const resyncInbox = createServerFn({ method: 'POST' }).handler(
 )
 
 export const Route = createFileRoute('/')({
-  loader: () => fetchInbox(),
+  // Signed out is a redirect rather than a branch the inbox renders: without a
+  // user there is nobody whose mail this page could possibly show.
+  loader: async () => {
+    const payload = await fetchInbox()
+    if (!payload.signedIn) throw redirect({ to: '/sign-in' })
+    return payload
+  },
   component: Home,
 })
 
@@ -82,8 +91,9 @@ function Home() {
   const router = useRouter()
 
   // A boolean rather than the list itself: the effect below should restart when
-  // a sync starts or ends, not on every progress tick within one.
-  const syncing = payload.signedIn && payload.syncing.length > 0
+  // a sync starts or ends, not on every progress tick within one. Signed out is
+  // not a case here — the loader redirects it to the sign-in page.
+  const syncing = payload.syncing.length > 0
 
   useEffect(() => {
     // Invalidate re-runs the loader, which re-runs the server function, which

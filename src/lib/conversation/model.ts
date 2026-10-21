@@ -39,7 +39,7 @@ export type ParsingPreferences = {
 
 export type ConversationMessage = {
   /** Stable id: the Gmail message id. */
-  gmailMessageId: string
+  providerMessageId: string
   /**
    * The RFC 5322 `Message-ID`, when the source had one.
    *
@@ -75,9 +75,11 @@ export type ConversationMessage = {
 }
 
 export type ConversationAttachment = {
-  gmailMessageId: string
+  /** Provider thread containing this mailbox-scoped attachment reference. */
+  providerThreadId?: string
+  providerMessageId: string
   messageId: string | null
-  gmailAttachmentId: string
+  providerAttachmentId: string
   filename: string
   mimeType: string
   sizeBytes: number
@@ -253,7 +255,7 @@ export function resolveReplyStyle(input: {
 export type Conversation = {
   /** Derived, stable key. */
   id: string
-  gmailThreadId: string
+  providerThreadId: string
   subject: string
   participants: Participant[]
   messages: ConversationMessage[]
@@ -328,8 +330,8 @@ export type DoneMark = { doneAt: Date; messageAt: Date }
 
 /** Attachment metadata, when the source can supply it. */
 export type AttachmentRef = {
-  gmailMessageId: string
-  gmailAttachmentId: string
+  providerMessageId: string
+  providerAttachmentId: string
   filename: string
   mimeType: string
   sizeBytes: number
@@ -342,7 +344,7 @@ export type BuildContext = {
   /** The account owner's own email address. */
   ownerEmail: string
   /** Gmail thread id. */
-  gmailThreadId: string
+  providerThreadId: string
   /**
    * Optional attachment metadata.
    *
@@ -443,7 +445,10 @@ export function cleanMessage(
     // user's own reply.
     const visible = stripCidPlaceholders(text)
     const detectedQuote = stripQuotedText(visible)
-    const lines = visible.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+    const lines = visible
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .split('\n')
     const quoteStart = findQuoteStart(lines)
     // `stripQuotedText` deliberately keeps all-quote forwards intact. Only
     // split the message when stripping actually found a quote to remove.
@@ -514,7 +519,7 @@ export function cleanMessage(
     normaliseEmail(message.from) === normaliseEmail(ownerEmail)
 
   return {
-    gmailMessageId:
+    providerMessageId:
       message.messageId ?? `synthetic:${message.date?.getTime() ?? 0}`,
     internetMessageId: message.messageId ?? null,
     from: {
@@ -661,7 +666,7 @@ export function buildConversation(
         parsingPreferences: preferences,
       }
     })
-    .filter((m) => m.body.trim().length > 0 || m.gmailMessageId)
+    .filter((m) => m.body.trim().length > 0 || m.providerMessageId)
 
   // `.at(-1)` rather than `[length - 1]`: the index form is typed `T` without
   // `noUncheckedIndexedAccess`, which hides the real empty-thread case.
@@ -688,8 +693,8 @@ export function buildConversation(
   const isAutomated = isAutomatedThread(cleaned, context.ownerEmail)
 
   return {
-    id: conversationId(context.ownerEmail, context.gmailThreadId),
-    gmailThreadId: context.gmailThreadId,
+    id: conversationId(context.ownerEmail, context.providerThreadId),
+    providerThreadId: context.providerThreadId,
     subject,
     participants,
     messages: cleaned,
@@ -738,17 +743,17 @@ export function strippedReplyPrefix(subject: string): string {
 /** Deterministic conversation id from owner + thread. */
 export function conversationId(
   ownerEmail: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): string {
-  return `${normaliseEmail(ownerEmail)}:${gmailThreadId}`
+  return `${normaliseEmail(ownerEmail)}:${providerThreadId}`
 }
 
 /** Map adapter-supplied attachment metadata into the domain shape. */
 function toConversationAttachment(ref: AttachmentRef): ConversationAttachment {
   return {
-    gmailMessageId: ref.gmailMessageId,
-    messageId: ref.gmailMessageId,
-    gmailAttachmentId: ref.gmailAttachmentId,
+    providerMessageId: ref.providerMessageId,
+    messageId: ref.providerMessageId,
+    providerAttachmentId: ref.providerAttachmentId,
     filename: ref.filename,
     mimeType: ref.mimeType,
     sizeBytes: ref.sizeBytes,
@@ -769,9 +774,9 @@ function collectAttachments(
 
     for (const part of selectAttachments(message)) {
       out.push({
-        gmailMessageId: messageId,
+        providerMessageId: messageId,
         messageId,
-        gmailAttachmentId: attachmentId(messageId, part),
+        providerAttachmentId: attachmentId(messageId, part),
         filename: part.filename ?? 'attachment',
         mimeType: part.contentType,
         isInline: part.disposition === 'inline',

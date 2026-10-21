@@ -2,10 +2,13 @@ import { sql } from 'drizzle-orm'
 import {
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core'
+
+import type { Provider } from '#/lib/mailbox/types.ts'
 
 /**
  * Conversation state. The four MVP states from the spec.
@@ -34,19 +37,92 @@ export const INTENTS = [
 
 export type Intent = (typeof INTENTS)[number]
 
-/** A single connected Gmail account. MVP assumes one, but the schema allows many. */
+/**
+ * A person who signs in to this install.
+ *
+ * `id` is the lowercased email address, the same convention accounts use: it is
+ * stable, already unique, and makes a session payload readable in a log without
+ * a second lookup. Passwords are argon2id hashes (via `hash-wasm`); there is
+ * no password reset yet, so losing it means an owner has to re-create the user.
+ */
+export const users = sqliteTable(
+  'users',
+  {
+    id: text('id').primaryKey(),
+    email: text('email').notNull(),
+    name: text('name'),
+    /** argon2id hash. Never the password, and never logged. */
+    passwordHash: text('password_hash').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [uniqueIndex('users_email_idx').on(table.email)],
+)
+
+/**
+ * A signed-in device.
+ *
+ * The cookie carries `<session id>.<random token>`; only the SHA-256 of the
+ * token is stored. That is what makes sign-out meaningful: deleting the row
+ * revokes that device immediately, which a self-contained signed cookie cannot
+ * do. Several rows per user is the normal case — a laptop and a phone.
+ */
+export const sessions = sqliteTable(
+  'sessions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** SHA-256 hex of the random token; the token itself is never stored. */
+    tokenHash: text('token_hash').notNull(),
+    /** Free-text hint, when a client sends one. Never used for authorisation. */
+    userAgent: text('user_agent'),
+    lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }).notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+    revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('sessions_user_idx').on(table.userId),
+    index('sessions_expires_idx').on(table.expiresAt),
+  ],
+)
+
+/** A single connected mailbox. More than one is supported; they are merged. */
 export const accounts = sqliteTable(
   'accounts',
   {
     id: text('id').primaryKey(),
     email: text('email').notNull(),
+    /**
+     * The person who connected this mailbox.
+     *
+     * Null only for rows written before user accounts existed, or by tests that
+     * do not need one. Production always resolves accounts through a session, so
+     * a null owner is unreachable rather than shared.
+     */
+    userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    /**
+     * Which provider the stored token and thread ids belong to.
+     *
+     * `google` is the default so every existing row keeps working after the
+     * migration — the column was added in the same release as the seam, and an
+     * un-marked account can only have been a Gmail one.
+     */
+    provider: text('provider').$type<Provider>().notNull().default('google'),
     /** AES-256-GCM ciphertext of the OAuth refresh token. Never store plaintext. */
     refreshTokenEncrypted: text('refresh_token_encrypted').notNull(),
     accessTokenExpiresAt: integer('access_token_expires_at', {
       mode: 'timestamp_ms',
     }),
     scopes: text('scopes'),
-    historyId: text('history_id'),
     /** Account-wide reply-style defaults; sender profiles may override them. */
     defaultReplyGreeting: text('default_reply_greeting'),
     defaultReplySignature: text('default_reply_signature'),
@@ -67,6 +143,15 @@ export const accounts = sqliteTable(
       .default(true),
 
     /**
+     * When the provider's push notification registration expires.
+     *
+     * Gmail's `users.watch` expires after at most seven days and must be renewed;
+     * null means "never registered". Only Gmail fills this in today — Graph
+     * subscriptions need their own renewal and are not implemented.
+     */
+    pushExpiresAt: integer('push_expires_at', { mode: 'timestamp_ms' }),
+
+    /**
      * Which revision of the derived fields this account's conversations reflect.
      *
      * Incremental sync only revisits threads Gmail reports as changed, so a
@@ -84,7 +169,10 @@ export const accounts = sqliteTable(
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
   },
-  (table) => [uniqueIndex('accounts_email_idx').on(table.email)],
+  (table) => [
+    uniqueIndex('accounts_email_idx').on(table.email),
+    index('accounts_user_idx').on(table.userId),
+  ],
 )
 
 /**
@@ -100,7 +188,7 @@ export const conversations = sqliteTable(
     accountId: text('account_id')
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    gmailThreadId: text('gmail_thread_id').notNull(),
+    providerThreadId: text('provider_thread_id').notNull(),
     subject: text('subject').notNull(),
     /** Normalized participants, JSON array of {name, email}. */
     participants: text('participants', { mode: 'json' })
@@ -229,7 +317,7 @@ export const conversations = sqliteTable(
   (table) => [
     uniqueIndex('conversations_account_thread_idx').on(
       table.accountId,
-      table.gmailThreadId,
+      table.providerThreadId,
     ),
     index('conversations_state_idx').on(table.accountId, table.state),
     index('conversations_last_message_idx').on(table.lastMessageAt),
@@ -248,7 +336,7 @@ export const messages = sqliteTable(
     conversationId: text('conversation_id')
       .notNull()
       .references(() => conversations.id, { onDelete: 'cascade' }),
-    gmailMessageId: text('gmail_message_id').notNull(),
+    providerMessageId: text('provider_message_id').notNull(),
     internetMessageId: text('internet_message_id'),
     from: text('from', { mode: 'json' }).$type<Participant>().notNull(),
     to: text('to', { mode: 'json' }).$type<Participant[]>().notNull(),
@@ -284,9 +372,9 @@ export const messages = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [
-    uniqueIndex('messages_conversation_gmail_idx').on(
+    uniqueIndex('messages_conversation_provider_idx').on(
       table.conversationId,
-      table.gmailMessageId,
+      table.providerMessageId,
     ),
     index('messages_conversation_sent_idx').on(
       table.conversationId,
@@ -306,7 +394,7 @@ export const attachments = sqliteTable(
     messageId: text('message_id')
       .notNull()
       .references(() => messages.id, { onDelete: 'cascade' }),
-    gmailAttachmentId: text('gmail_attachment_id').notNull(),
+    providerAttachmentId: text('provider_attachment_id').notNull(),
     filename: text('filename').notNull(),
     mimeType: text('mime_type').notNull(),
     /** Byte size as reported by Gmail. */
@@ -323,9 +411,9 @@ export const attachments = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [
-    uniqueIndex('attachments_message_gmail_idx').on(
+    uniqueIndex('attachments_message_provider_idx').on(
       table.messageId,
-      table.gmailAttachmentId,
+      table.providerAttachmentId,
     ),
     index('attachments_conversation_idx').on(table.conversationId),
   ],
@@ -453,7 +541,9 @@ export const senderProfiles = sqliteTable(
      * reply" tag on every thread from the address; it deliberately leaves `state`
      * alone — the user is saying they cannot answer, not that it does not matter.
      */
-    replyable: integer('replyable', { mode: 'boolean' }).notNull().default(true),
+    replyable: integer('replyable', { mode: 'boolean' })
+      .notNull()
+      .default(true),
 
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
@@ -470,19 +560,87 @@ export const senderProfiles = sqliteTable(
   ],
 )
 
-/** Gmail history.list gives us deltas; this records where each account's cursor is. */
-export const historyCursors = sqliteTable(
-  'history_cursors',
+/**
+ * Display names learned from stored mail, per mailbox.
+ *
+ * The mailbox headers are the only address book this app has: a name is worth
+ * keeping once a message has carried it, so a later thread from the same address
+ * stays a person rather than an address. Keyed by `(account, address)` because
+ * the same person can write to two of the user's mailboxes with two spellings.
+ *
+ * Names are the *latest* non-empty one seen; a message with only an address
+ * never erases a name already learned.
+ */
+export const contactContexts = sqliteTable(
+  'contact_contexts',
   {
-    accountId: text('account_id')
-      .primaryKey()
-      .references(() => accounts.id, { onDelete: 'cascade' }),
-    historyId: text('history_id').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Normalized email address; shared across this user's connected mailboxes. */
+    email: text('email').notNull(),
+    roleCompany: text('role_company'),
+    relationship: text('relationship'),
+    topics: text('topics'),
+    currentWork: text('current_work'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
   },
-  (t) => [index('history_cursors_updated_idx').on(t.updatedAt)],
+  (table) => [
+    primaryKey({ columns: [table.userId, table.email] }),
+    index('contact_contexts_email_idx').on(table.email),
+  ],
+)
+
+export const contacts = sqliteTable(
+  'contacts',
+  {
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    /** Lowercased address. */
+    email: text('email').notNull(),
+    name: text('name'),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.accountId, table.email] }),
+    index('contacts_email_idx').on(table.email),
+  ],
+)
+
+/**
+ * Where each mailbox's incremental sync left off, and when.
+ *
+ * One row per `(account, kind)` because a cursor means different things per
+ * provider: Gmail's `historyId` is an opaque counter, Microsoft's is an ISO
+ * timestamp, and a future IMAP adapter would store a UID pair. The kind keeps
+ * them apart without a column per provider.
+ *
+ * The timestamp is separate from `accounts.updatedAt` on purpose: that column is
+ * also bumped whenever the OAuth token is refreshed, so it cannot answer "when
+ * did we last sync?". The staleness check needs exactly that question.
+ */
+export const syncCursors = sqliteTable(
+  'sync_cursors',
+  {
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    /** `history` for Gmail, `received` for Microsoft Graph. */
+    kind: text('kind').notNull(),
+    value: text('value').notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (t) => [
+    primaryKey({ columns: [t.accountId, t.kind] }),
+    index('sync_cursors_updated_idx').on(t.updatedAt),
+  ],
 )
 
 /**
@@ -493,35 +651,61 @@ export const historyCursors = sqliteTable(
  * with the same key as the OAuth refresh tokens. Keeping them out of the
  * environment also means the app can be configured without a redeploy.
  */
-export const appSettings = sqliteTable('app_settings', {
-  id: text('id').primaryKey(),
-  /** AES-256-GCM ciphertext of the Jev API key. Never store plaintext. */
-  jevApiKeyEncrypted: text('jev_api_key_encrypted'),
-  jevModel: text('jev_model'),
-  /** One of `anthropic` | `openai` | `gemini`, or null when topics are off. */
-  llmProvider: text('llm_provider'),
-  llmModel: text('llm_model'),
-  /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
-  llmApiKeyEncrypted: text('llm_api_key_encrypted'),
-  /**
-   * How important a conversation has to be before a draft is offered (1–10).
-   *
-   * The spec's "importance exceeds a configured threshold", and the reason it is
-   * stored rather than hard-coded: a draft costs a paid API call per thread, and
-   * what is worth one is the user's call. Compared against the same 1–10 the
-   * decision layer scores, so the number on this row and the number on the
-   * conversation are the same unit. Default mirrors
-   * `REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT` (written out rather than imported, so
-   * the schema keeps no dependency on the conversation layer).
-   */
-  suggestReplyMinImportance: integer('suggest_reply_min_importance')
-    .notNull()
-    .default(6),
-  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
-    .notNull()
-    .default(sql`(unixepoch() * 1000)`),
-})
+export const appSettings = sqliteTable(
+  'app_settings',
+  {
+    id: text('id').primaryKey(),
+    /**
+     * The person these keys belong to.
+     *
+     * Per user, not per install: two people on one deployment must not share a
+     * paid API key or a reply threshold. Null on the row written before accounts
+     * existed, until the bootstrap user adopts it.
+     */
+    userId: text('user_id').references(() => users.id, {
+      onDelete: 'cascade',
+    }),
+    /** AES-256-GCM ciphertext of the Jev API key. Never store plaintext. */
+    jevApiKeyEncrypted: text('jev_api_key_encrypted'),
+    jevModel: text('jev_model'),
+    /** One of `anthropic` | `openai` | `gemini`, or null when topics are off. */
+    llmProvider: text('llm_provider'),
+    llmModel: text('llm_model'),
+    /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
+    llmApiKeyEncrypted: text('llm_api_key_encrypted'),
+    /**
+     * How important a conversation has to be before a draft is offered (1–10).
+     *
+     * The spec's "importance exceeds a configured threshold", and the reason it is
+     * stored rather than hard-coded: a draft costs a paid API call per thread, and
+     * what is worth one is the user's call. Compared against the same 1–10 the
+     * decision layer scores, so the number on this row and the number on the
+     * conversation are the same unit. Default mirrors
+     * `REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT` (written out rather than imported, so
+     * the schema keeps no dependency on the conversation layer).
+     */
+    suggestReplyMinImportance: integer('suggest_reply_min_importance')
+      .notNull()
+      .default(6),
+    /**
+     * Whether avatars may be fetched from Gravatar.
+     *
+     * Off by default: the request carries an MD5 of the address to gravatar.com,
+     * and a local-first mail client should not contact a third party about who
+     * writes to you without being asked. Initials are the fallback either way.
+     */
+    useGravatar: integer('use_gravatar', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [uniqueIndex('app_settings_user_idx').on(table.userId)],
+)
 
+export type User = typeof users.$inferSelect
+export type Session = typeof sessions.$inferSelect
 export type Account = typeof accounts.$inferSelect
 export type AppSettings = typeof appSettings.$inferSelect
 export type Conversation = typeof conversations.$inferSelect
@@ -529,4 +713,6 @@ export type Message = typeof messages.$inferSelect
 export type Attachment = typeof attachments.$inferSelect
 export type SenderProfile = typeof senderProfiles.$inferSelect
 export type SenderSignal = typeof senderSignals.$inferSelect
+export type Contact = typeof contacts.$inferSelect
+export type ContactContext = typeof contactContexts.$inferSelect
 export type Decision = typeof decisions.$inferSelect

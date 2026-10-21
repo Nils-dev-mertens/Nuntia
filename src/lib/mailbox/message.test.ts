@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { GmailMessage, GmailPart } from './client.ts'
-import { findAttachmentPart } from './message.ts'
+import type { ProviderMessage, ProviderPart } from '#/lib/mailbox/types.ts'
+import { findAttachmentPart } from '#/lib/mailbox/message.ts'
 
-/** One leaf part, shaped the way `toGmailPart` leaves a real attachment. */
+/** One leaf part, shaped the way `toProviderPart` leaves a real attachment. */
 function attachmentPart(args: {
   partId: string
   filename: string | null
@@ -11,7 +11,7 @@ function attachmentPart(args: {
   attachmentId: string
   size: number
   contentId?: string
-}): GmailPart {
+}): ProviderPart {
   return {
     partId: args.partId,
     mimeType: args.mimeType,
@@ -26,7 +26,7 @@ function attachmentPart(args: {
 }
 
 /** A message carrying the given attachment parts. */
-function message(id: string, parts: GmailPart[]): GmailMessage {
+function message(id: string, parts: ProviderPart[]): ProviderMessage {
   return {
     id,
     threadId: 't1',
@@ -67,7 +67,7 @@ describe('findAttachmentPart', () => {
 
     const found = findAttachmentPart(messages, {
       ...PHOTO,
-      gmailAttachmentId: 'current-id',
+      providerAttachmentId: 'current-id',
     })
 
     expect(found?.messageId).toBe('m1')
@@ -92,7 +92,7 @@ describe('findAttachmentPart', () => {
 
     const found = findAttachmentPart(messages, {
       ...PHOTO,
-      gmailAttachmentId: 'stale-id-from-yesterday',
+      providerAttachmentId: 'stale-id-from-yesterday',
     })
 
     expect(found?.ref.attachmentId).toBe('fresh-id')
@@ -123,7 +123,7 @@ describe('findAttachmentPart', () => {
     ]
 
     const found = findAttachmentPart(messages, {
-      gmailAttachmentId: 'stale',
+      providerAttachmentId: 'stale',
       filename: 'inline',
       mimeType: 'image/png',
       sizeBytes: 100,
@@ -155,7 +155,7 @@ describe('findAttachmentPart', () => {
     ]
 
     const found = findAttachmentPart(messages, {
-      gmailAttachmentId: 'stale',
+      providerAttachmentId: 'stale',
       filename: 'report.pdf',
       mimeType: 'application/pdf',
       sizeBytes: 8192,
@@ -182,7 +182,7 @@ describe('findAttachmentPart', () => {
 
     const found = findAttachmentPart(messages, {
       ...PHOTO,
-      gmailAttachmentId: 'stale',
+      providerAttachmentId: 'stale',
     })
 
     expect(found?.messageId).toBe('m2')
@@ -202,7 +202,7 @@ describe('findAttachmentPart', () => {
     ]
 
     expect(
-      findAttachmentPart(messages, { ...PHOTO, gmailAttachmentId: 'stale' }),
+      findAttachmentPart(messages, { ...PHOTO, providerAttachmentId: 'stale' }),
     ).toBeNull()
   })
 })

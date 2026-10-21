@@ -10,13 +10,13 @@
  * The Gmail API client is injected, so all of this is testable without network.
  */
 
-import type { GmailClient, GmailMessage, GmailThread } from './client.ts'
+import type { MailboxClient, ProviderMessage, ProviderThread } from './types.ts'
 import {
   isDraft,
   isTrashed,
   toParsedMessage,
   toThreadAttachmentRefs,
-} from './message.ts'
+} from '#/lib/mailbox/message.ts'
 import {
   applyDecision,
   buildConversation,
@@ -36,7 +36,8 @@ import type {
   DecisionPipeline,
   ParsingProfileContext,
 } from '#/lib/conversation/index.ts'
-import { setHistoryId } from '#/lib/auth/accounts.ts'
+import { setCursor } from '#/lib/auth/accounts.ts'
+import { cursorKindFor } from './types.ts'
 import { loadDecisionPipeline } from '#/lib/ai/index.ts'
 
 /** Progress callback, so a long backfill can report what it is doing. */
@@ -87,6 +88,13 @@ async function loadSenderFacts(accountId: string): Promise<SenderFacts> {
 }
 
 export type SyncOptions = {
+  /**
+   * The person who owns this mailbox.
+   *
+   * Required, because the decision pipeline is per user: syncing a mailbox has
+   * to build it from its owner's AI settings and nobody else's.
+   */
+  userId: string
   /** Cursor for incremental sync. Absent triggers a backfill. */
   startHistoryId?: string | null
   /** Threads per page. */
@@ -138,7 +146,7 @@ async function mapWithConcurrency<T, TResult>(
 }
 
 /** Messages worth turning into conversation bubbles. */
-function relevantMessages(messages: GmailMessage[]): GmailMessage[] {
+function relevantMessages(messages: ProviderMessage[]): ProviderMessage[] {
   return messages.filter((m) => !isDraft(m) && !isTrashed(m))
 }
 
@@ -170,6 +178,8 @@ export async function decideAndSave(
   accountId: string,
   conversation: Conversation,
   opts: {
+    /** Whose AI settings the decision is made with. */
+    userId: string
     /**
      * Reused across a batch. Omitted means "read the settings now", which is
      * what the single-thread callers want; a batch must not decrypt and rebuild
@@ -184,7 +194,7 @@ export async function decideAndSave(
      * them down rather than asking the same questions per thread.
      */
     senderFacts?: SenderFacts
-  } = {},
+  },
 ): Promise<{ decision: Decision; conversation: Conversation }> {
   // A thread rebuilt from Gmail carries no memory of the user's own calls — that
   // lives on the stored row — so it is read back and put on before the decision
@@ -198,7 +208,7 @@ export async function decideAndSave(
   // rebuild cannot carry one and silently reset another.
   const storedUserFields = await getStoredUserFields(
     accountId,
-    conversation.gmailThreadId,
+    conversation.providerThreadId,
   )
   const withCall: Conversation = { ...conversation, ...storedUserFields }
 
@@ -218,7 +228,7 @@ export async function decideAndSave(
       // stored preference rather than infer.
       unreplyableSender: senderFacts.unreplyable.has(otherParty),
     },
-    opts.pipeline ?? (await loadDecisionPipeline()),
+    opts.pipeline ?? (await loadDecisionPipeline(opts.userId)),
   )
   const updated = applyDecision(withCall, decision)
 
@@ -247,23 +257,28 @@ export async function decideAndSave(
  */
 export async function redecideStoredConversations(
   accountId: string,
+  userId: string,
 ): Promise<number> {
   const conversations = await listConversations(accountId, {
     includeArchived: true,
   })
   if (conversations.length === 0) return 0
 
-  const pipeline = await loadDecisionPipeline()
+  const pipeline = await loadDecisionPipeline(userId)
   const senderFacts = await loadSenderFacts(accountId)
 
   let redecided = 0
   for (const conversation of conversations) {
     try {
-      await decideAndSave(accountId, conversation, { pipeline, senderFacts })
+      await decideAndSave(accountId, conversation, {
+        userId,
+        pipeline,
+        senderFacts,
+      })
       redecided++
     } catch (error) {
       console.error(
-        `[derived] could not re-decide ${conversation.gmailThreadId}:`,
+        `[derived] could not re-decide ${conversation.providerThreadId}:`,
         reasonOf(error),
       )
     }
@@ -280,16 +295,21 @@ export async function redecideStoredConversations(
  */
 export async function syncThread(
   accountId: string,
-  thread: GmailThread,
-  onProgress?: SyncProgress,
-  profileContext?: ParsingProfileContext,
-  /**
-   * What the user has taught the app about senders. A batch loads this once and
-   * passes it to every thread; omitted means `decideAndSave` reads it for this
-   * one.
-   */
-  senderFacts?: SenderFacts,
+  thread: ProviderThread,
+  opts: {
+    /** The mailbox's owner, whose AI settings the decision uses. */
+    userId: string
+    onProgress?: SyncProgress
+    profileContext?: ParsingProfileContext
+    /**
+     * What the user has taught the app about senders. A batch loads this once
+     * and passes it to every thread; omitted means `decideAndSave` reads it for
+     * this one.
+     */
+    senderFacts?: SenderFacts
+  },
 ): Promise<'synced' | 'skipped' | 'error'> {
+  const { onProgress, profileContext, senderFacts } = opts
   const messages = relevantMessages(thread.messages)
 
   if (messages.length === 0) {
@@ -311,7 +331,7 @@ export async function syncThread(
 
     const built = buildConversation(parsed, {
       ownerEmail: accountId,
-      gmailThreadId: thread.id,
+      providerThreadId: thread.id,
       attachments,
       ...profileContext,
     })
@@ -325,7 +345,10 @@ export async function syncThread(
     //
     // Bytes are not downloaded here — only metadata is recorded. The attachment
     // cache fetches on demand when something actually needs the file.
-    await decideAndSave(accountId, built, { senderFacts })
+    await decideAndSave(accountId, built, {
+      userId: opts.userId,
+      senderFacts,
+    })
 
     onProgress?.({
       type: 'thread',
@@ -352,16 +375,19 @@ export async function syncThread(
  * requests rather than one enormous call.
  */
 export async function backfill(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
-  opts: SyncOptions = {},
+  opts: SyncOptions,
 ): Promise<SyncResult> {
   const pageSize = opts.pageSize ?? 100
   const onProgress = opts.onProgress
 
   onProgress?.({ type: 'start', mode: 'backfill' })
 
+  // A provider can report the same thread on more than one page (Graph lists
+  // messages, not threads), and refetching it would double the work.
   const threadIds: string[] = []
+  const seenThreadIds = new Set<string>()
   let pageToken: string | undefined
   let estimated = 0
 
@@ -375,7 +401,9 @@ export async function backfill(
     })
 
     for (const t of page.threads) {
-      if (t.id) threadIds.push(t.id)
+      if (!t.id || seenThreadIds.has(t.id)) continue
+      seenThreadIds.add(t.id)
+      threadIds.push(t.id)
     }
 
     estimated = page.resultSizeEstimate ?? estimated
@@ -399,13 +427,12 @@ export async function backfill(
       // remaining threads — report it and carry on.
       try {
         const thread = await client.getThread(threadId)
-        return syncThread(
-          accountId,
-          thread,
+        return syncThread(accountId, thread, {
+          userId: opts.userId,
           onProgress,
           profileContext,
           senderFacts,
-        )
+        })
       } catch (error) {
         onProgress?.({
           type: 'error',
@@ -419,14 +446,14 @@ export async function backfill(
 
   // Advance the cursor so the next incremental run starts from here.
   const historyId = await client.getProfileHistoryId()
-  await setHistoryId(accountId, historyId)
+  await setCursor(accountId, cursorKindFor(client.provider), historyId)
 
   const synced = results.filter((r) => r === 'synced').length
   const skipped = results.filter((r) => r !== 'synced').length
 
   onProgress?.({ type: 'done', mode: 'backfill', synced, skipped })
 
-  return { synced, skipped, historyId, estimated }
+  return { synced, skipped, cursor: historyId, estimated }
 }
 
 /**
@@ -436,10 +463,10 @@ export async function backfill(
  * and we refetch only the threads containing them.
  */
 export async function syncIncremental(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
   startHistoryId: string,
-  opts: SyncOptions = {},
+  opts: SyncOptions,
 ): Promise<SyncResult> {
   const onProgress = opts.onProgress
 
@@ -447,7 +474,7 @@ export async function syncIncremental(
 
   const threadIds = new Set<string>()
   let pageToken: string | undefined
-  let latestHistoryId: string | null = null
+  let latestCursor: string | null = null
 
   do {
     const page = await client.listHistory({ startHistoryId, pageToken })
@@ -458,7 +485,7 @@ export async function syncIncremental(
       }
     }
 
-    latestHistoryId = page.historyId ?? latestHistoryId
+    latestCursor = page.cursor ?? latestCursor
     pageToken = page.nextPageToken ?? undefined
   } while (pageToken)
 
@@ -476,13 +503,12 @@ export async function syncIncremental(
     async (threadId) => {
       try {
         const thread = await client.getThread(threadId)
-        return syncThread(
-          accountId,
-          thread,
+        return syncThread(accountId, thread, {
+          userId: opts.userId,
           onProgress,
           profileContext,
           senderFacts,
-        )
+        })
       } catch (error) {
         onProgress?.({
           type: 'error',
@@ -497,20 +523,20 @@ export async function syncIncremental(
   // Gmail's history ids expire after ~7 days; if ours is too old the API
   // returns 404 and a backfill is the only recovery.
   const historyId = await client.getProfileHistoryId()
-  await setHistoryId(accountId, historyId)
+  await setCursor(accountId, cursorKindFor(client.provider), historyId)
 
   const synced = results.filter((r) => r === 'synced').length
   const skipped = results.filter((r) => r !== 'synced').length
 
   onProgress?.({ type: 'done', mode: 'incremental', synced, skipped })
 
-  return { synced, skipped, historyId, estimated: threadIds.size }
+  return { synced, skipped, cursor: historyId, estimated: threadIds.size }
 }
 
 export type SyncResult = {
   synced: number
   skipped: number
-  historyId: string
+  cursor: string
   estimated: number
 }
 
@@ -521,17 +547,22 @@ export type SyncResult = {
  * backfill, otherwise incremental.
  */
 export async function sync(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
-  opts: SyncOptions = {},
+  opts: SyncOptions,
 ): Promise<SyncResult> {
   if (opts.startHistoryId) {
     try {
       return await syncIncremental(client, accountId, opts.startHistoryId, opts)
     } catch (error) {
-      // A stale cursor (older than Gmail's retention) 404s. Recover by
-      // rebuilding from scratch rather than leaving the user stuck.
-      if (error instanceof Error && error.name === 'GmailNotFoundError') {
+      // A stale cursor — older than Gmail's retention, or a value the provider
+      // no longer recognises — cannot resume. Recover by rebuilding from
+      // scratch rather than leaving the user stuck.
+      if (
+        error instanceof Error &&
+        (error.name === 'GmailNotFoundError' ||
+          error.name === 'MailboxCursorExpiredError')
+      ) {
         return backfill(client, accountId, opts)
       }
       throw error

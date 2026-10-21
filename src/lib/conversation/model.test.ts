@@ -110,7 +110,7 @@ describe('activeDone', () => {
 describe('unseenMessages', () => {
   function from(iso: string, isFromOwner: boolean) {
     return {
-      gmailMessageId: iso + String(isFromOwner),
+      providerMessageId: iso + String(isFromOwner),
       internetMessageId: null,
       from: { email: isFromOwner ? OWNER : 'alice@example.com', name: null },
       to: [],
@@ -245,10 +245,10 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 'thread-1',
+      providerThreadId: 'thread-1',
     })
 
-    expect(conversation.gmailThreadId).toBe('thread-1')
+    expect(conversation.providerThreadId).toBe('thread-1')
     expect(conversation.subject).toBe('Project launch')
     expect(conversation.messageCount).toBe(2)
     expect(conversation.id).toBe(conversationId(OWNER, 'thread-1'))
@@ -277,7 +277,7 @@ describe('buildConversation', () => {
     // Deliberately out of order.
     const conversation = buildConversation([later, earlier], {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     expect(conversation.messages[0].body).toContain('First')
@@ -297,7 +297,7 @@ describe('buildConversation', () => {
     )
     const conversation = buildConversation([parsed], {
       ownerEmail: OWNER,
-      gmailThreadId: 'profile-thread',
+      providerThreadId: 'profile-thread',
       parsingPreferences: {
         'alice@example.com': {
           stripQuotedHistory: false,
@@ -336,7 +336,7 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     const m = conversation.messages[0]
@@ -361,7 +361,7 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: 'me@example.com',
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     expect(conversation.messages[0].isFromOwner).toBe(true)
@@ -383,7 +383,7 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     const emails = conversation.participants.map((p) => p.email)
@@ -407,7 +407,7 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     expect(conversation.topic).toBeNull()
@@ -417,7 +417,7 @@ describe('buildConversation', () => {
   test('handles an empty thread without throwing', () => {
     const conversation = buildConversation([], {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
     expect(conversation.messageCount).toBe(0)
     expect(conversation.state).toBe('informational')
@@ -454,7 +454,7 @@ describe('buildConversation', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
 
     expect(conversation.attachmentCount).toBe(1)
@@ -625,7 +625,7 @@ function decisionInput(body: string, from = 'sarah@example.com'): DecisionInput 
     subject: 'Subject',
     messages: [
       {
-        gmailMessageId: 'm1',
+        providerMessageId: 'm1',
         internetMessageId: null,
         from: { email: from, name: null },
         to: [],
@@ -676,7 +676,7 @@ describe('decision layer', () => {
       subject: 'Project launch',
       messages: [
         {
-          gmailMessageId: 'm1',
+          providerMessageId: 'm1',
           internetMessageId: null,
           from: { email: 's@e.com', name: 'Sarah' },
           to: [],
@@ -771,7 +771,7 @@ describe('decision layer', () => {
         subject: 'x',
         messages: [
           {
-            gmailMessageId: 'm1',
+            providerMessageId: 'm1',
             internetMessageId: null,
             from: { email: OWNER, name: null },
             to: [],
@@ -883,7 +883,7 @@ describe('decision layer', () => {
       messages: [
         ...decisionInput('Your order has shipped.').messages,
         {
-          gmailMessageId: 'm2',
+          providerMessageId: 'm2',
           internetMessageId: null,
           from: { email: OWNER, name: null },
           to: [],
@@ -920,7 +920,7 @@ describe('decision layer', () => {
 
     const conversation = buildConversation(messages, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
     conversation.goal = 'Confirm Tuesday works'
     conversation.intent = 'scheduling'
@@ -971,7 +971,7 @@ describe('decision layer', () => {
 
     const called = buildConversation(parsed, {
       ownerEmail: OWNER,
-      gmailThreadId: 't',
+      providerThreadId: 't',
     })
     // The call was made against the thread as it stands now.
     called.stateOverride = {
@@ -1005,7 +1005,7 @@ describe('decision layer', () => {
         subject: 'Project launch',
         messages: [
           {
-            gmailMessageId: 'm1',
+            providerMessageId: 'm1',
             internetMessageId: null,
             from: { email: 'sarah@example.com', name: 'Sarah' },
             to: [],

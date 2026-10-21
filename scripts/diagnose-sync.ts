@@ -18,8 +18,8 @@
  * value is enough to recover recent mail without paying for a whole mailbox; a
  * full rebuild is what the app's "Re-sync" button does.
  *
- * `--reset-cursor` only touches sync state (the cursor row and the account's
- * `history_id`); it never deletes conversations, messages, or auth tokens.
+ * `--reset-cursor` only touches sync state (the account's cursor rows); it never
+ * deletes conversations, messages, or auth tokens.
  * `--backfill` is the same full sync the app's "Re-sync" button runs, with
  * per-thread progress logged so a failing thread names itself.
  */
@@ -27,12 +27,12 @@
 import { desc, eq, sql } from 'drizzle-orm'
 
 import { db, initDatabase } from '../src/db/index.ts'
-import { accounts, conversations, decisions, historyCursors } from '../src/db/schema.ts'
+import { conversations, decisions, syncCursors } from '../src/db/schema.ts'
 import { getAccountEnvelope } from '../src/lib/auth/accounts.ts'
 import { createGmailClient } from '../src/lib/auth/google.ts'
 import { createGmailApiClient } from '../src/lib/gmail/client.ts'
 import { BACKFILL_QUERY } from '../src/lib/gmail/service.ts'
-import { backfill } from '../src/lib/gmail/sync.ts'
+import { backfill } from '../src/lib/mailbox/sync.ts'
 
 const args = process.argv.slice(2)
 const resetCursor = args.includes('--reset-cursor')
@@ -70,10 +70,15 @@ if (targets.length === 0) {
 console.log(`\nAccounts (${targets.length} of ${allAccounts.length}):`)
 for (const account of targets) {
   console.log(`  ${account.email}`)
+  const cursor = await db.query.syncCursors.findFirst({
+    where: eq(syncCursors.accountId, account.id),
+    orderBy: desc(syncCursors.updatedAt),
+  })
   console.log(
-    `    cursor=${account.historyId ?? '(none — the next sync will backfill)'}` +
+    `    provider=${account.provider}` +
+      `  cursor=${cursor?.value ?? '(none — the next sync will backfill)'}` +
       `  derivedVersion=${account.derivedVersion}` +
-      `  cursorUpdatedAt=${account.updatedAt.toISOString()}`,
+      `  cursorUpdatedAt=${cursor?.updatedAt.toISOString() ?? '(never)'}`,
   )
 }
 
@@ -135,13 +140,7 @@ for (const decision of recentDecisions) {
 if (resetCursor) {
   console.log('\nClearing stored history cursor(s):')
   for (const account of targets) {
-    await db
-      .update(accounts)
-      .set({ historyId: null })
-      .where(eq(accounts.id, account.id))
-    await db
-      .delete(historyCursors)
-      .where(eq(historyCursors.accountId, account.id))
+    await db.delete(syncCursors).where(eq(syncCursors.accountId, account.id))
     console.log(`  cleared ${account.email}`)
   }
   console.log(
@@ -169,6 +168,10 @@ if (runBackfill) {
 
     try {
       const result = await backfill(client, account.id, {
+        // The decision pipeline is per user, so a manual backfill runs as the
+        // mailbox's owner. A pre-accounts row with no owner falls back to the
+        // rules-only pipeline rather than somebody else's keys.
+        userId: account.userId ?? '',
         query: BACKFILL_QUERY,
         limit,
         onProgress: (event) => {
@@ -192,7 +195,7 @@ if (runBackfill) {
         },
       })
       console.log(
-        `  ${account.email}: done, cursor now ${result.historyId} (${result.estimated} listed)`,
+        `  ${account.email}: done, cursor now ${result.cursor} (${result.estimated} listed)`,
       )
     } catch (error) {
       console.log(

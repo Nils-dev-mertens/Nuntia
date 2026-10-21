@@ -11,8 +11,8 @@ import { mkdir, rm, writeFile, stat } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join, resolve, sep } from 'node:path'
 
-import type { GmailAttachmentRef } from './message.ts'
-import type { GmailClient } from './client.ts'
+import type { GmailAttachmentRef } from '#/lib/mailbox/message.ts'
+import type { MailboxClient } from '#/lib/gmail/client.ts'
 
 /**
  * Default ceiling for a single attachment.
@@ -144,7 +144,7 @@ export type DownloadResult =
  * filename cannot escape it even if `safeFilename` missed something.
  */
 export async function downloadAttachment(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
   messageId: string,
   ref: GmailAttachmentRef,
@@ -226,14 +226,14 @@ function isInside(candidate: string, root: string): boolean {
  */
 export function attachmentRowId(
   accountId: string,
-  gmailThreadId: string,
-  gmailMessageId: string,
+  providerThreadId: string,
+  providerMessageId: string,
   ref: GmailAttachmentRef,
 ): string {
   const hash = createHash('sha1')
-    .update(`${gmailThreadId}:${gmailMessageId}:${ref.attachmentId}`)
+    .update(`${providerThreadId}:${providerMessageId}:${ref.attachmentId}`)
     .digest('hex')
     .slice(0, 12)
 
-  return `${accountId}:${gmailThreadId}:${hash}`
+  return `${accountId}:${providerThreadId}:${hash}`
 }

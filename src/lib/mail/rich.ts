@@ -71,7 +71,7 @@ const STYLE_ATTRIBUTE = /\bstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi
  */
 function hasMeaningfulStyle(html: string): boolean {
   for (const match of html.matchAll(STYLE_ATTRIBUTE)) {
-    const value = match[1] ?? match[2] ?? ''
+    const value = match[1] || match[2] || ''
     for (const declaration of value.split(';')) {
       if (isMeaningfulDeclaration(declaration)) return true
     }

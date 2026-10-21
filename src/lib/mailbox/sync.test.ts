@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm'
 
 // Type-only, so it is erased and does not evaluate `sync.ts` before the database
 // environment is set up the way the value imports below are careful to.
-import type { SyncEvent } from './sync.ts'
+import type { SyncEvent } from '#/lib/mailbox/sync.ts'
 
 /**
  * Sync writes to the database, so each run needs its own SQLite file.
@@ -35,13 +35,17 @@ const {
   decisions,
   messages,
   senderProfiles,
+  users,
 } = await import('#/db/schema.ts')
-const { FakeGmailClient } = await import('./fake.ts')
-const { backfill, syncIncremental, sync } = await import('./sync.ts')
-const { refreshThread } = await import('./send.ts')
-const { toParsedMessage, toAttachmentRefs } = await import('./message.ts')
-const { decodeGmailData } = await import('./message.ts')
-const { safeFilename, MAX_ATTACHMENT_BYTES } = await import('./attachments.ts')
+const { FakeMailboxClient } = await import('#/lib/mailbox/fake.ts')
+const { backfill, syncIncremental, sync } =
+  await import('#/lib/mailbox/sync.ts')
+const { refreshThread } = await import('#/lib/gmail/send.ts')
+const { toParsedMessage, toAttachmentRefs } =
+  await import('#/lib/mailbox/message.ts')
+const { decodeGmailData } = await import('#/lib/mailbox/message.ts')
+const { safeFilename, MAX_ATTACHMENT_BYTES } =
+  await import('#/lib/gmail/attachments.ts')
 const {
   getConversation,
   getParsingProfileContext,
@@ -52,14 +56,22 @@ const {
   setConversationDetails,
 } = await import('#/lib/conversation/index.ts')
 const { draftReply, forgetAccount, loadAttachment, loadInbox } =
-  await import('./service.ts')
-const { removeAttachmentCache } = await import('./attachments.ts')
+  await import('#/lib/gmail/service.ts')
+const { removeAttachmentCache } = await import('#/lib/gmail/attachments.ts')
 
 const { migrate } = await import('drizzle-orm/libsql/migrator')
 await initDatabase()
 await migrate(db, { migrationsFolder: './drizzle' })
 
 const ACCOUNT = 'me@example.com'
+/**
+ * The person these tests are signed in as.
+ *
+ * Every service entry point is scoped by user now, so the fixture has to own the
+ * mailbox it syncs — an account with no owner is invisible to the very queries
+ * these tests drive.
+ */
+const USER = 'owner@example.com'
 
 afterAll(async () => {
   // best-effort cleanup; the temp dir is disposable either way
@@ -79,9 +91,17 @@ beforeEach(async () => {
   // a sender marked in one test would otherwise decide the next one's outcome.
   await db.delete(senderProfiles)
   await db.delete(accounts)
+  await db.delete(users)
+
+  await db.insert(users).values({
+    id: USER,
+    email: USER,
+    passwordHash: 'not-a-real-hash',
+  })
 
   await db.insert(accounts).values({
     id: ACCOUNT,
+    userId: USER,
     email: ACCOUNT,
     refreshTokenEncrypted: 'v1:a:b:c',
   })
@@ -452,11 +472,11 @@ describe('sender parsing profiles', () => {
         replySignature: null,
       },
     )
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'sender-profile-thread',
-          historyId: '901',
+          cursor: '901',
           messages: [
             message({
               id: 'sender-profile-message',
@@ -471,9 +491,9 @@ describe('sender parsing profiles', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     const saved = (await listConversations(ACCOUNT)).find(
-      (item) => item.gmailThreadId === 'sender-profile-thread',
+      (item) => item.providerThreadId === 'sender-profile-thread',
     )
     expect(saved?.messages[0].body).toContain('Hi Alex,')
     expect(saved?.messages[0].body).toContain('On Monday Alex wrote:')
@@ -481,8 +501,8 @@ describe('sender parsing profiles', () => {
     expect(saved?.messages[0].strippedSignature ?? '').toContain('Best,')
     expect(saved?.messages[0].strippedQuote).toBeNull()
 
-    const { loadConversation } = await import('./service.ts')
-    const detail = await loadConversation('sender-profile-thread')
+    const { loadConversation } = await import('#/lib/gmail/service.ts')
+    const detail = await loadConversation(USER, 'sender-profile-thread')
     expect(detail?.parsingProfile).toMatchObject({
       senderEmail: 'alice@example.com',
       useAccountParsingDefaults: false,
@@ -537,7 +557,7 @@ describe('sender parsing profiles', () => {
     )
     const conversation = buildConversation([parsed], {
       ownerEmail: ACCOUNT,
-      gmailThreadId: 'profile-thread',
+      providerThreadId: 'profile-thread',
       ...context,
     })
     expect(conversation.messages[0].body).toContain('Hi Alex,')
@@ -549,11 +569,11 @@ describe('sender parsing profiles', () => {
 
 describe('conversation detail edits', () => {
   test('persists and clears the user-owned topic and goal', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'details-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'details-message',
@@ -568,7 +588,7 @@ describe('conversation detail edits', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     await setConversationDetails(ACCOUNT, 'details-thread', {
       topic: 'Launch schedule',
       goal: 'Confirm a Tuesday launch',
@@ -589,11 +609,11 @@ describe('conversation detail edits', () => {
 
 describe('replyability', () => {
   test('a human thread is replyable, a no-reply sender is not', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'human-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -607,7 +627,7 @@ describe('replyability', () => {
         },
         {
           id: 'robot-thread',
-          historyId: '901',
+          cursor: '901',
           messages: [
             message({
               id: 'm2',
@@ -622,10 +642,10 @@ describe('replyability', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     const stored = await listConversations(ACCOUNT)
-    const human = stored.find((c) => c.gmailThreadId === 'human-thread')
-    const robot = stored.find((c) => c.gmailThreadId === 'robot-thread')
+    const human = stored.find((c) => c.providerThreadId === 'human-thread')
+    const robot = stored.find((c) => c.providerThreadId === 'robot-thread')
 
     expect(human?.isAutomated).toBe(false)
     expect(human?.replyable).toBe(true)
@@ -635,11 +655,11 @@ describe('replyability', () => {
   })
 
   test('re-analyse recomputes the stored decision without a Gmail call', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'reanalyse-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -654,7 +674,7 @@ describe('replyability', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     // Simulate a classification written before the thread last changed: stale
     // state and a wrongly cleared replyability.
@@ -662,13 +682,13 @@ describe('replyability', () => {
     await db
       .update(conversations)
       .set({ state: 'informational', replyable: false })
-      .where(eq(conversations.gmailThreadId, 'reanalyse-thread'))
+      .where(eq(conversations.providerThreadId, 'reanalyse-thread'))
 
     // Re-analyse must not talk to Gmail; the assertion below covers the whole call.
     client.calls.length = 0
 
-    const { reanalyseConversation } = await import('./service.ts')
-    await reanalyseConversation('reanalyse-thread')
+    const { reanalyseConversation } = await import('#/lib/gmail/service.ts')
+    await reanalyseConversation(USER, 'reanalyse-thread')
 
     const [updated] = await listConversations(ACCOUNT)
     expect(updated.state).toBe('needs-action')
@@ -691,7 +711,7 @@ describe('reading a thread and marking it done', () => {
   function humanThread(id: string, messageId: string, date: string): any {
     return {
       id,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: messageId,
@@ -706,26 +726,25 @@ describe('reading a thread and marking it done', () => {
   }
 
   test('opening records the read mark, moves nothing else, and never goes backwards', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         humanThread('read-thread', 'm1', 'Mon, 15 Jan 2024 10:00:00 +0000'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { loadConversation, markConversationSeen } = await import(
-      './service.ts'
-    )
+    const { loadConversation, markConversationSeen } =
+      await import('#/lib/gmail/service.ts')
 
-    const before = await loadConversation('read-thread')
+    const before = await loadConversation(USER, 'read-thread')
     expect(before?.seenAt).toBeNull()
     expect(before?.done).toBe(false)
 
     // The instant the view had on screen, reported back verbatim.
     const onScreen = before?.messages.at(-1)?.sentAt ?? ''
-    await markConversationSeen('read-thread', onScreen)
+    await markConversationSeen(USER, 'read-thread', onScreen)
 
-    const after = await loadConversation('read-thread')
+    const after = await loadConversation(USER, 'read-thread')
     expect(after?.seenAt).toBe(onScreen)
     // Read is not done — the whole reason the two are stored separately.
     expect(after?.done).toBe(false)
@@ -734,30 +753,29 @@ describe('reading a thread and marking it done', () => {
 
     // An older mark — a stale tab, or a thread opened before this one — must not
     // un-read newer mail.
-    await markConversationSeen('read-thread', '2024-01-01T00:00:00.000Z')
+    await markConversationSeen(USER, 'read-thread', '2024-01-01T00:00:00.000Z')
     const [row] = await listConversations(ACCOUNT)
     expect(row.seenAt?.toISOString()).toBe(onScreen)
 
     // A time that does not parse is refused rather than guessed at.
     await expect(
-      markConversationSeen('read-thread', 'yesterday'),
+      markConversationSeen(USER, 'read-thread', 'yesterday'),
     ).rejects.toThrow(/not a valid time/i)
   })
 
   test('the done mark survives every rebuild and comes back when new mail arrives', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         humanThread('done-thread', 'm1', 'Mon, 15 Jan 2024 10:00:00 +0000'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { loadConversation, setConversationDone } = await import(
-      './service.ts'
-    )
-    await setConversationDone('done-thread', true)
+    const { loadConversation, setConversationDone } =
+      await import('#/lib/gmail/service.ts')
+    await setConversationDone(USER, 'done-thread', true)
 
-    const marked = await loadConversation('done-thread')
+    const marked = await loadConversation(USER, 'done-thread')
     expect(marked?.done).toBe(true)
     // "Done" is the user's answer about whether they have dealt with the mail,
     // not a claim about what it needs, so the state stays where it was.
@@ -766,29 +784,30 @@ describe('reading a thread and marking it done', () => {
     // Every path that rebuilds a thread from Gmail knows nothing about the mark,
     // so these are the places it would be lost: a re-sync, a re-decide, and the
     // send path's own rebuild (`refreshThread`).
-    await backfill(client, ACCOUNT)
-    expect((await loadConversation('done-thread'))?.done).toBe(true)
+    await backfill(client, ACCOUNT, { userId: USER })
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(true)
 
-    const { redecideStoredConversations } = await import('./sync.ts')
-    await redecideStoredConversations(ACCOUNT)
-    expect((await loadConversation('done-thread'))?.done).toBe(true)
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    await redecideStoredConversations(ACCOUNT, USER)
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(true)
 
     await refreshThread(client, ACCOUNT, 'done-thread')
-    expect((await loadConversation('done-thread'))?.done).toBe(true)
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(true)
 
     // New mail is precisely what the mark must not swallow: the thread comes back
     // on its own, and the user does not have to notice that it did.
     client.setThread(
       humanThread('done-thread', 'm2', 'Tue, 16 Jan 2024 10:00:00 +0000'),
     )
-    await backfill(client, ACCOUNT)
-    expect((await loadConversation('done-thread'))?.done).toBe(false)
+    await backfill(client, ACCOUNT, { userId: USER })
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(false)
 
     // Saying so again works, and so does taking it back.
-    await setConversationDone('done-thread', true)
-    expect((await loadConversation('done-thread'))?.done).toBe(true)
-    await setConversationDone('done-thread', false)
-    expect((await loadConversation('done-thread'))?.done).toBe(false)
+    await setConversationDone(USER, 'done-thread', true)
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(true)
+    await setConversationDone(USER, 'done-thread', false)
+    expect((await loadConversation(USER, 'done-thread'))?.done).toBe(false)
   })
 })
 
@@ -807,7 +826,7 @@ describe('marking a sender as one you cannot reply to', () => {
   function notice(threadId: string, messageId: string, from: string): any {
     return {
       id: threadId,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: messageId,
@@ -822,25 +841,31 @@ describe('marking a sender as one you cannot reply to', () => {
   }
 
   test('covers every stored thread from that sender, and the mail that arrives later', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         notice('invoice-1', 'm1', 'updates@acme.example'),
         notice('invoice-2', 'm2', 'updates@acme.example'),
         notice('other-1', 'm3', 'billing@other.example'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     // Nothing here is machine mail: an ordinary address, and nothing in the body
     // the rules read as "nobody to answer".
     const before = await listConversations(ACCOUNT)
     expect(before.every((c) => c.replyable)).toBe(true)
 
-    const { applySenderReplyabilityToSender } = await import('./service.ts')
-    await applySenderReplyabilityToSender(ACCOUNT, 'updates@acme.example', false)
+    const { applySenderReplyabilityToSender } =
+      await import('#/lib/gmail/service.ts')
+    await applySenderReplyabilityToSender(
+      USER,
+      ACCOUNT,
+      'updates@acme.example',
+      false,
+    )
 
     const marked = await listConversations(ACCOUNT)
-    const one = (id: string) => marked.find((c) => c.gmailThreadId === id)
+    const one = (id: string) => marked.find((c) => c.providerThreadId === id)
     expect(one('invoice-1')?.replyable).toBe(false)
     // The sweep covers threads the decision layer will not revisit — it only
     // runs on mail Gmail reports as changed.
@@ -853,10 +878,10 @@ describe('marking a sender as one you cannot reply to', () => {
     // Mail from the sender that arrives afterwards reads the stored answer
     // instead of guessing from the address again.
     client.setThread(notice('invoice-3', 'm4', 'updates@acme.example'))
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     expect(
       (await listConversations(ACCOUNT)).find(
-        (c) => c.gmailThreadId === 'invoice-3',
+        (c) => c.providerThreadId === 'invoice-3',
       )?.replyable,
     ).toBe(false)
 
@@ -867,21 +892,27 @@ describe('marking a sender as one you cannot reply to', () => {
     await refreshThread(client, ACCOUNT, 'invoice-2')
     expect(
       (await listConversations(ACCOUNT)).find(
-        (c) => c.gmailThreadId === 'invoice-2',
+        (c) => c.providerThreadId === 'invoice-2',
       )?.replyable,
     ).toBe(false)
 
-    await backfill(client, ACCOUNT)
-    const { redecideStoredConversations } = await import('./sync.ts')
-    await redecideStoredConversations(ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    await redecideStoredConversations(ACCOUNT, USER)
     expect(
       (await listConversations(ACCOUNT)).find(
-        (c) => c.gmailThreadId === 'invoice-2',
+        (c) => c.providerThreadId === 'invoice-2',
       )?.replyable,
     ).toBe(false)
 
     // Taking the mark back brings the composer back on all of them.
-    await applySenderReplyabilityToSender(ACCOUNT, 'updates@acme.example', true)
+    await applySenderReplyabilityToSender(
+      USER,
+      ACCOUNT,
+      'updates@acme.example',
+      true,
+    )
     expect((await listConversations(ACCOUNT)).every((c) => c.replyable)).toBe(
       true,
     )
@@ -891,17 +922,22 @@ describe('marking a sender as one you cannot reply to', () => {
     // The list lives in Settings, where there is no thread to pick a sender from,
     // so an entry has to be able to exist before its mail does — and the mail
     // that follows is the part that must still be covered.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [notice('invoice-1', 'm1', 'updates@acme.example')],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { applySenderReplyabilityToSender } = await import('./service.ts')
-    const { listUnreplyableSenders } = await import(
-      '#/lib/conversation/index.ts'
+    const { applySenderReplyabilityToSender } =
+      await import('#/lib/gmail/service.ts')
+    const { listUnreplyableSenders } =
+      await import('#/lib/conversation/index.ts')
+
+    await applySenderReplyabilityToSender(
+      USER,
+      ACCOUNT,
+      'alerts@acme.example',
+      false,
     )
-
-    await applySenderReplyabilityToSender(ACCOUNT, 'alerts@acme.example', false)
     expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([
       'alerts@acme.example',
     ])
@@ -909,26 +945,26 @@ describe('marking a sender as one you cannot reply to', () => {
     // Nothing was stored from that sender, so the sweep had nothing to change.
     // The next sync is where the entry has to do its work.
     client.setThread(notice('alert-1', 'm2', 'alerts@acme.example'))
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     const stored = await listConversations(ACCOUNT)
     expect(
-      stored.find((c) => c.gmailThreadId === 'alert-1')?.replyable,
+      stored.find((c) => c.providerThreadId === 'alert-1')?.replyable,
     ).toBe(false)
     // The entry is per sender, not a blanket: other senders keep their composer.
     expect(
-      stored.find((c) => c.gmailThreadId === 'invoice-1')?.replyable,
+      stored.find((c) => c.providerThreadId === 'invoice-1')?.replyable,
     ).toBe(true)
   })
 
   test('taking a mark back does not hand a composer to a no-reply address', async () => {
     // Undo is the user lifting their own answer. The machine-mail marker is not
     // theirs to lift, and `isAutomatedThread` stays the authority on it.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'robot-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -942,11 +978,22 @@ describe('marking a sender as one you cannot reply to', () => {
         },
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { applySenderReplyabilityToSender } = await import('./service.ts')
-    await applySenderReplyabilityToSender(ACCOUNT, 'noreply@github.com', false)
-    await applySenderReplyabilityToSender(ACCOUNT, 'noreply@github.com', true)
+    const { applySenderReplyabilityToSender } =
+      await import('#/lib/gmail/service.ts')
+    await applySenderReplyabilityToSender(
+      USER,
+      ACCOUNT,
+      'noreply@github.com',
+      false,
+    )
+    await applySenderReplyabilityToSender(
+      USER,
+      ACCOUNT,
+      'noreply@github.com',
+      true,
+    )
 
     const [thread] = await listConversations(ACCOUNT)
     expect(thread.replyable).toBe(false)
@@ -956,54 +1003,61 @@ describe('marking a sender as one you cannot reply to', () => {
     // The list is typed, not picked, so every way the input can be wrong is a
     // branch the settings form can reach — checked here rather than through the
     // router, which is all this needs.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [notice('invoice-1', 'm1', 'updates@acme.example')],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { addUnreplyableSender, removeUnreplyableSender } = await import(
-      './service.ts'
-    )
+    const { addUnreplyableSender, removeUnreplyableSender } =
+      await import('#/lib/gmail/service.ts')
 
     // A mailbox that is not connected cannot own the preference.
     expect(
-      await addUnreplyableSender('other@elsewhere.example', 'a@b.example'),
+      await addUnreplyableSender(
+        USER,
+        'other@elsewhere.example',
+        'a@b.example',
+      ),
     ).toEqual({ added: null, error: 'That mailbox is not connected.' })
 
     // Shape only: what could never be an address is refused ...
     for (const bad of ['nope', 'updates@', 'a@b.example c@d.example']) {
-      expect((await addUnreplyableSender(ACCOUNT, bad)).added).toBeNull()
+      expect((await addUnreplyableSender(USER, ACCOUNT, bad)).added).toBeNull()
     }
     // ... while an unusual one is stored: the list is a preference, not a
     // delivery, and `invoice@localhost` is a real address without a dot.
-    expect(await addUnreplyableSender(ACCOUNT, 'invoice@localhost')).toEqual({
+    expect(
+      await addUnreplyableSender(USER, ACCOUNT, 'invoice@localhost'),
+    ).toEqual({
       added: 'invoice@localhost',
       error: null,
     })
 
     // The user's own address would hide the composer on their own mail.
-    expect((await addUnreplyableSender(ACCOUNT, ACCOUNT)).error).toBe(
+    expect((await addUnreplyableSender(USER, ACCOUNT, ACCOUNT)).error).toBe(
       `${ACCOUNT} is this mailbox's own address.`,
     )
 
     // Stored in its normalised form, and only once.
     expect(
-      await addUnreplyableSender(ACCOUNT, '  Alerts@Acme.Example '),
+      await addUnreplyableSender(USER, ACCOUNT, '  Alerts@Acme.Example '),
     ).toEqual({ added: 'alerts@acme.example', error: null })
     expect(
-      (await addUnreplyableSender(ACCOUNT, 'alerts@acme.example')).error,
+      (await addUnreplyableSender(USER, ACCOUNT, 'alerts@acme.example')).error,
     ).toBe('alerts@acme.example is already on the list.')
 
     // Undo refuses an entry that is not there, lifts one that is, and cannot
     // lift the same one twice.
     expect(
-      (await removeUnreplyableSender(ACCOUNT, 'never@acme.example')).error,
+      (await removeUnreplyableSender(USER, ACCOUNT, 'never@acme.example'))
+        .error,
     ).toBe('That sender is not marked as one you cannot reply to.')
     expect(
-      await removeUnreplyableSender(ACCOUNT, 'alerts@acme.example'),
+      await removeUnreplyableSender(USER, ACCOUNT, 'alerts@acme.example'),
     ).toEqual({ error: null })
     expect(
-      (await removeUnreplyableSender(ACCOUNT, 'alerts@acme.example')).error,
+      (await removeUnreplyableSender(USER, ACCOUNT, 'alerts@acme.example'))
+        .error,
     ).toBe('That sender is not marked as one you cannot reply to.')
   })
 
@@ -1011,21 +1065,21 @@ describe('marking a sender as one you cannot reply to', () => {
     // The one-click path. It names a *thread* rather than an address, so the
     // mailbox and the address both come from the mail on screen — nothing is
     // picked and nothing is typed.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         notice('invoice-1', 'm1', 'updates@acme.example'),
         notice('invoice-2', 'm2', 'updates@acme.example'),
         notice('other-1', 'm3', 'billing@other.example'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { markThreadSenderUnreplyable } = await import('./service.ts')
-    const { listUnreplyableSenders } = await import(
-      '#/lib/conversation/index.ts'
-    )
+    const { markThreadSenderUnreplyable } =
+      await import('#/lib/gmail/service.ts')
+    const { listUnreplyableSenders } =
+      await import('#/lib/conversation/index.ts')
 
-    expect(await markThreadSenderUnreplyable('invoice-2')).toEqual({
+    expect(await markThreadSenderUnreplyable(USER, 'invoice-2')).toEqual({
       error: null,
     })
 
@@ -1033,10 +1087,10 @@ describe('marking a sender as one you cannot reply to', () => {
     // Per sender rather than per thread: the sibling thread loses its reply box
     // too, which is the whole reason the mark is stored against the address.
     expect(
-      stored.find((c) => c.gmailThreadId === 'invoice-1')?.replyable,
+      stored.find((c) => c.providerThreadId === 'invoice-1')?.replyable,
     ).toBe(false)
     expect(
-      stored.find((c) => c.gmailThreadId === 'invoice-2')?.replyable,
+      stored.find((c) => c.providerThreadId === 'invoice-2')?.replyable,
     ).toBe(false)
     // And it lands on the one list, so Settings can take it back.
     expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([
@@ -1044,7 +1098,7 @@ describe('marking a sender as one you cannot reply to', () => {
     ])
     // Another sender is untouched.
     expect(
-      stored.find((c) => c.gmailThreadId === 'other-1')?.replyable,
+      stored.find((c) => c.providerThreadId === 'other-1')?.replyable,
     ).toBe(true)
   })
 
@@ -1052,11 +1106,11 @@ describe('marking a sender as one you cannot reply to', () => {
     // A thread made only of the user's own messages has no sender, and writing the
     // owner's own address here would hide the composer on their own mail — so it
     // is refused rather than stored.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'self-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1070,27 +1124,27 @@ describe('marking a sender as one you cannot reply to', () => {
         },
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { markThreadSenderUnreplyable } = await import('./service.ts')
-    const { listUnreplyableSenders } = await import(
-      '#/lib/conversation/index.ts'
-    )
+    const { markThreadSenderUnreplyable } =
+      await import('#/lib/gmail/service.ts')
+    const { listUnreplyableSenders } =
+      await import('#/lib/conversation/index.ts')
 
-    expect(await markThreadSenderUnreplyable('self-thread')).toEqual({
+    expect(await markThreadSenderUnreplyable(USER, 'self-thread')).toEqual({
       error: 'This conversation has no sender to mark.',
     })
     expect([...(await listUnreplyableSenders(ACCOUNT))]).toEqual([])
   })
 
   test('offers senders you can actually mark, newest first', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         notice('invoice-1', 'm1', 'updates@acme.example'),
         // A later message from the same address, this time with a display name.
         {
           id: 'invoice-2',
-          historyId: '901',
+          cursor: '901',
           messages: [
             message({
               id: 'm2',
@@ -1105,7 +1159,7 @@ describe('marking a sender as one you cannot reply to', () => {
         // Older, so it sorts below.
         {
           id: 'other-1',
-          historyId: '903',
+          cursor: '903',
           messages: [
             message({
               id: 'm4',
@@ -1121,7 +1175,7 @@ describe('marking a sender as one you cannot reply to', () => {
         // there is nothing a mark could add.
         {
           id: 'robot-1',
-          historyId: '902',
+          cursor: '902',
           messages: [
             message({
               id: 'm3',
@@ -1135,7 +1189,7 @@ describe('marking a sender as one you cannot reply to', () => {
         },
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     const { listIncomingSenders } = await import('#/lib/conversation/index.ts')
     const owners = new Set([ACCOUNT])
@@ -1159,8 +1213,9 @@ describe('marking a sender as one you cannot reply to', () => {
 
     // Marking one leaves nothing to offer: the list only names senders whose
     // stored threads still show a reply box.
-    const { markThreadSenderUnreplyable } = await import('./service.ts')
-    await markThreadSenderUnreplyable('invoice-1')
+    const { markThreadSenderUnreplyable } =
+      await import('#/lib/gmail/service.ts')
+    await markThreadSenderUnreplyable(USER, 'invoice-1')
     expect(
       (await listIncomingSenders(ACCOUNT, owners)).map((s) => s.email),
     ).toEqual(['billing@other.example'])
@@ -1181,7 +1236,7 @@ describe('reply drafts', () => {
   function questionThread(id: string): any {
     return {
       id,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: `${id}-m1`,
@@ -1198,7 +1253,7 @@ describe('reply drafts', () => {
   async function storeLlmKey(minImportance: number) {
     process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
     const { saveAiSettings } = await import('#/lib/ai/settings.ts')
-    await saveAiSettings({
+    await saveAiSettings(USER, {
       jevModel: null,
       llmProvider: 'gemini',
       llmModel: null,
@@ -1208,21 +1263,21 @@ describe('reply drafts', () => {
   }
 
   test('with no LLM key there is nothing to draft with, and nothing is called', async () => {
-    const client = new FakeGmailClient({ threads: [questionThread('q1')] })
-    await backfill(client, ACCOUNT)
+    const client = new FakeMailboxClient({ threads: [questionThread('q1')] })
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    expect(await draftReply('q1', null)).toEqual({
+    expect(await draftReply(USER, 'q1', null)).toEqual({
       draft: null,
       error: 'No LLM key is configured, so there is nothing to draft with.',
     })
   })
 
   test('a sender a reply cannot reach is refused even with a key stored', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'robot-thread',
-          historyId: '901',
+          cursor: '901',
           messages: [
             message({
               id: 'm1',
@@ -1237,40 +1292,40 @@ describe('reply drafts', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     await storeLlmKey(1)
 
-    expect(await draftReply('robot-thread', null)).toEqual({
+    expect(await draftReply(USER, 'robot-thread', null)).toEqual({
       draft: null,
       error: 'There is nobody on this thread a reply can reach.',
     })
   })
 
   test('a thread below the threshold is left alone and names both numbers', async () => {
-    const client = new FakeGmailClient({ threads: [questionThread('q2')] })
-    await backfill(client, ACCOUNT)
+    const client = new FakeMailboxClient({ threads: [questionThread('q2')] })
+    await backfill(client, ACCOUNT, { userId: USER })
     await storeLlmKey(8)
 
     // One unanswered message scores importance 4 in the rules, and the threshold
     // this test stored is 8.
-    const result = await draftReply('q2', null)
+    const result = await draftReply(USER, 'q2', null)
     expect(result.draft).toBeNull()
     expect(result.error).toBe('Importance 4/10 — drafts start at 8.')
   })
 
   test('the detail payload offers the control only where the server would draft', async () => {
-    const client = new FakeGmailClient({ threads: [questionThread('q3')] })
-    await backfill(client, ACCOUNT)
+    const client = new FakeMailboxClient({ threads: [questionThread('q3')] })
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { loadConversation } = await import('./service.ts')
+    const { loadConversation } = await import('#/lib/gmail/service.ts')
 
     // No key: the feature is off, and there is nothing to explain about a thread.
-    const before = await loadConversation('q3')
+    const before = await loadConversation(USER, 'q3')
     expect(before?.suggestReply.available).toBe(false)
     expect(before?.suggestReply.reason).toBeNull()
 
     await storeLlmKey(8)
-    const gated = await loadConversation('q3')
+    const gated = await loadConversation(USER, 'q3')
     expect(gated?.suggestReply).toEqual({
       available: false,
       reason: 'Importance 4/10 — drafts start at 8.',
@@ -1279,7 +1334,7 @@ describe('reply drafts', () => {
 
     // Low enough that this thread qualifies: the view and the action agree.
     await storeLlmKey(1)
-    const offered = await loadConversation('q3')
+    const offered = await loadConversation(USER, 'q3')
     expect(offered?.suggestReply.available).toBe(true)
     expect(offered?.suggestReply.reason).toBeNull()
   })
@@ -1294,11 +1349,11 @@ describe('reply drafts', () => {
  */
 describe('redecideStoredConversations', () => {
   test('re-decides stored mail locally and keeps what the user set', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'bulk-thread',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1313,7 +1368,7 @@ describe('redecideStoredConversations', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     // A decision written by the old classifier, plus a topic the user typed.
     await db
@@ -1323,12 +1378,13 @@ describe('redecideStoredConversations', () => {
         requiresReply: true,
         topic: 'Sale I care about',
       })
-      .where(eq(conversations.gmailThreadId, 'bulk-thread'))
+      .where(eq(conversations.providerThreadId, 'bulk-thread'))
 
     client.calls.length = 0
 
-    const { redecideStoredConversations } = await import('./sync.ts')
-    const redecided = await redecideStoredConversations(ACCOUNT)
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    const redecided = await redecideStoredConversations(ACCOUNT, USER)
 
     expect(redecided).toBe(1)
     const [conversation] = await listConversations(ACCOUNT)
@@ -1357,16 +1413,16 @@ describe('the user’s own call on a thread', () => {
   /** A one-off notice: one message, nobody asking the reader anything. */
   function notice(
     threadId: string,
-    gmailMessageId: string,
+    providerMessageId: string,
     body: string,
     from = NOTICE_SENDER,
   ): any {
     return {
       id: threadId,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
-          id: gmailMessageId,
+          id: providerMessageId,
           threadId,
           from,
           subject: 'Notice',
@@ -1381,7 +1437,7 @@ describe('the user’s own call on a thread', () => {
   function question(threadId: string, body: string): any {
     return {
       id: threadId,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: `${threadId}-m1`,
@@ -1396,13 +1452,13 @@ describe('the user’s own call on a thread', () => {
   }
 
   test('a thread filed away stays filed away through a sync and a re-decide', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [question('ask-thread', 'Can you confirm Tuesday?')],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { applyUserStateOverride } = await import('./service.ts')
-    await applyUserStateOverride('ask-thread', 'low-priority')
+    const { applyUserStateOverride } = await import('#/lib/gmail/service.ts')
+    await applyUserStateOverride(USER, 'ask-thread', 'low-priority')
 
     const filed = await listConversations(ACCOUNT)
     expect(filed[0].state).toBe('low-priority')
@@ -1411,29 +1467,30 @@ describe('the user’s own call on a thread', () => {
 
     // A later sync rebuilds the thread from Gmail and knows nothing about the
     // user's call, so this is where it would be lost.
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     expect((await listConversations(ACCOUNT))[0].state).toBe('low-priority')
 
     // The same argument for the local pass a version bump runs.
-    const { redecideStoredConversations } = await import('./sync.ts')
-    await redecideStoredConversations(ACCOUNT)
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    await redecideStoredConversations(ACCOUNT, USER)
     expect((await listConversations(ACCOUNT))[0].state).toBe('low-priority')
   })
 
   test('a new message re-opens a thread the user filed away', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [question('ask-thread', 'Can you confirm Tuesday?')],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { applyUserStateOverride } = await import('./service.ts')
-    await applyUserStateOverride('ask-thread', 'low-priority')
+    const { applyUserStateOverride } = await import('#/lib/gmail/service.ts')
+    await applyUserStateOverride(USER, 'ask-thread', 'low-priority')
 
     // The call was a judgement about the mail that existed when it was made, so
     // a later message deserves a fresh look rather than inheriting it.
     client.setThread({
       id: 'ask-thread',
-      historyId: '901',
+      cursor: '901',
       messages: [
         ...question('ask-thread', 'Can you confirm Tuesday?').messages,
         message({
@@ -1446,7 +1503,7 @@ describe('the user’s own call on a thread', () => {
         }),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     const reopened = (await listConversations(ACCOUNT))[0]
     expect(reopened.state).toBe('needs-action')
@@ -1455,62 +1512,63 @@ describe('the user’s own call on a thread', () => {
   })
 
   test('filing a notice away ranks the next one from that sender low, until one is brought back', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         notice('notice-1', 'm1', 'Your order has shipped.'),
         notice('notice-2', 'm2', 'A new device signed in.'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     // Neither asks for anything, and neither is machine-marked, so both are
     // informational until the user says otherwise.
     const before = await listConversations(ACCOUNT)
     expect(before.every((c) => c.state === 'informational')).toBe(true)
 
-    const { applyUserStateOverride } = await import('./service.ts')
-    await applyUserStateOverride('notice-1', 'low-priority')
+    const { applyUserStateOverride } = await import('#/lib/gmail/service.ts')
+    await applyUserStateOverride(USER, 'notice-1', 'low-priority')
 
     const filed = await listConversations(ACCOUNT)
-    expect(filed.find((c) => c.gmailThreadId === 'notice-1')?.state).toBe(
+    expect(filed.find((c) => c.providerThreadId === 'notice-1')?.state).toBe(
       'low-priority',
     )
 
     // The sender is learned now, so the next notice is ranked low on sight —
     // one dismissal covering the same mail every time it arrives.
     client.setThread(notice('notice-3', 'm3', 'Your subscription renews soon.'))
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     const learned = await listConversations(ACCOUNT)
-    expect(learned.find((c) => c.gmailThreadId === 'notice-3')?.state).toBe(
+    expect(learned.find((c) => c.providerThreadId === 'notice-3')?.state).toBe(
       'low-priority',
     )
 
     // The local re-decide a version bump runs applies the same lesson to mail
     // already stored, rather than only to what arrives next.
-    const { redecideStoredConversations } = await import('./sync.ts')
-    await redecideStoredConversations(ACCOUNT)
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    await redecideStoredConversations(ACCOUNT, USER)
     expect(
       (await listConversations(ACCOUNT)).find(
-        (c) => c.gmailThreadId === 'notice-2',
+        (c) => c.providerThreadId === 'notice-2',
       )?.state,
     ).toBe('low-priority')
 
     // Bringing one back says the assumption was wrong for this sender, so the
     // rest stop being ranked low too — the alternative (a net count) would
     // leave the button doing nothing for a sender filed away more than once.
-    await applyUserStateOverride('notice-1', null)
-    await redecideStoredConversations(ACCOUNT)
+    await applyUserStateOverride(USER, 'notice-1', null)
+    await redecideStoredConversations(ACCOUNT, USER)
 
     const restored = await listConversations(ACCOUNT)
-    expect(restored.find((c) => c.gmailThreadId === 'notice-1')?.state).toBe(
+    expect(restored.find((c) => c.providerThreadId === 'notice-1')?.state).toBe(
       'informational',
     )
-    expect(restored.find((c) => c.gmailThreadId === 'notice-2')?.state).toBe(
+    expect(restored.find((c) => c.providerThreadId === 'notice-2')?.state).toBe(
       'informational',
     )
     expect(
-      restored.find((c) => c.gmailThreadId === 'notice-1')?.stateOverride,
+      restored.find((c) => c.providerThreadId === 'notice-1')?.stateOverride,
     ).toBeNull()
   })
 
@@ -1520,51 +1578,52 @@ describe('the user’s own call on a thread', () => {
     // be recorded for whatever the button sent, so relabelling one thread
     // "Needs action" would quietly start ranking every other notice from that
     // sender low — the opposite of what the label just said.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         notice('notice-1', 'm1', 'Your order has shipped.'),
         notice('notice-2', 'm2', 'A new device signed in.'),
       ],
     })
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
-    const { applyUserStateOverride } = await import('./service.ts')
-    await applyUserStateOverride('notice-1', 'needs-action')
+    const { applyUserStateOverride } = await import('#/lib/gmail/service.ts')
+    await applyUserStateOverride(USER, 'notice-1', 'needs-action')
 
     const labelled = await listConversations(ACCOUNT)
-    const one = labelled.find((c) => c.gmailThreadId === 'notice-1')
+    const one = labelled.find((c) => c.providerThreadId === 'notice-1')
     expect(one?.state).toBe('needs-action')
     // Stored, not just applied: a rebuild reads the row.
     expect(one?.stateOverride?.state).toBe('needs-action')
 
     // The other thread from the same sender is untouched, and the next one to
     // arrive is filed on its own merits.
-    expect(
-      labelled.find((c) => c.gmailThreadId === 'notice-2')?.state,
-    ).toBe('informational')
+    expect(labelled.find((c) => c.providerThreadId === 'notice-2')?.state).toBe(
+      'informational',
+    )
     client.setThread(notice('notice-3', 'm3', 'Your subscription renews soon.'))
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     expect(
       (await listConversations(ACCOUNT)).find(
-        (c) => c.gmailThreadId === 'notice-3',
+        (c) => c.providerThreadId === 'notice-3',
       )?.state,
     ).toBe('informational')
 
     // And it survives the local pass a version bump runs, which is where a label
     // the decision layer disagrees with would be recomputed away.
-    const { redecideStoredConversations } = await import('./sync.ts')
-    await redecideStoredConversations(ACCOUNT)
+    const { redecideStoredConversations } =
+      await import('#/lib/mailbox/sync.ts')
+    await redecideStoredConversations(ACCOUNT, USER)
     const after = (await listConversations(ACCOUNT)).find(
-      (c) => c.gmailThreadId === 'notice-1',
+      (c) => c.providerThreadId === 'notice-1',
     )
     expect(after?.state).toBe('needs-action')
     expect(after?.stateOverride?.state).toBe('needs-action')
 
     // The picker's "Automatic": the stored label goes and the app's own answer
     // stands again.
-    await applyUserStateOverride('notice-1', null)
+    await applyUserStateOverride(USER, 'notice-1', null)
     const handedBack = (await listConversations(ACCOUNT)).find(
-      (c) => c.gmailThreadId === 'notice-1',
+      (c) => c.providerThreadId === 'notice-1',
     )
     expect(handedBack?.state).toBe('informational')
     expect(handedBack?.stateOverride).toBeNull()
@@ -1602,6 +1661,7 @@ describe('fragmented threads across two mailboxes', () => {
       await import('#/lib/conversation/index.ts')
     await db.insert(accounts).values({
       id: OTHER,
+      userId: USER,
       email: OTHER,
       refreshTokenEncrypted: 'v1:a:b:c',
     })
@@ -1626,7 +1686,7 @@ describe('fragmented threads across two mailboxes', () => {
       ACCOUNT,
       buildConversation([m1, m2], {
         ownerEmail: ACCOUNT,
-        gmailThreadId: 'complete-thread',
+        providerThreadId: 'complete-thread',
       }),
     )
 
@@ -1635,46 +1695,46 @@ describe('fragmented threads across two mailboxes', () => {
       OTHER,
       buildConversation([m1], {
         ownerEmail: OTHER,
-        gmailThreadId: 'fragment-one',
+        providerThreadId: 'fragment-one',
       }),
     )
     await saveConversation(
       OTHER,
       buildConversation([m2], {
         ownerEmail: OTHER,
-        gmailThreadId: 'fragment-two',
+        providerThreadId: 'fragment-two',
       }),
     )
 
-    const { loadConversation } = await import('./service.ts')
+    const { loadConversation } = await import('#/lib/gmail/service.ts')
 
     // Loading the *fragment* must still show the whole conversation.
-    const detail = await loadConversation('fragment-one')
+    const detail = await loadConversation(USER, 'fragment-one')
     expect(detail).not.toBeNull()
     // The DTO does not expose Message-IDs; the bodies identify both messages.
     expect(detail?.messages.map((m) => m.body)).toEqual(['First.', 'Second.'])
     // The canonical row is the owner's most complete copy, not the fragment.
-    expect(detail?.gmailThreadId).toBe('complete-thread')
+    expect(detail?.providerThreadId).toBe('complete-thread')
     expect(detail?.accountId).toBe(ACCOUNT)
     expect(detail?.ownerEmails).toEqual([ACCOUNT, OTHER])
 
     // Both ways into the cluster resolve to the same conversation.
-    const fromComplete = await loadConversation('complete-thread')
+    const fromComplete = await loadConversation(USER, 'complete-thread')
     expect(fromComplete?.messages.map((m) => m.body)).toEqual([
       'First.',
       'Second.',
     ])
-    expect(fromComplete?.gmailThreadId).toBe('complete-thread')
+    expect(fromComplete?.providerThreadId).toBe('complete-thread')
   })
 })
 
 describe('backfill', () => {
   test('persists conversations for every thread', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1688,7 +1748,7 @@ describe('backfill', () => {
         },
         {
           id: 't2',
-          historyId: '901',
+          cursor: '901',
           messages: [
             message({
               id: 'm2',
@@ -1703,7 +1763,7 @@ describe('backfill', () => {
       ],
     })
 
-    const result = await backfill(client, ACCOUNT)
+    const result = await backfill(client, ACCOUNT, { userId: USER })
 
     expect(result.synced).toBe(2)
     expect(result.skipped).toBe(0)
@@ -1713,11 +1773,11 @@ describe('backfill', () => {
   })
 
   test('cleans bodies and derives state from the message flow', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1732,7 +1792,7 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     const [conversation] = await listConversations(ACCOUNT)
 
     expect(conversation.subject).toBe('Project launch')
@@ -1744,11 +1804,11 @@ describe('backfill', () => {
   })
 
   test('excludes drafts and trashed messages', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1781,7 +1841,7 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     const [conversation] = await listConversations(ACCOUNT)
 
     expect(conversation.messageCount).toBe(1)
@@ -1789,11 +1849,11 @@ describe('backfill', () => {
   })
 
   test('skips a thread with no relevant messages', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1809,7 +1869,7 @@ describe('backfill', () => {
       ],
     })
 
-    const result = await backfill(client, ACCOUNT)
+    const result = await backfill(client, ACCOUNT, { userId: USER })
     expect(result.synced).toBe(0)
     expect(result.skipped).toBe(1)
   })
@@ -1817,7 +1877,7 @@ describe('backfill', () => {
   test('paginates through thread listings', async () => {
     const threads = Array.from({ length: 5 }, (_, i) => ({
       id: `t${i}`,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: `m${i}`,
@@ -1830,9 +1890,9 @@ describe('backfill', () => {
       ],
     }))
 
-    const client = new FakeGmailClient({ threads, pageSize: 2 })
+    const client = new FakeMailboxClient({ threads, pageSize: 2 })
 
-    const result = await backfill(client, ACCOUNT)
+    const result = await backfill(client, ACCOUNT, { userId: USER })
 
     expect(result.synced).toBe(5)
     // 5 threads at 2 per page = 3 listing calls.
@@ -1843,7 +1903,7 @@ describe('backfill', () => {
   test('respects the limit and stops paginating early', async () => {
     const threads = Array.from({ length: 10 }, (_, i) => ({
       id: `t${i}`,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: `m${i}`,
@@ -1856,8 +1916,8 @@ describe('backfill', () => {
       ],
     }))
 
-    const client = new FakeGmailClient({ threads, pageSize: 2 })
-    const result = await backfill(client, ACCOUNT, { limit: 3 })
+    const client = new FakeMailboxClient({ threads, pageSize: 2 })
+    const result = await backfill(client, ACCOUNT, { userId: USER, limit: 3 })
 
     expect(result.synced).toBe(3)
   })
@@ -1868,7 +1928,7 @@ describe('backfill', () => {
     // denominator until this arrives, and a first backfill is all listing.
     const threads = Array.from({ length: 5 }, (_, i) => ({
       id: `t${i}`,
-      historyId: '900',
+      cursor: '900',
       messages: [
         message({
           id: `m${i}`,
@@ -1882,7 +1942,8 @@ describe('backfill', () => {
     }))
 
     const events: SyncEvent[] = []
-    await backfill(new FakeGmailClient({ threads, pageSize: 2 }), ACCOUNT, {
+    await backfill(new FakeMailboxClient({ threads, pageSize: 2 }), ACCOUNT, {
+      userId: USER,
       onProgress: (event) => events.push(event),
     })
 
@@ -1901,11 +1962,11 @@ describe('backfill', () => {
   })
 
   test('one failing thread does not abort the whole sync', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 'good',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -1919,7 +1980,7 @@ describe('backfill', () => {
         },
         {
           id: 'bad',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm2',
@@ -1937,6 +1998,7 @@ describe('backfill', () => {
 
     const errors: string[] = []
     const result = await backfill(client, ACCOUNT, {
+      userId: USER,
       onProgress: (e) => {
         if (e.type === 'error') errors.push(e.threadId)
       },
@@ -1947,15 +2009,15 @@ describe('backfill', () => {
     expect(errors).toContain('bad')
 
     const stored = await listConversations(ACCOUNT)
-    expect(stored.map((c) => c.gmailThreadId)).toEqual(['good'])
+    expect(stored.map((c) => c.providerThreadId)).toEqual(['good'])
   })
 
   test('stores attachment metadata without downloading bytes', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -1981,7 +2043,7 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     const [conversation] = await listConversations(ACCOUNT)
 
     expect(conversation.attachmentCount).toBe(1)
@@ -1999,11 +2061,11 @@ describe('backfill', () => {
     // left the FK pointing at no row, and every real thread with an attachment
     // failed to save as a whole. The no-Message-ID case above hid this because
     // the fallback made both ids coincide.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -2033,7 +2095,7 @@ describe('backfill', () => {
       ],
     })
 
-    const result = await backfill(client, ACCOUNT)
+    const result = await backfill(client, ACCOUNT, { userId: USER })
     expect(result.synced).toBe(1)
 
     const [conversation] = await listConversations(ACCOUNT)
@@ -2046,11 +2108,11 @@ describe('backfill', () => {
     // The stored attachment points at a message by its row id, and re-saving
     // used to prefix that a second time — a foreign key matching no row, so the
     // save failed. The same value is what the chat view groups chips by.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -2080,14 +2142,14 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     const loaded = await getConversation(ACCOUNT, 't1')
     expect(loaded?.attachments).toHaveLength(1)
 
     // The chat view matches a chip to its bubble through this value.
-    const attachmentMessageId = loaded?.attachments[0]?.gmailMessageId
-    expect(loaded?.messages.map((m) => m.gmailMessageId)).toContain(
+    const attachmentMessageId = loaded?.attachments[0]?.providerMessageId
+    expect(loaded?.messages.map((m) => m.providerMessageId)).toContain(
       attachmentMessageId,
     )
 
@@ -2100,11 +2162,11 @@ describe('backfill', () => {
     // saving replaces the messages wholesale, the attachment rows were
     // cascade-deleted and none were written back. Every chip vanished from the
     // thread the user had just replied to, until some later sync restored them.
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -2134,7 +2196,7 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
     expect((await getConversation(ACCOUNT, 't1'))?.attachments).toHaveLength(1)
 
     await refreshThread(client, ACCOUNT, 't1')
@@ -2145,17 +2207,17 @@ describe('backfill', () => {
     expect(afterReply?.attachmentCount).toBe(1)
 
     // Still addressable: a chip is matched to its bubble through this value.
-    expect(afterReply?.messages.map((m) => m.gmailMessageId)).toContain(
-      afterReply?.attachments[0]?.gmailMessageId,
+    expect(afterReply?.messages.map((m) => m.providerMessageId)).toContain(
+      afterReply?.attachments[0]?.providerMessageId,
     )
   })
 
   test('records a decision for every synced conversation', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             message({
               id: 'm1',
@@ -2170,7 +2232,7 @@ describe('backfill', () => {
       ],
     })
 
-    await backfill(client, ACCOUNT)
+    await backfill(client, ACCOUNT, { userId: USER })
 
     // The seam is now actually invoked by sync, not just defined.
     const rows = await db.select().from(decisions)
@@ -2181,24 +2243,24 @@ describe('backfill', () => {
   })
 
   test('advances the history cursor', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [],
-      historyId: '55555',
+      cursor: '55555',
     })
 
-    const result = await backfill(client, ACCOUNT)
-    expect(result.historyId).toBe('55555')
+    const result = await backfill(client, ACCOUNT, { userId: USER })
+    expect(result.cursor).toBe('55555')
     expect(client.calls).toContain('getProfileHistoryId')
   })
 })
 
 describe('syncIncremental', () => {
   test('refetches only threads that changed', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '910',
+          cursor: '910',
           messages: [
             message({
               id: 'm1',
@@ -2215,12 +2277,14 @@ describe('syncIncremental', () => {
         '1000': {
           history: [{ id: '1001', messages: [{ id: 'm1', threadId: 't1' }] }],
           nextPageToken: null,
-          historyId: '1001',
+          cursor: '1001',
         },
       },
     })
 
-    const result = await syncIncremental(client, ACCOUNT, '1000')
+    const result = await syncIncremental(client, ACCOUNT, '1000', {
+      userId: USER,
+    })
 
     expect(result.synced).toBe(1)
     const threadFetches = client.calls.filter((c) => c.startsWith('getThread'))
@@ -2228,11 +2292,11 @@ describe('syncIncremental', () => {
   })
 
   test('dedupes thread ids across history records', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '910',
+          cursor: '910',
           messages: [
             message({
               id: 'm1',
@@ -2252,32 +2316,32 @@ describe('syncIncremental', () => {
             { id: '1002', messages: [{ id: 'm1', threadId: 't1' }] },
           ],
           nextPageToken: null,
-          historyId: '1002',
+          cursor: '1002',
         },
       },
     })
 
-    await syncIncremental(client, ACCOUNT, '1000')
+    await syncIncremental(client, ACCOUNT, '1000', { userId: USER })
 
     const threadFetches = client.calls.filter((c) => c.startsWith('getThread'))
     expect(threadFetches).toHaveLength(1)
   })
 
   test('throws when the cursor has expired', async () => {
-    const client = new FakeGmailClient({ threads: [] })
-    await expect(syncIncremental(client, ACCOUNT, 'stale')).rejects.toThrow(
-      /no longer available/i,
-    )
+    const client = new FakeMailboxClient({ threads: [] })
+    await expect(
+      syncIncremental(client, ACCOUNT, 'stale', { userId: USER }),
+    ).rejects.toThrow(/no longer available/i)
   })
 })
 
 describe('sync', () => {
   test('falls back to backfill when the cursor is stale', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '910',
+          cursor: '910',
           messages: [
             message({
               id: 'm1',
@@ -2293,7 +2357,10 @@ describe('sync', () => {
       // No history entry for 'stale', so listHistory throws NotFound.
     })
 
-    const result = await sync(client, ACCOUNT, { startHistoryId: 'stale' })
+    const result = await sync(client, ACCOUNT, {
+      userId: USER,
+      startHistoryId: 'stale',
+    })
 
     expect(result.synced).toBe(1)
     const stored = await listConversations(ACCOUNT)
@@ -2301,11 +2368,11 @@ describe('sync', () => {
   })
 
   test('uses incremental when a cursor exists', async () => {
-    const client = new FakeGmailClient({
+    const client = new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '910',
+          cursor: '910',
           messages: [
             message({
               id: 'm1',
@@ -2322,12 +2389,15 @@ describe('sync', () => {
         '1000': {
           history: [{ id: '1001', messages: [{ id: 'm1', threadId: 't1' }] }],
           nextPageToken: null,
-          historyId: '1001',
+          cursor: '1001',
         },
       },
     })
 
-    const result = await sync(client, ACCOUNT, { startHistoryId: '1000' })
+    const result = await sync(client, ACCOUNT, {
+      userId: USER,
+      startHistoryId: '1000',
+    })
 
     expect(result.synced).toBe(1)
     expect(client.calls.some((c) => c.startsWith('listThreads'))).toBe(false)
@@ -2340,7 +2410,7 @@ describe('AI settings', () => {
     const { getAiPipelineConfig, getAiSettings, saveAiSettings } =
       await import('#/lib/ai/settings.ts')
 
-    await saveAiSettings({
+    await saveAiSettings(USER, {
       jevModel: 'jev-latest',
       llmProvider: 'gemini',
       llmModel: null,
@@ -2349,7 +2419,7 @@ describe('AI settings', () => {
       llmApiKey: 'llm-secret',
     })
 
-    const summary = await getAiSettings()
+    const summary = await getAiSettings(USER)
     expect(summary.jevConfigured).toBe(true)
     expect(summary.llmProvider).toBe('gemini')
     expect(summary.llmConfigured).toBe(true)
@@ -2357,7 +2427,7 @@ describe('AI settings', () => {
     expect(JSON.stringify(summary)).not.toContain('jev-secret')
     expect(JSON.stringify(summary)).not.toContain('llm-secret')
 
-    const config = await getAiPipelineConfig()
+    const config = await getAiPipelineConfig(USER)
     expect(config.jev).toEqual({ apiKey: 'jev-secret', model: 'jev-latest' })
     expect(config.llm).toEqual({
       provider: 'gemini',
@@ -2371,39 +2441,40 @@ describe('AI settings', () => {
     const { getAiPipelineConfig, getAiSettings, saveAiSettings } =
       await import('#/lib/ai/settings.ts')
 
-    await saveAiSettings({
+    await saveAiSettings(USER, {
       jevModel: null,
       llmProvider: null,
       llmModel: null,
       suggestReplyMinImportance: 6,
       jevApiKey: 'first',
     })
-    expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
+    expect((await getAiPipelineConfig(USER)).jev?.apiKey).toBe('first')
 
     // Omitting the key leaves it as-is.
-    await saveAiSettings({
+    await saveAiSettings(USER, {
       jevModel: null,
       llmProvider: null,
       llmModel: null,
       suggestReplyMinImportance: 6,
     })
-    expect((await getAiPipelineConfig()).jev?.apiKey).toBe('first')
+    expect((await getAiPipelineConfig(USER)).jev?.apiKey).toBe('first')
 
     // An empty string clears it.
-    await saveAiSettings({
+    await saveAiSettings(USER, {
       jevModel: null,
       llmProvider: null,
       llmModel: null,
       suggestReplyMinImportance: 6,
       jevApiKey: '',
     })
-    expect((await getAiPipelineConfig()).jev).toBeNull()
-    expect((await getAiSettings()).jevConfigured).toBe(false)
+    expect((await getAiPipelineConfig(USER)).jev).toBeNull()
+    expect((await getAiSettings(USER)).jevConfigured).toBe(false)
   })
 
   test('the draft threshold round-trips, and a bad one is clamped rather than obeyed', async () => {
     process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
-    const { getAiSettings, saveAiSettings } = await import('#/lib/ai/settings.ts')
+    const { getAiSettings, saveAiSettings } =
+      await import('#/lib/ai/settings.ts')
 
     const base = {
       jevModel: null,
@@ -2413,16 +2484,16 @@ describe('AI settings', () => {
       llmApiKey: null,
     }
 
-    await saveAiSettings({ ...base, suggestReplyMinImportance: 3 })
-    expect((await getAiSettings()).suggestReplyMinImportance).toBe(3)
+    await saveAiSettings(USER, { ...base, suggestReplyMinImportance: 3 })
+    expect((await getAiSettings(USER)).suggestReplyMinImportance).toBe(3)
 
     // Out of range is not stored as given: the score it compares against is 1–10,
     // so 0 (every thread eligible) and 99 (none) both have to be brought back in.
-    await saveAiSettings({ ...base, suggestReplyMinImportance: 0 })
-    expect((await getAiSettings()).suggestReplyMinImportance).toBe(1)
+    await saveAiSettings(USER, { ...base, suggestReplyMinImportance: 0 })
+    expect((await getAiSettings(USER)).suggestReplyMinImportance).toBe(1)
 
-    await saveAiSettings({ ...base, suggestReplyMinImportance: 99 })
-    expect((await getAiSettings()).suggestReplyMinImportance).toBe(10)
+    await saveAiSettings(USER, { ...base, suggestReplyMinImportance: 99 })
+    expect((await getAiSettings(USER)).suggestReplyMinImportance).toBe(10)
   })
 })
 
@@ -2475,11 +2546,11 @@ describe('loadAttachment', () => {
   const ATTACHMENT_BYTES = Buffer.from('the bytes of q1.pdf')
 
   function clientWithAttachment(args: { size: number }) {
-    return new FakeGmailClient({
+    return new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -2528,9 +2599,9 @@ describe('loadAttachment', () => {
     const client = clientWithAttachment({ size: 4096 })
 
     try {
-      await backfill(client, ACCOUNT)
+      await backfill(client, ACCOUNT, { userId: USER })
 
-      const result = await loadAttachment('t1', 'att-1', { client })
+      const result = await loadAttachment(USER, 't1', 'att-1', { client })
       if (!result.ok) throw new Error(`expected bytes, got ${result.reason}`)
 
       expect(result.file.filename).toBe('q1.pdf')
@@ -2540,10 +2611,10 @@ describe('loadAttachment', () => {
       )
 
       // The download is recorded, so the next open does not go to Gmail again.
-      const stored = await getStoredAttachment('t1', 'att-1')
+      const stored = await getStoredAttachment(USER, 't1', 'att-1')
       expect(stored?.localPath).toBeTruthy()
 
-      const second = await loadAttachment('t1', 'att-1', { client })
+      const second = await loadAttachment(USER, 't1', 'att-1', { client })
       expect(second.ok).toBe(true)
       expect(
         client.calls.filter((call) => call.startsWith('getAttachment')),
@@ -2560,9 +2631,9 @@ describe('loadAttachment', () => {
     const client = clientWithAttachment({ size: tooLarge })
 
     try {
-      await backfill(client, ACCOUNT)
+      await backfill(client, ACCOUNT, { userId: USER })
 
-      const result = await loadAttachment('t1', 'att-1', { client })
+      const result = await loadAttachment(USER, 't1', 'att-1', { client })
 
       expect(result).toEqual({ ok: false, reason: 'too-large' })
       expect(client.calls.some((c) => c.startsWith('getAttachment'))).toBe(
@@ -2575,7 +2646,7 @@ describe('loadAttachment', () => {
   })
 
   test('reports an unknown attachment rather than throwing', async () => {
-    const result = await loadAttachment('t1', 'no-such-attachment')
+    const result = await loadAttachment(USER, 't1', 'no-such-attachment')
 
     expect(result).toEqual({ ok: false, reason: 'not-found' })
   })
@@ -2606,11 +2677,11 @@ describe('forgetAccount', () => {
   }
 
   function clientWithSavedThread() {
-    return new FakeGmailClient({
+    return new FakeMailboxClient({
       threads: [
         {
           id: 't1',
-          historyId: '900',
+          cursor: '900',
           messages: [
             {
               id: 'm1',
@@ -2639,7 +2710,7 @@ describe('forgetAccount', () => {
 
   test('deletes the mailbox, its stored mail, and only its cached files', async () => {
     await withTempCache(async (cache) => {
-      await backfill(clientWithSavedThread(), ACCOUNT)
+      await backfill(clientWithSavedThread(), ACCOUNT, { userId: USER })
       expect(await listConversations(ACCOUNT)).toHaveLength(1)
 
       const mine = join(cache, ACCOUNT, 'a1b2', 'q1.pdf')
@@ -2649,7 +2720,7 @@ describe('forgetAccount', () => {
         await writeFile(file, 'bytes')
       }
 
-      await forgetAccount(ACCOUNT)
+      await forgetAccount(USER, ACCOUNT)
 
       expect(await listConversations(ACCOUNT)).toHaveLength(0)
       expect(
@@ -2681,11 +2752,11 @@ describe('forgetAccount', () => {
 })
 
 describe('loadInbox on a mailbox that has never synced', () => {
-  // The stored envelope is deliberately bogus, so `createGmailClient` fails on
+  // The stored envelope is deliberately bogus, so `createMailboxClient` fails on
   // the decryption rather than the network — this exercises the branch without
   // ever reaching Gmail.
   test('starts the first sync without waiting for it, then reports its failure', async () => {
-    const started = await loadInbox()
+    const started = await loadInbox(USER)
     if (!started.signedIn) throw new Error('expected a signed-in payload')
 
     // The load took the background branch and returned while the run was still
@@ -2703,7 +2774,7 @@ describe('loadInbox on a mailbox that has never synced', () => {
     let settledSyncing = -1
     for (let attempt = 0; attempt < 200 && settledError === null; attempt++) {
       await Bun.sleep(10)
-      const next = await loadInbox()
+      const next = await loadInbox(USER)
       if (next.signedIn && next.syncError) {
         settledError = next.syncError
         settledAuth = next.authRequiredAccounts.map((a) => a.id)
@@ -2718,7 +2789,7 @@ describe('loadInbox on a mailbox that has never synced', () => {
 
     // And the failure does not restart a run on every load: a retry that began
     // immediately would overwrite the error before it could ever be rendered.
-    const reloaded = await loadInbox()
+    const reloaded = await loadInbox(USER)
     if (!reloaded.signedIn) throw new Error('expected a signed-in payload')
     expect(reloaded.syncedNow).toBe(false)
     expect(reloaded.syncError).toContain('could not be decrypted')
@@ -2726,9 +2797,88 @@ describe('loadInbox on a mailbox that has never synced', () => {
     // Re-sync is the escape hatch. A forced load starts a fresh attempt instead of
     // re-reporting the failure it exists to clear — otherwise the mailbox the
     // banner is complaining about could never be recovered from the UI.
-    const forced = await loadInbox({ force: true, full: true })
+    const forced = await loadInbox(USER, { force: true, full: true })
     if (!forced.signedIn) throw new Error('expected a signed-in payload')
     expect(forced.syncedNow).toBe(true)
     expect(forced.syncError).toBeNull()
+  })
+})
+
+/**
+ * What a signed-in user may reach.
+ *
+ * Every service entry point is scoped by the session's user id, and the ids that
+ * arrive in a request — a thread id, an attachment id, a mailbox — are checked
+ * rather than trusted. This is the test that fails if any of that is dropped.
+ */
+describe('one user’s mail is another’s', () => {
+  const OTHER_USER = 'someone-else@example.com'
+
+  test('an inbox, a thread, an attachment and a deletion are all scoped to the owner', async () => {
+    // One stored thread with one attachment, so every id the other user could
+    // name really does exist — under somebody else's owner.
+    await backfill(
+      new FakeMailboxClient({
+        threads: [
+          {
+            id: 't1',
+            cursor: '900',
+            messages: [
+              {
+                id: 'm1',
+                threadId: 't1',
+                labelIds: ['INBOX'],
+                internalDate: '1705312800000',
+                snippet: '',
+                payload: normalizePart(
+                  multipartPayload({
+                    headers: { from: 's@e.com', subject: 'Report' },
+                    text: 'See attached.',
+                    attachment: {
+                      filename: 'q1.pdf',
+                      mimeType: 'application/pdf',
+                      attachmentId: 'att-1',
+                      size: 1024,
+                    },
+                  }),
+                ),
+              },
+            ],
+          },
+        ],
+      }),
+      ACCOUNT,
+      { userId: USER },
+    )
+    await db.insert(users).values({
+      id: OTHER_USER,
+      email: OTHER_USER,
+      passwordHash: 'not-a-real-hash',
+    })
+
+    // The other user's own mailboxes: none. Their inbox is empty rather than
+    // showing the first user's account.
+    const inbox = await loadInbox(OTHER_USER)
+    if (!inbox.signedIn) throw new Error('expected a signed-in payload')
+    expect(inbox.accounts).toEqual([])
+    expect(inbox.conversations).toEqual([])
+
+    // A thread id that exists — but belongs to somebody else.
+    const { loadConversation } = await import('#/lib/gmail/service.ts')
+    expect(await loadConversation(OTHER_USER, 't1')).toBeNull()
+
+    // And an attachment id, which travels in a URL and is therefore the most
+    // tempting thing to trust.
+    const attachment = await loadAttachment(OTHER_USER, 't1', 'att-1')
+    expect(attachment).toEqual({ ok: false, reason: 'not-found' })
+
+    // Deleting a mailbox by id is refused rather than performed.
+    await expect(forgetAccount(OTHER_USER, ACCOUNT)).rejects.toThrow(
+      /not connected to this account/i,
+    )
+    expect((await listConversations(ACCOUNT)).length).toBeGreaterThan(0)
+
+    // The owner still sees all of it.
+    expect(await loadConversation(USER, 't1')).not.toBeNull()
   })
 })

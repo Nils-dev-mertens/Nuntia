@@ -1,26 +1,27 @@
 /**
- * Fake Gmail client for tests.
+ * Fake mailbox client for tests.
  *
- * Exists because `GmailClient` is a narrow interface. The fake records calls so
+ * Exists because `MailboxClient` is a narrow interface. The fake records calls so
  * tests can assert *how* sync behaved — concurrency, paging, which threads were
  * refetched — not just the end result.
  */
 
 import type {
   AttachmentPayload,
-  GmailClient,
-  GmailThread,
   HistoryPage,
+  MailboxClient,
+  NewMessagePayload,
+  ProviderThread,
   SendResult,
   ThreadListPage,
-} from './client.ts'
-import { GmailNotFoundError } from './client.ts'
+} from './types.ts'
+import { GmailNotFoundError } from '#/lib/gmail/client.ts'
 
 export type FakeOptions = {
-  threads?: GmailThread[]
+  threads?: ProviderThread[]
   /** Threads per page returned by listThreads. */
   pageSize?: number
-  historyId?: string
+  cursor?: string
   /** Canned history pages keyed by the requested startHistoryId. */
   history?: Record<string, HistoryPage>
   attachments?: Record<string, AttachmentPayload>
@@ -28,15 +29,24 @@ export type FakeOptions = {
   failThread?: (threadId: string) => Error | null
 }
 
-export class FakeGmailClient implements GmailClient {
+export class FakeMailboxClient implements MailboxClient {
+  readonly provider = 'google' as const
+  readonly capabilities = { structuredReply: false, delta: true }
+
   readonly calls: string[] = []
 
   /** Raw messages passed to `sendMessage`, for assertions. */
   readonly sent: Array<{ raw: string; threadId?: string }> = []
 
-  private threads: Map<string, GmailThread>
+  /** New messages passed to `sendNewMessage`, for assertions. */
+  readonly started: NewMessagePayload[] = []
+
+  /** Topic names this mailbox was asked to watch. */
+  readonly watches: string[] = []
+
+  private threads: Map<string, ProviderThread>
   private pageSize: number
-  private historyIdValue: string
+  private cursorValue: string
   private historyPages: Record<string, HistoryPage>
   private attachmentData: Record<string, AttachmentPayload>
   private failThread?: (threadId: string) => Error | null
@@ -44,20 +54,20 @@ export class FakeGmailClient implements GmailClient {
   constructor(opts: FakeOptions = {}) {
     this.threads = new Map((opts.threads ?? []).map((t) => [t.id, t]))
     this.pageSize = opts.pageSize ?? 100
-    this.historyIdValue = opts.historyId ?? '1000'
+    this.cursorValue = opts.cursor ?? '1000'
     this.historyPages = opts.history ?? {}
     this.attachmentData = opts.attachments ?? {}
     this.failThread = opts.failThread
   }
 
   /** Add or replace a thread mid-test. */
-  setThread(thread: GmailThread): void {
+  setThread(thread: ProviderThread): void {
     this.threads.set(thread.id, thread)
   }
 
   async getProfileHistoryId(): Promise<string> {
     this.calls.push('getProfileHistoryId')
-    return this.historyIdValue
+    return this.cursorValue
   }
 
   async listThreads({
@@ -77,14 +87,13 @@ export class FakeGmailClient implements GmailClient {
     const nextStart = start + size
 
     return {
-      threads: page.map((t) => ({ id: t.id, historyId: t.historyId })),
-      nextPageToken:
-        nextStart < all.length ? String(nextStart) : null,
+      threads: page.map((t) => ({ id: t.id, cursor: t.cursor })),
+      nextPageToken: nextStart < all.length ? String(nextStart) : null,
       resultSizeEstimate: all.length,
     }
   }
 
-  async getThread(threadId: string): Promise<GmailThread> {
+  async getThread(threadId: string): Promise<ProviderThread> {
     this.calls.push(`getThread:${threadId}`)
 
     const failure = this.failThread?.(threadId)
@@ -142,5 +151,17 @@ export class FakeGmailClient implements GmailClient {
 
     const id = `sent-${this.sent.length}`
     return { id, threadId: opts.threadId ?? `thread-${id}`, labelIds: ['SENT'] }
+  }
+
+  async sendNewMessage(payload: NewMessagePayload): Promise<SendResult> {
+    this.started.push(payload)
+
+    const id = `new-${this.started.length}`
+    return { id, threadId: `thread-${id}`, labelIds: ['SENT'] }
+  }
+
+  async startWatch({ topicName }: { topicName: string }) {
+    this.watches.push(topicName)
+    return { expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000) }
   }
 }

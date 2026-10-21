@@ -24,18 +24,12 @@ import {
   mergeAccountConversations,
 } from '#/lib/conversation/index.ts'
 import { listAccounts } from '#/lib/auth/accounts.ts'
-import { MAX_ATTACHMENT_BYTES, safeFilename } from './attachments.ts'
-import type { GmailClient } from './client.ts'
+import type { MailboxClient } from '#/lib/gmail/client.ts'
+import { decodeAttachmentUploads } from '#/lib/mailbox/attachment-uploads.ts'
+import type { AttachmentUpload } from '#/lib/mailbox/attachment-uploads.ts'
 
-export type ReplyAttachmentUpload = {
-  filename: string
-  contentType: string
-  /** Standard base64-encoded bytes from the composer. */
-  data: string
-}
-
-const MAX_REPLY_ATTACHMENTS = 10
-const MAX_ATTACHMENT_BYTES_TOTAL = 18 * 1024 * 1024
+/** Kept as the name callers already use; the validation is shared with new mail. */
+export type ReplyAttachmentUpload = AttachmentUpload
 
 export type SendReplyResult = {
   messageId: string
@@ -118,7 +112,7 @@ function referenceChain(messages: ConversationMessage[]): string[] {
  * mail client.
  */
 export async function sendReply(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
   conversation: Conversation,
   body: string,
@@ -154,7 +148,7 @@ export async function sendReply(
     )
   }
 
-  const attachments = decodeReplyAttachments(opts.attachments ?? [])
+  const attachments = decodeAttachmentUploads(opts.attachments ?? [], 'reply')
   const mine = lastMessageFromOwner(messages, accountId)
   const incoming = messages.filter((message) => !message.isFromOwner).at(-1)
   const replyGreeting = opts.replyStyle
@@ -190,12 +184,42 @@ export async function sendReply(
   })
 
   const references = referenceChain(messages)
+  const subject = conversation.subject.toLowerCase().startsWith('re:')
+    ? conversation.subject
+    : `Re: ${conversation.subject}`
+
+  // Providers that model a reply rather than a raw message get the composed
+  // body and let their own API thread it. Graph is the one that does: its
+  // `createReply` is what keeps the message in the conversation, and writing the
+  // body over the draft is what stops it from quoting the original a second time.
+  if (client.sendReply) {
+    const result = await client.sendReply({
+      threadId: conversation.providerThreadId,
+      inReplyTo: last.internetMessageId ?? null,
+      references,
+      subject,
+      to: recipients,
+      cc: [],
+      text: composed.text,
+      // Graph's reply body is HTML only. Composition always produces one in
+      // practice; the fallback keeps a plain-text body sendable rather than
+      // dropping it.
+      html:
+        composed.html ??
+        `<p>${escapeHtml(composed.text).replace(/\n/g, '<br>')}</p>`,
+      attachments,
+    })
+
+    return {
+      messageId: result.id,
+      threadId: result.threadId ?? conversation.providerThreadId,
+    }
+  }
+
   const { raw } = buildMimeMessage({
     to: recipients,
     cc: [],
-    subject: conversation.subject.toLowerCase().startsWith('re:')
-      ? conversation.subject
-      : `Re: ${conversation.subject}`,
+    subject,
     body: composed.text,
     html: composed.html,
     inReplyTo: last.internetMessageId ?? undefined,
@@ -203,82 +227,26 @@ export async function sendReply(
     attachments,
   })
 
+  if (!client.sendMessage) {
+    throw new ReplyNotPossibleError('This mailbox cannot send a reply.')
+  }
+
   const result = await client.sendMessage(raw, {
-    threadId: conversation.gmailThreadId,
+    threadId: conversation.providerThreadId,
   })
 
   return {
     messageId: result.id,
-    threadId: result.threadId ?? conversation.gmailThreadId,
+    threadId: result.threadId ?? conversation.providerThreadId,
   }
 }
 
-/** Detect control characters without embedding them in a regular expression. */
-function hasControlCharacter(value: string): boolean {
-  return Array.from(value).some((char) => {
-    const code = char.codePointAt(0) ?? 0
-    return code < 32 || code === 127
-  })
-}
-
-/** Validate and decode untrusted file uploads before composing MIME. */
-function decodeReplyAttachments(
-  uploads: ReplyAttachmentUpload[],
-): Array<{ filename: string; contentType: string; data: Uint8Array }> {
-  if (uploads.length > MAX_REPLY_ATTACHMENTS) {
-    throw new ReplyNotPossibleError(
-      `Attach no more than ${MAX_REPLY_ATTACHMENTS} files per reply.`,
-    )
-  }
-
-  let totalBytes = 0
-  return uploads.map((upload) => {
-    if (
-      typeof upload.filename !== 'string' ||
-      !upload.filename.trim() ||
-      upload.filename.length > 255 ||
-      hasControlCharacter(upload.filename)
-    ) {
-      throw new ReplyNotPossibleError('An attachment has an invalid filename.')
-    }
-    if (
-      typeof upload.data !== 'string' ||
-      upload.data.length > Math.ceil(MAX_ATTACHMENT_BYTES_TOTAL / 3) * 4 ||
-      upload.data.length % 4 !== 0 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-        upload.data,
-      )
-    ) {
-      throw new ReplyNotPossibleError('An attachment could not be read.')
-    }
-
-    const data = Uint8Array.from(Buffer.from(upload.data, 'base64'))
-    if (data.byteLength === 0) {
-      throw new ReplyNotPossibleError('Empty attachments cannot be sent.')
-    }
-    if (data.byteLength > MAX_ATTACHMENT_BYTES) {
-      throw new ReplyNotPossibleError(
-        `${upload.filename} exceeds the 25 MB per-file limit.`,
-      )
-    }
-
-    totalBytes += data.byteLength
-    if (totalBytes > MAX_ATTACHMENT_BYTES_TOTAL) {
-      throw new ReplyNotPossibleError('Attachments must total 18 MB or less.')
-    }
-
-    const contentType =
-      typeof upload.contentType === 'string' &&
-      /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(upload.contentType)
-        ? upload.contentType.toLowerCase()
-        : 'application/octet-stream'
-
-    return {
-      filename: safeFilename(upload.filename),
-      contentType,
-      data,
-    }
-  })
+/** Escape text for the plain-text fallback body. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }
 
 /**
@@ -289,11 +257,11 @@ function decodeReplyAttachments(
  * not appear until some later sync happened to cover it.
  */
 export async function refreshThread(
-  client: GmailClient,
+  client: MailboxClient,
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<void> {
-  const thread = await client.getThread(gmailThreadId)
+  const thread = await client.getThread(providerThreadId)
   const relevant = thread.messages.filter(
     (m) => !m.labelIds.includes('DRAFT') && !m.labelIds.includes('TRASH'),
   )
@@ -308,15 +276,14 @@ export async function refreshThread(
     saveConversation,
   } = await import('#/lib/conversation/index.ts')
 
-  const { toParsedMessage, toThreadAttachmentRefs } = await import(
-    './message.ts'
-  )
+  const { toParsedMessage, toThreadAttachmentRefs } =
+    await import('#/lib/mailbox/message.ts')
 
   const profileContext = await getParsingProfileContext(accountId)
   const parsed = relevant.map(toParsedMessage)
   const conversation = buildConversation(parsed, {
     ownerEmail: accountId,
-    gmailThreadId,
+    providerThreadId,
     // Rebuilt without these, the conversation claimed to have no attachments —
     // and since saving replaces the messages wholesale, the attachment rows
     // went with them and the chips vanished until a later sync restored them.
@@ -337,7 +304,10 @@ export async function refreshThread(
   // they could be lost: the reply just sent is a new message, so saving without
   // them would reset `seen_at` and hand back a thread the user had finished with
   // — seconds after they sent the message that finished it.
-  const storedUserFields = await getStoredUserFields(accountId, gmailThreadId)
+  const storedUserFields = await getStoredUserFields(
+    accountId,
+    providerThreadId,
+  )
 
   await saveConversation(accountId, {
     ...conversation,
@@ -349,9 +319,9 @@ export async function refreshThread(
 /** Load a conversation or fail with a message the UI can show. */
 export async function requireConversation(
   accountId: string,
-  gmailThreadId: string,
+  providerThreadId: string,
 ): Promise<Conversation> {
-  const conversation = await getConversation(accountId, gmailThreadId)
+  const conversation = await getConversation(accountId, providerThreadId)
   if (!conversation) {
     throw new ReplyNotPossibleError('That conversation no longer exists.')
   }
@@ -372,14 +342,18 @@ export async function requireConversation(
  * thread differently across two of the user's mailboxes.
  */
 export async function requireConversationByThreadId(
-  gmailThreadId: string,
+  userId: string,
+  providerThreadId: string,
 ): Promise<{ accountId: string; conversation: Conversation }> {
-  const cluster = await getConversationClusterByThreadId(gmailThreadId)
+  const cluster = await getConversationClusterByThreadId(
+    userId,
+    providerThreadId,
+  )
   if (!cluster || cluster.length === 0) {
     throw new ReplyNotPossibleError('That conversation no longer exists.')
   }
 
-  const accounts = (await listAccounts()).map((account) => ({
+  const accounts = (await listAccounts(userId)).map((account) => ({
     id: account.id,
     email: account.email,
   }))
