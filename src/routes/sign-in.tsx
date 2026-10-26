@@ -17,6 +17,7 @@ import {
 
 import { AuthForm } from '#/components/auth-form.tsx'
 import {
+  accessMode,
   authenticateUser,
   countUsers,
   createSession,
@@ -33,7 +34,12 @@ import {
  */
 const loadSignInState = createServerFn({ method: 'GET' }).handler(
   async (): Promise<
-    { signedIn: true } | { signedIn: false; emptyInstall: boolean }
+    | { signedIn: true }
+    | {
+        signedIn: false
+        emptyInstall: boolean
+        mode: 'invite' | 'login'
+      }
   > => {
     const session = await getSession()
     if (session) return { signedIn: true }
@@ -41,7 +47,13 @@ const loadSignInState = createServerFn({ method: 'GET' }).handler(
     // Read after the session, which is what creates the environment's default
     // user if there is one: otherwise the very first visit would claim no users
     // exist while the default one is being created.
-    return { signedIn: false, emptyInstall: (await countUsers()) === 0 }
+    return {
+      signedIn: false,
+      emptyInstall: (await countUsers()) === 0,
+      // Read on the server: `process.env` is not the same thing in the browser,
+      // and the loader runs in both places.
+      mode: accessMode(),
+    }
   },
 )
 
@@ -61,6 +73,10 @@ export const Route = createFileRoute('/sign-in')({
   loader: async () => {
     const state = await loadSignInState()
     if (state.signedIn) throw redirect({ to: '/' })
+
+    // The beta has no sign-in form. Operators keep theirs at `/admin/sign-in`,
+    // which is a different route and not affected by this.
+    if (state.mode === 'invite') throw redirect({ to: '/request-access' })
 
     return { emptyInstall: state.emptyInstall }
   },

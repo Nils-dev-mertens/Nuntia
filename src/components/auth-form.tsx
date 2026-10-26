@@ -74,7 +74,7 @@ export function AuthForm({
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col justify-center p-8">
       <h1 className="text-2xl font-bold">
-        {signingUp ? 'Create your account' : 'Sign in to Lumen'}
+        {signingUp ? 'Create your account' : 'Sign in to Nuntia'}
       </h1>
       <p className="mt-2 text-sm text-muted-foreground">
         {signingUp

@@ -48,6 +48,18 @@ export const ORGANIZATION_RULE_FIELDS = [
 export type OrganizationRuleField = (typeof ORGANIZATION_RULE_FIELDS)[number]
 
 /**
+ * The two roles there are.
+ *
+ * `admin` may open `/admin`; `member` may not. Kept as a column rather than an
+ * env-only allowlist so the first user on a fresh install can be promoted
+ * without a restart, and so an operator page can name its owner. The env list
+ * (`LUMEN_ADMIN_EMAILS`) stays as the break-glass override.
+ */
+export const USER_ROLES = ['admin', 'member'] as const
+
+export type UserRole = (typeof USER_ROLES)[number]
+
+/**
  * A person who signs in to this install.
  *
  * `id` is the lowercased email address, the same convention accounts use: it is
@@ -63,6 +75,8 @@ export const users = sqliteTable(
     name: text('name'),
     /** argon2id hash. Never the password, and never logged. */
     passwordHash: text('password_hash').notNull(),
+    /** `admin` may open `/admin`. An invited user starts as `member`. */
+    role: text('role').notNull().default('member').$type<UserRole>(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -617,6 +631,11 @@ export const organizationRules = sqliteTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     /** User-facing name of the custom inbox section. */
     name: text('name').notNull(),
+    /**
+     * What this label means, in the user's words — shown under the inbox heading
+     * so a section explains itself rather than only naming itself.
+     */
+    description: text('description').notNull().default(''),
     field: text('field').$type<OrganizationRuleField>().notNull(),
     value: text('value').notNull(),
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
@@ -632,6 +651,34 @@ export const organizationRules = sqliteTable(
   (table) => [
     index('organization_rules_user_position_idx').on(table.userId, table.position),
   ],
+)
+
+/**
+ * The user's own wording for the four built-in state labels.
+ *
+ * The state itself is not theirs to change — the decision layer and every stored
+ * row speak in those four values, and a fifth would be a new classification rule
+ * rather than a rename. What is theirs is the words: "Needs action" can be
+ * "Do this now" and "Waiting for reply" can be "Ball with them". A row exists
+ * only for a label the user changed from the default, so improved default copy
+ * still reaches anyone who never edited theirs.
+ */
+export const stateLabels = sqliteTable(
+  'state_labels',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    state: text('state').$type<ConversationState>().notNull(),
+    /** The label's name, as the user wants it in headings and badges. */
+    name: text('name').notNull(),
+    /** What the label means and is for. */
+    description: text('description').notNull().default(''),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.state] })],
 )
 
 export const contacts = sqliteTable(
@@ -745,7 +792,399 @@ export const appSettings = sqliteTable(
   (table) => [uniqueIndex('app_settings_user_idx').on(table.userId)],
 )
 
+/**
+ * One invite code, issued by an operator.
+ *
+ * The code itself is never stored — only its SHA-256 — for the same reason a
+ * session token is not: a database dump would otherwise be a list of working
+ * credentials. `useCount` is a counter rather than a `COUNT(*)` because
+ * redemption compares it inside the same `UPDATE` that increments it, which is
+ * what makes "single use" true under two simultaneous clicks.
+ *
+ * `email` is optional. Set, it binds redemption to that address and also makes
+ * the invite reusable *by* that address, so a cleared cookie is not a lockout.
+ * `notifiedAt` / `notifyError` describe the approval email, not the invite: a
+ * failed send must not undo an approval.
+ */
+export const invites = sqliteTable(
+  'invites',
+  {
+    id: text('id').primaryKey(),
+    /** SHA-256 hex of the code. This is what redemption looks codes up by. */
+    codeHash: text('code_hash').notNull(),
+    /**
+     * AES-256-GCM ciphertext of the code, so the operator can copy the link
+     * again later.
+     *
+     * The hash alone cannot produce a link, and "mint a new one" is a poor
+     * answer to "what did I send them?". Encrypted rather than plaintext for
+     * the same reason refresh tokens are: a database dump should not be a list
+     * of working invitations. Null when no `TOKEN_ENCRYPTION_KEY` is set — the
+     * invite still works, the link just cannot be shown again.
+     */
+    codeEncrypted: text('code_encrypted'),
+    /** Who it is for, in the operator's words. */
+    label: text('label'),
+    /** Lowercased. When set, only this address may redeem it. */
+    email: text('email'),
+    /** Redemptions by a *different* address each consume one. */
+    maxUses: integer('max_uses').notNull().default(1),
+    useCount: integer('use_count').notNull().default(0),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }),
+    revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+    /** When a mailbox accepted the approval email. Null means nothing was sent. */
+    notifiedAt: integer('notified_at', { mode: 'timestamp_ms' }),
+    /** The last send failure; cleared by a successful resend. */
+    notifyError: text('notify_error'),
+    createdBy: text('created_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('invites_code_hash_idx').on(table.codeHash),
+    index('invites_email_idx').on(table.email),
+  ],
+)
+
+export const ACCESS_REQUEST_STATUSES = [
+  'pending',
+  'approved',
+  'declined',
+  'redeemed',
+] as const
+
+export type AccessRequestStatus = (typeof ACCESS_REQUEST_STATUSES)[number]
+
+/**
+ * Someone who asked to get in.
+ *
+ * A row rather than an email, because the answer to "how many people wanted
+ * this" has to be countable and because `note` — what they are trying to fix —
+ * is the most useful thing a beta collects before anyone has seen the product.
+ *
+ * The partial unique index is the dedupe rule: one *pending* request per
+ * address, while declined and approved rows may repeat over time.
+ */
+export const accessRequests = sqliteTable(
+  'access_requests',
+  {
+    id: text('id').primaryKey(),
+    /** Lowercased; the address the invite will be bound to. */
+    email: text('email').notNull(),
+    name: text('name'),
+    /** "What are you trying to fix?" — required, because it is the signal. */
+    note: text('note').notNull(),
+    /** How they heard about it, when they say. */
+    source: text('source'),
+    status: text('status')
+      .notNull()
+      .default('pending')
+      .$type<AccessRequestStatus>(),
+    /** Set when the invite is redeemed, by the redemption itself. */
+    inviteId: text('invite_id').references(() => invites.id, {
+      onDelete: 'set null',
+    }),
+    decidedBy: text('decided_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    declinedReason: text('declined_reason'),
+    decidedAt: integer('decided_at', { mode: 'timestamp_ms' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('access_requests_pending_email_idx')
+      .on(table.email)
+      .where(sql`status = 'pending'`),
+    index('access_requests_status_idx').on(table.status, table.createdAt),
+  ],
+)
+
+/**
+ * Who used which invite.
+ *
+ * The code hash cannot answer "which invite produced this person", and the
+ * funnel's redemption step needs exactly that. Cascades with the invite and the
+ * user, so deleting either leaves no orphan.
+ */
+export const inviteRedemptions = sqliteTable(
+  'invite_redemptions',
+  {
+    id: text('id').primaryKey(),
+    inviteId: text('invite_id')
+      .notNull()
+      .references(() => invites.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Browser hint only; never used for authorisation. */
+    userAgent: text('user_agent'),
+    redeemedAt: integer('redeemed_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('invite_redemptions_invite_idx').on(table.inviteId),
+    /** One redemption row per person per invite: re-entering is not a new use. */
+    uniqueIndex('invite_redemptions_pair_idx').on(table.inviteId, table.userId),
+  ],
+)
+
+export const FEEDBACK_STATUSES = [
+  'new',
+  'read',
+  'planned',
+  'fixed',
+  'declined',
+] as const
+
+export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number]
+
+/**
+ * What a beta user said got in the way.
+ *
+ * `context` is the route plus a conversation id when there is one, so a
+ * complaint about the composer arrives attached to the thread it happened on.
+ * The email is optional and user-supplied: filling it in is permission to reply.
+ */
+export const feedback = sqliteTable(
+  'feedback',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    email: text('email'),
+    /** 1–5, or null when they only wrote something. */
+    rating: integer('rating'),
+    message: text('message').notNull(),
+    /** Route, plus a conversation id when the form was opened from one. */
+    context: text('context'),
+    status: text('status').notNull().default('new').$type<FeedbackStatus>(),
+    resolutionNote: text('resolution_note'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [index('feedback_status_idx').on(table.status, table.createdAt)],
+)
+
+/**
+ * The closed list of things that leave no trace in the app's own tables.
+ *
+ * Everything else in the funnel is derived from rows written for the product's
+ * own reasons. This is deliberately an enum in code: a general-purpose tracker
+ * is a second copy of the truth, and it drifts.
+ */
+export const PRODUCT_EVENT_NAMES = [
+  'active-day',
+  'draft-generated',
+  'draft-used',
+  'feedback-opened',
+  'invite-link-copied',
+] as const
+
+export type ProductEventName = (typeof PRODUCT_EVENT_NAMES)[number]
+
+/**
+ * One of those events.
+ *
+ * Never a subject, a sender, a body, a topic, or a third party's address: the
+ * row is the user, the event name, a timestamp, and at most a conversation id.
+ */
+export const productEvents = sqliteTable(
+  'product_events',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull().$type<ProductEventName>(),
+    conversationId: text('conversation_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('product_events_user_idx').on(table.userId, table.createdAt),
+    index('product_events_name_idx').on(table.name, table.createdAt),
+  ],
+)
+
+/**
+ * Operator-authored questions.
+ *
+ * The beta needs to ask different things as it goes — "what got in the way?"
+ * today, "would you use this?" next week — so the questions are rows, not code.
+ * A form is frozen once it is published: editing it afterwards would make the
+ * same prompt mean two things across two weeks, and the answers incomparable.
+ */
+export const FORM_STATUSES = ['draft', 'open', 'closed'] as const
+
+export type FormStatus = (typeof FORM_STATUSES)[number]
+
+export const FORM_AUDIENCES = ['all', 'selected'] as const
+
+export type FormAudience = (typeof FORM_AUDIENCES)[number]
+
+export const FORM_QUESTION_TYPES = [
+  'short-text',
+  'long-text',
+  'choice',
+  'multi-choice',
+  'scale',
+  'yes-no',
+] as const
+
+export type FormQuestionType = (typeof FORM_QUESTION_TYPES)[number]
+
+export const forms = sqliteTable(
+  'forms',
+  {
+    id: text('id').primaryKey(),
+    title: text('title').notNull(),
+    description: text('description').notNull().default(''),
+    status: text('status').notNull().default('draft').$type<FormStatus>(),
+    audience: text('audience').notNull().default('all').$type<FormAudience>(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    publishedAt: integer('published_at', { mode: 'timestamp_ms' }),
+    closedAt: integer('closed_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [index('forms_status_idx').on(table.status, table.createdAt)],
+)
+
+/**
+ * One question on a form.
+ *
+ * `key` is stable for the life of the form and names the answer's CSV column;
+ * reordering moves `position`, not the key. `options` holds a JSON array of
+ * strings for `choice` and `multi-choice`; `scale` is fixed 1–5 with optional
+ * endpoint labels, so there are no numbers to validate beyond the range.
+ */
+export const formQuestions = sqliteTable(
+  'form_questions',
+  {
+    id: text('id').primaryKey(),
+    formId: text('form_id')
+      .notNull()
+      .references(() => forms.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    position: integer('position').notNull(),
+    type: text('type').notNull().$type<FormQuestionType>(),
+    prompt: text('prompt').notNull(),
+    help: text('help'),
+    required: integer('required', { mode: 'boolean' }).notNull().default(false),
+    options: text('options_json'),
+    scaleLowLabel: text('scale_low_label'),
+    scaleHighLabel: text('scale_high_label'),
+  },
+  (table) => [
+    uniqueIndex('form_questions_form_key_idx').on(table.formId, table.key),
+    index('form_questions_form_position_idx').on(table.formId, table.position),
+  ],
+)
+
+/** The people a `selected` form is for. Ignored when the audience is `all`. */
+export const formAudience = sqliteTable(
+  'form_audience',
+  {
+    formId: text('form_id')
+      .notNull()
+      .references(() => forms.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.formId, table.userId] })],
+)
+
+/**
+ * Whether one person saw, dismissed or answered a form.
+ *
+ * This is the denominator: "three answers" and "three answers out of forty who
+ * saw the banner" are different facts about the beta.
+ */
+export const formParticipation = sqliteTable(
+  'form_participation',
+  {
+    formId: text('form_id')
+      .notNull()
+      .references(() => forms.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    shownAt: integer('shown_at', { mode: 'timestamp_ms' }),
+    dismissedAt: integer('dismissed_at', { mode: 'timestamp_ms' }),
+    submittedAt: integer('submitted_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [primaryKey({ columns: [table.formId, table.userId] })],
+)
+
+/** One response per person per form, editable until the form closes. */
+export const formResponses = sqliteTable(
+  'form_responses',
+  {
+    id: text('id').primaryKey(),
+    formId: text('form_id')
+      .notNull()
+      .references(() => forms.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    submittedAt: integer('submitted_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('form_responses_form_user_idx').on(table.formId, table.userId),
+    index('form_responses_form_idx').on(table.formId, table.submittedAt),
+  ],
+)
+
+/** The typed answer to one question; the column used depends on its type. */
+export const formAnswers = sqliteTable(
+  'form_answers',
+  {
+    id: text('id').primaryKey(),
+    responseId: text('response_id')
+      .notNull()
+      .references(() => formResponses.id, { onDelete: 'cascade' }),
+    questionId: text('question_id')
+      .notNull()
+      .references(() => formQuestions.id, { onDelete: 'cascade' }),
+    valueText: text('value_text'),
+    valueNumber: integer('value_number'),
+    valueChoices: text('value_choices_json'),
+  },
+  (table) => [
+    uniqueIndex('form_answers_response_question_idx').on(
+      table.responseId,
+      table.questionId,
+    ),
+  ],
+)
+
 export type User = typeof users.$inferSelect
+export type Invite = typeof invites.$inferSelect
+export type AccessRequest = typeof accessRequests.$inferSelect
+export type InviteRedemption = typeof inviteRedemptions.$inferSelect
+export type Feedback = typeof feedback.$inferSelect
+export type Form = typeof forms.$inferSelect
+export type FormQuestion = typeof formQuestions.$inferSelect
+export type FormResponse = typeof formResponses.$inferSelect
+export type FormAnswer = typeof formAnswers.$inferSelect
 export type Session = typeof sessions.$inferSelect
 export type Account = typeof accounts.$inferSelect
 export type AppSettings = typeof appSettings.$inferSelect
@@ -757,4 +1196,5 @@ export type SenderSignal = typeof senderSignals.$inferSelect
 export type Contact = typeof contacts.$inferSelect
 export type ContactContext = typeof contactContexts.$inferSelect
 export type OrganizationRuleRow = typeof organizationRules.$inferSelect
+export type FormParticipation = typeof formParticipation.$inferSelect
 export type Decision = typeof decisions.$inferSelect

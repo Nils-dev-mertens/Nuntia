@@ -217,7 +217,7 @@ describe('stripGreeting', () => {
 
   test('removes Dutch greetings, with and without a comma', () => {
     // The regression: only English openers were known, so `Dag Nils` stayed in
-    // the bubble and Lumen looked like it was not parsing at all.
+    // the bubble and Nuntia looked like it was not parsing at all.
     expect(stripGreeting('Dag Nils\n\nDit is een test.').greeting).toBe(
       'Dag Nils',
     )

@@ -4,9 +4,15 @@ import type { ConversationState } from '#/db/schema'
 
 export function StateBadge({
   state,
+  label,
   className,
 }: {
   state: ConversationState
+  /**
+   * The user's name for this label, when they have given it one. The state — and
+   * therefore the colour — is fixed; only the words are theirs.
+   */
+  label?: string
   className?: string
 }) {
   const meta = STATE_META[state]
@@ -23,7 +29,7 @@ export function StateBadge({
         aria-hidden="true"
         className={cn('size-1.5 rounded-full', meta.dotClass)}
       />
-      {meta.label}
+      {label ?? meta.label}
     </span>
   )
 }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-contact-context-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-contact-context-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 

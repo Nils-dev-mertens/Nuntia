@@ -386,7 +386,7 @@ export function wrapGmailError(error: unknown): Error {
 
   if (status === 429 || (status === 403 && isQuota)) {
     return new GmailRateLimitError(
-      'Gmail is rate-limiting requests (quota exceeded). Lumen will retry on the next sync.',
+      'Gmail is rate-limiting requests (quota exceeded). Nuntia will retry on the next sync.',
       retryAfterMsOf(anyErr?.response?.headers),
     )
   }

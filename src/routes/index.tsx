@@ -16,7 +16,13 @@ import { useEffect } from 'react'
 
 import { Inbox } from '#/components/inbox'
 import { getSession } from '#/lib/auth/index.ts'
+import {
+  dismissForm,
+  listOpenFormsForUser,
+  markFormShown,
+} from '#/lib/forms/repository.ts'
 import { loadInbox } from '#/lib/gmail/service.ts'
+import type { ConversationSummary } from '#/lib/gmail/service.ts'
 
 /**
  * How often an open tab re-checks the inbox.
@@ -75,19 +81,113 @@ const resyncInbox = createServerFn({ method: 'POST' }).handler(
   },
 )
 
+/**
+ * Search the mail this user's mailboxes have already synced.
+ *
+ * Server-side rather than filtering the rendered list: the ten-per-section view
+ * deliberately hides most rows, so a search has to be able to match mail the
+ * page is not showing. It reads the database only — no provider call, no
+ * re-decision — so typing stays cheap.
+ */
+const searchInbox = createServerFn({ method: 'GET' })
+  .validator((data: { query: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      conversations: ConversationSummary[]
+      error: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) {
+        return { conversations: [], error: 'You are not signed in.' }
+      }
+
+      const query =
+        typeof data.query === 'string' ? data.query.trim().slice(0, 200) : ''
+      if (!query) return { conversations: [], error: null }
+
+      try {
+        const payload = await loadInbox(session.userId, { search: query })
+        if (!payload.signedIn) {
+          return { conversations: [], error: 'No mailbox is connected.' }
+        }
+        return { conversations: payload.conversations, error: null }
+      } catch (error) {
+        console.error('[search] failed:', error)
+        return {
+          conversations: [],
+          error: 'Search failed. Try again in a moment.',
+        }
+      }
+    },
+  )
+
+/**
+ * The one open form the inbox promotes, plus how many are open overall.
+ *
+ * Returning the prompt marks it shown, which is the denominator the response
+ * rate is measured against — a form nobody saw and a form everybody ignored are
+ * different facts. The write is idempotent, so the two-minute revalidation does
+ * not inflate it.
+ */
+const fetchFormPrompt = createServerFn({ method: 'GET' }).handler(async () => {
+  const session = await getSession()
+  if (!session) return { signedIn: false } as const
+
+  const open = await listOpenFormsForUser(session.userId)
+  const promoted =
+    open.find((form) => !form.dismissed && !form.submitted) ?? null
+  if (promoted) await markFormShown(promoted.id, session.userId)
+
+  return {
+    signedIn: true,
+    // Answered forms stay listed under Questions so an answer can be edited,
+    // which is also why the link survives after every form is answered.
+    count: open.length,
+    promoted: promoted
+      ? {
+          id: promoted.id,
+          title: promoted.title,
+          description: promoted.description,
+          questionCount: promoted.questionCount,
+        }
+      : null,
+  } as const
+})
+
+const dismissFormPrompt = createServerFn({ method: 'POST' })
+  .validator((data: { formId: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    const result = await dismissForm(data.formId, session.userId)
+    return { error: result.ok ? null : result.error }
+  })
+
 export const Route = createFileRoute('/')({
   // Signed out is a redirect rather than a branch the inbox renders: without a
   // user there is nobody whose mail this page could possibly show.
   loader: async () => {
-    const payload = await fetchInbox()
+    const [payload, prompts] = await Promise.all([
+      fetchInbox(),
+      fetchFormPrompt(),
+    ])
+
     if (!payload.signedIn) throw redirect({ to: '/sign-in' })
-    return payload
+
+    return {
+      ...payload,
+      formPrompt: prompts.signedIn ? prompts.promoted : null,
+      openFormCount: prompts.signedIn ? prompts.count : 0,
+    }
   },
   component: Home,
 })
 
 function Home() {
-  const payload = Route.useLoaderData()
+  const { formPrompt, openFormCount, ...payload } = Route.useLoaderData()
   const router = useRouter()
 
   // A boolean rather than the list itself: the effect below should restart when
@@ -121,6 +221,8 @@ function Home() {
   return (
     <Inbox
       payload={payload}
+      formPrompt={formPrompt}
+      openFormCount={openFormCount}
       onResync={async () => {
         const result = await resyncInbox()
         // The action has already written whatever it could, so a refresh is
@@ -128,6 +230,12 @@ function Home() {
         if (!result.error) await router.invalidate()
         return result
       }}
+      onDismissForm={async (formId) => {
+        const result = await dismissFormPrompt({ data: { formId } })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSearch={(query) => searchInbox({ data: { query } })}
     />
   )
 }

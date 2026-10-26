@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { eq } from 'drizzle-orm'
 
 // A database of its own, before any module reads DATABASE_URL.
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-send-new-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-send-new-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)

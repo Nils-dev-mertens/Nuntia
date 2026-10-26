@@ -29,6 +29,7 @@ import { and, eq, lt, ne } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { sessions } from '#/db/schema.ts'
+import { recordActiveDay } from '#/lib/beta/events.ts'
 
 import { ensureBootstrapUser } from './users.ts'
 
@@ -148,6 +149,11 @@ export async function getSession(): Promise<SessionData | null> {
 
     setCookie(COOKIE_NAME, raw, cookieOptions())
   }
+
+  // The only funnel step the session table cannot answer: `last_seen_at` keeps
+  // the latest touch, not a history, so "came back on another day" is written
+  // here. At most one row per session per day, and it never fails the request.
+  await recordActiveDay(sessionId, row.userId)
 
   return { sessionId, userId: row.userId }
 }

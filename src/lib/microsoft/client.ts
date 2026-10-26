@@ -174,7 +174,7 @@ export function createGraphClient(opts: GraphClientOptions): MailboxClient {
       }
 
       throw new MicrosoftRateLimitError(
-        'Outlook is rate-limiting requests. Lumen will retry on the next sync.',
+        'Outlook is rate-limiting requests. Nuntia will retry on the next sync.',
         retryAfterMsOf(response),
       )
     }

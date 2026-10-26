@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 // A database of its own, before any module reads DATABASE_URL.
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-suggestions-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-suggestions-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)

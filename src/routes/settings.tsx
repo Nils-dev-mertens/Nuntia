@@ -33,16 +33,10 @@ import {
   revokeAllSessions,
 } from '#/lib/auth/index.ts'
 import {
-  aiLogPath,
   getAiSettings,
-  readRecentAiEvents,
   saveAiSettings,
 } from '#/lib/ai/index.ts'
-import type {
-  AiLogRecord,
-  AiSettingsSummary,
-  LlmProvider,
-} from '#/lib/ai/index.ts'
+import type { AiSettingsSummary, LlmProvider } from '#/lib/ai/index.ts'
 import {
   addUnreplyableSender,
   forgetAccount,
@@ -66,17 +60,25 @@ import {
   REPLY_DRAFT_MIN_IMPORTANCE_MAX,
   REPLY_DRAFT_MIN_IMPORTANCE_MIN,
 } from '#/lib/conversation/draft.ts'
-import { cn } from '#/lib/utils'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
 import {
   listOrganizationRules,
+  listStateLabels,
   saveOrganizationRules,
+  saveStateLabels,
 } from '#/lib/organization/store.ts'
 import type { OrganizationRule } from '#/lib/organization/matching.ts'
 import {
   ORGANIZATION_RULE_FIELDS,
   ORGANIZATION_RULE_LIMITS,
 } from '#/lib/organization/matching.ts'
+import {
+  STATE_LABEL_LIMITS,
+  defaultStateLabels,
+} from '#/lib/organization/labels.ts'
+import type { StateLabels } from '#/lib/organization/labels.ts'
+import { CONVERSATION_STATES } from '#/db/schema.ts'
+import { STATE_META, STATE_ORDER } from '#/lib/conversation-state.ts'
 
 /** Provider choices for the topic generator. Labels only — no server code. */
 const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
@@ -95,6 +97,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         signedIn: true
         settings: AiSettingsSummary
         organizationRules: OrganizationRule[]
+        /** The four state labels, with the user's wording applied. */
+        stateLabels: StateLabels
         /** Connected mailboxes, so they can be listed and cleared out. */
         accounts: Array<{
           id: string
@@ -115,8 +119,6 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
           /** True for the device making this request, so it cannot revoke itself by accident. */
           current: boolean
         }>
-        /** Recent AI calls, with the file they were written to. */
-        aiLog: { path: string; events: AiLogRecord[] }
         /**
          * Senders the user has marked as ones a reply cannot reach, per mailbox.
          *
@@ -195,6 +197,7 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       signedIn: true,
       settings: await getAiSettings(session.userId),
       organizationRules: await listOrganizationRules(session.userId),
+      stateLabels: await listStateLabels(session.userId),
       accounts: await Promise.all(
         accounts.map(async (account) => {
           const profile = await getParsingProfileContext(account.id)
@@ -219,7 +222,6 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         lastSeenAt: device.lastSeenAt.toISOString(),
         current: device.id === session.sessionId,
       })),
-      aiLog: { path: aiLogPath(), events: await readRecentAiEvents(20) },
       useGravatar: (await getPreferences(session.userId)).useGravatar,
       unreplyableSenders,
       recentSenders,
@@ -328,6 +330,27 @@ const saveOrganizationRulesAction = createServerFn({ method: 'POST' })
       return { rules: null, error: 'Could not save organization rules.' }
     }
   })
+
+const saveStateLabelsAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{ labels: StateLabels | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { labels: null, error: 'You are not signed in.' }
+
+      try {
+        const labels = await saveStateLabels(session.userId, data)
+        return labels
+          ? { labels, error: null }
+          : { labels: null, error: 'Those labels are invalid or too long.' }
+      } catch (error) {
+        console.error('[settings] saving state labels failed:', error)
+        return { labels: null, error: 'Could not save the labels.' }
+      }
+    },
+  )
 
 const saveGravatarAction = createServerFn({ method: 'POST' })
   .validator((data: { useGravatar: boolean }) => data)
@@ -562,17 +585,155 @@ type SignedInSettings = Extract<
 >
 
 /**
- * Settings, one component.
+ * The words the four built-in labels read as.
  *
- * There used to be a signed-out branch here, split out so flipping the loader's
- * state did not change a hook list. The loader redirects a signed-out visitor
- * now, so the only variable left is how many mailboxes the user has — and a user
- * with none still has an account, keys to set, and devices to sign out.
+ * The labels themselves are fixed — every decision and stored row speaks in
+ * those four values — but their names and meanings are the user's. The inbox
+ * shows both: the name in the heading and badge, the meaning under the heading,
+ * so a section explains why a thread is in it instead of only naming it.
  */
+function StateLabelsEditor({
+  initialLabels,
+}: {
+  initialLabels: StateLabels
+}) {
+  const router = useRouter()
+  const [labels, setLabels] = useState(initialLabels)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  function update(
+    state: keyof StateLabels,
+    patch: Partial<StateLabels[keyof StateLabels]>,
+  ) {
+    setLabels((current) => ({
+      ...current,
+      [state]: { ...current[state], ...patch },
+    }))
+    setMessage(null)
+  }
+
+  async function save() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await saveStateLabelsAction({
+        data: CONVERSATION_STATES.map((state) => ({
+          state,
+          ...labels[state],
+        })),
+      })
+      if (result.error || !result.labels) {
+        setError(result.error ?? 'Could not save the labels.')
+        return
+      }
+      setLabels(result.labels)
+      setMessage('Labels saved.')
+      await router.invalidate()
+    } catch {
+      setError('Could not save the labels.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const defaults = defaultStateLabels()
+  const inputClass =
+    'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
+
+  return (
+    <section className="mt-6 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">Label meanings</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Every thread is filed under one of these four labels. Rename one, or
+        rewrite what it means and is for — the inbox headings, the meaning under
+        each heading and the badge on a thread all use your words. This changes
+        the wording only, never how mail is filed.
+      </p>
+
+      <ol className="mt-3 space-y-2">
+        {STATE_ORDER.map((state) => (
+          <li key={state} className="rounded-md border border-border p-3">
+            <div className="flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className={`size-2 shrink-0 rounded-full ${STATE_META[state].dotClass}`}
+              />
+              <input
+                aria-label={`${defaults[state].name} label name`}
+                value={labels[state].name}
+                maxLength={STATE_LABEL_LIMITS.name}
+                disabled={busy}
+                onChange={(event) =>
+                  update(state, { name: event.target.value })
+                }
+                placeholder={defaults[state].name}
+                className={`${inputClass} flex-1`}
+              />
+            </div>
+            <label className="mt-2 block text-[11px] text-muted-foreground">
+              Meaning / purpose
+              <textarea
+                aria-label={`${defaults[state].name} label meaning`}
+                value={labels[state].description}
+                maxLength={STATE_LABEL_LIMITS.description}
+                rows={2}
+                disabled={busy}
+                onChange={(event) =>
+                  update(state, { description: event.target.value })
+                }
+                placeholder={defaults[state].description}
+                className={`${inputClass} mt-1 block w-full resize-y`}
+              />
+            </label>
+          </li>
+        ))}
+      </ol>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save()}
+          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Save labels'}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setLabels(defaultStateLabels())
+            setMessage('Default wording restored. Save to apply it.')
+          }}
+          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          Use default wording
+        </button>
+      </div>
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {message ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {message}
+        </p>
+      ) : null}
+    </section>
+  )
+}
+
 function OrganizationRulesEditor({
   initialRules,
+  stateLabels,
 }: {
   initialRules: OrganizationRule[]
+  stateLabels: StateLabels
 }) {
   const router = useRouter()
   const [rules, setRules] = useState(initialRules)
@@ -627,21 +788,21 @@ function OrganizationRulesEditor({
     'sender-domain': 'Sender domain is',
     'subject-contains': 'Subject contains',
     'topic-contains': 'Topic contains',
-    'state-is': 'Conversation state is',
+    'state-is': 'Label is',
   }
   const inputClass =
     'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
 
   return (
     <section className="mt-6 rounded-lg border border-border bg-card p-4">
-      <h2 className="text-sm font-semibold text-foreground">
-        Organization rules
-      </h2>
+      <h2 className="text-sm font-semibold text-foreground">Custom labels</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        File matching conversations into named inbox sections. Rules run from top
-        to bottom; the first enabled match wins. Unmatched threads stay in their
-        usual state groups, and Done threads stay in Done. Rules only change
-        organization, never the conversation state or AI classification.
+        Add labels of your own and the rule that files matching conversations
+        into each one. Rules run from top to bottom; the first enabled match
+        wins. Each label has a name and a meaning the inbox shows under it.
+        Unmatched threads stay in their four label groups, and Done threads stay
+        in Done. Rules only change where a thread is listed, never its state or
+        AI classification.
       </p>
       {rules.length > 0 ? (
         <ol className="mt-3 space-y-2">
@@ -655,14 +816,14 @@ function OrganizationRulesEditor({
                   {index + 1}.
                 </span>
                 <input
-                  aria-label={`Rule ${index + 1} section name`}
+                  aria-label={`Rule ${index + 1} label name`}
                   value={rule.name}
-                  maxLength={80}
+                  maxLength={ORGANIZATION_RULE_LIMITS.name}
                   disabled={busy}
                   onChange={(event) =>
                     updateRule(rule.id, { name: event.target.value })
                   }
-                  placeholder="Section name, e.g. Finance"
+                  placeholder="Label name, e.g. Finance"
                   className={`${inputClass} flex-1`}
                 />
                 <button
@@ -708,6 +869,21 @@ function OrganizationRulesEditor({
                   Delete
                 </button>
               </div>
+              <label className="mt-2 block text-[11px] text-muted-foreground">
+                Meaning / purpose
+                <textarea
+                  aria-label={`Rule ${index + 1} label meaning`}
+                  value={rule.description}
+                  maxLength={ORGANIZATION_RULE_LIMITS.description}
+                  rows={2}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateRule(rule.id, { description: event.target.value })
+                  }
+                  placeholder="What belongs in this label, and why"
+                  className={`${inputClass} mt-1 block w-full resize-y`}
+                />
+              </label>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <label className="text-[11px] text-muted-foreground">
                   Match when
@@ -745,10 +921,11 @@ function OrganizationRulesEditor({
                       }
                       className={`${inputClass} mt-1 block w-full`}
                     >
-                      <option value="needs-action">Needs action</option>
-                      <option value="waiting-for-reply">Waiting for reply</option>
-                      <option value="informational">Informational</option>
-                      <option value="low-priority">Low priority</option>
+                      {STATE_ORDER.map((state) => (
+                        <option key={state} value={state}>
+                          {stateLabels[state].name}
+                        </option>
+                      ))}
                     </select>
                   ) : (
                     <input
@@ -776,7 +953,8 @@ function OrganizationRulesEditor({
         </ol>
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">
-          No rules yet. Add one to create a custom inbox section.
+          No custom labels yet. Add one to file matching conversations
+          somewhere of their own.
         </p>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -789,6 +967,7 @@ function OrganizationRulesEditor({
               {
                 id: crypto.randomUUID(),
                 name: '',
+                description: '',
                 field: 'sender-domain',
                 value: '',
                 enabled: true,
@@ -797,7 +976,7 @@ function OrganizationRulesEditor({
           }
           className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
         >
-          Add rule
+          Add label
         </button>
         <button
           type="button"
@@ -805,10 +984,10 @@ function OrganizationRulesEditor({
           onClick={() => void save()}
           className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
         >
-          {busy ? 'Saving…' : 'Save organization rules'}
+          {busy ? 'Saving…' : 'Save custom labels'}
         </button>
         <span className="text-[11px] text-muted-foreground">
-          {rules.length}/{ORGANIZATION_RULE_LIMITS.count} rules
+          {rules.length}/{ORGANIZATION_RULE_LIMITS.count} labels
         </span>
       </div>
       {error ? <p role="alert" className="mt-2 text-xs text-destructive">{error}</p> : null}
@@ -817,6 +996,14 @@ function OrganizationRulesEditor({
   )
 }
 
+/**
+ * Settings, one component.
+ *
+ * There used to be a signed-out branch here, split out so flipping the loader's
+ * state did not change a hook list. The loader redirects a signed-out visitor
+ * now, so the only variable left is how many mailboxes the user has — and a user
+ * with none still has an account, keys to set, and devices to sign out.
+ */
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -827,8 +1014,8 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   const {
     settings,
     organizationRules: initialOrganizationRules,
+    stateLabels: initialStateLabels,
     accounts,
-    aiLog,
     unreplyableSenders,
     recentSenders,
     viewer,
@@ -1396,11 +1583,18 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
         ) : null}
       </section>
 
-      <OrganizationRulesEditor initialRules={initialOrganizationRules} />
+      <StateLabelsEditor initialLabels={initialStateLabels} />
+
+      <OrganizationRulesEditor
+        initialRules={initialOrganizationRules}
+        stateLabels={initialStateLabels}
+      />
 
       <p className="mt-6 text-sm text-muted-foreground">
-        Both AI services are optional. Without them Lumen classifies with rules
-        only and conversations have no topic. Keys are encrypted at rest.
+        Both AI services are optional. Without them Nuntia classifies with rules
+        only and conversations have no topic. Each person connects their own
+        keys — there is no shared key for the install — and they are encrypted
+        at rest.
       </p>
 
       <form onSubmit={(event) => void submit(event)} className="mt-6 space-y-8">
@@ -1415,7 +1609,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           <p className={statusClass}>
             {settings.jevConfigured
               ? 'A key is stored. Enter a new one to replace it.'
-              : 'Not configured.'}
+              : 'Not connected yet — add a key below.'}
           </p>
 
           <div className="mt-3 space-y-3">
@@ -1463,7 +1657,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           <p className={statusClass}>
             {settings.llmConfigured
               ? 'A key is stored. Enter a new one to replace it.'
-              : 'Not configured.'}
+              : 'Not connected yet — add a key below.'}
           </p>
 
           <div className="mt-3 space-y-3">
@@ -1557,66 +1751,6 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           {busy ? 'Saving…' : 'Save settings'}
         </button>
       </form>
-
-      <section className="mt-8 rounded-lg border border-border bg-card p-4">
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 className="text-sm font-semibold text-foreground">AI activity</h2>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void router.invalidate()}
-            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-muted-foreground disabled:opacity-50"
-          >
-            Refresh
-          </button>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Every call to Jev or the topic model, newest last. A failure the rules
-          paper over is recorded here too, which is what makes "the AI did
-          nothing" answerable.
-        </p>
-
-        {aiLog.events.length === 0 ? (
-          <p className="mt-3 text-xs text-muted-foreground">
-            Nothing logged yet. Sync or re-analyse a conversation.
-          </p>
-        ) : (
-          <ul className="mt-3 space-y-1">
-            {aiLog.events.map((event, index) => (
-              <li
-                key={`${event.at}-${index}`}
-                className={cn(
-                  'flex items-baseline gap-2 text-[11px]',
-                  event.outcome === 'ok'
-                    ? 'text-muted-foreground'
-                    : 'text-destructive',
-                )}
-              >
-                <time dateTime={event.at} className="shrink-0">
-                  {event.at.slice(11, 19)}
-                </time>
-                <span className="shrink-0 font-medium">{event.service}</span>
-                <span className="shrink-0">
-                  {event.outcome}
-                  {event.status ? ` ${event.status}` : ''}
-                </span>
-                {event.model ? (
-                  <span className="shrink-0 text-muted-foreground/70">
-                    {event.model}
-                  </span>
-                ) : null}
-                {event.detail ? (
-                  <span className="min-w-0 truncate">{event.detail}</span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          Full history: <code>{aiLog.path}</code>
-        </p>
-      </section>
 
       <section className="mt-8 rounded-lg border border-border bg-card p-4">
         <h2 className="text-sm font-semibold text-foreground">

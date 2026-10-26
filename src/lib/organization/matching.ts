@@ -13,6 +13,8 @@ export type OrganizationRuleField = (typeof ORGANIZATION_RULE_FIELDS)[number]
 export type OrganizationRule = {
   id: string
   name: string
+  /** What the label means, in the user's words; shown under the heading. */
+  description: string
   field: OrganizationRuleField
   value: string
   enabled: boolean
@@ -25,17 +27,29 @@ export type OrganizationGroupedItem = {
   organizationGroup: { id: string; name: string } | null
 }
 
+export type OrganizationGroup<T> = {
+  id: string
+  name: string
+  description: string
+  items: T[]
+}
+
 export function partitionOrganizationGroups<T extends OrganizationGroupedItem>(
   items: T[],
   rules: OrganizationRule[],
 ): {
-  groups: Array<{ id: string; name: string; items: T[] }>
+  groups: Array<OrganizationGroup<T>>
   ungrouped: T[]
   done: T[]
 } {
   const groups = rules
     .filter((rule) => rule.enabled)
-    .map((rule) => ({ id: rule.id, name: rule.name, items: [] as T[] }))
+    .map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      description: rule.description,
+      items: [] as T[],
+    }))
   const groupById = new Map(groups.map((group) => [group.id, group]))
   const ungrouped: T[] = []
   const done: T[] = []
@@ -66,6 +80,7 @@ export const ORGANIZATION_RULE_LIMITS = {
   count: 50,
   id: 80,
   name: 80,
+  description: 300,
   value: 200,
 } as const
 
@@ -103,12 +118,17 @@ export function normaliseOrganizationRules(
 
     const id = rule.id.trim()
     const name = rule.name.trim()
+    // Optional on the wire so a rule saved before labels had meanings still
+    // loads; the stored column is non-null.
+    const description =
+      typeof rule.description === 'string' ? rule.description.trim() : ''
     const value = rule.value.trim()
     if (
       !id ||
       id.length > ORGANIZATION_RULE_LIMITS.id ||
       !name ||
       name.length > ORGANIZATION_RULE_LIMITS.name ||
+      description.length > ORGANIZATION_RULE_LIMITS.description ||
       !value ||
       value.length > ORGANIZATION_RULE_LIMITS.value ||
       ids.has(id)
@@ -133,6 +153,7 @@ export function normaliseOrganizationRules(
     rules.push({
       id,
       name,
+      description,
       field: rule.field as OrganizationRuleField,
       value:
         rule.field === 'sender-email' || rule.field === 'sender-domain'

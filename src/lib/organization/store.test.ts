@@ -3,14 +3,18 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OrganizationRule } from './matching.ts'
+import { defaultStateLabels } from './labels.ts'
+import type { StateLabels } from './labels.ts'
 
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-organization-rules-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-organization-rules-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 
 const { db, initDatabase } = await import('#/db/index.ts')
-const { accounts, organizationRules, users } = await import('#/db/schema.ts')
-const { listOrganizationRules, saveOrganizationRules } = await import('./store.ts')
+const { accounts, CONVERSATION_STATES, organizationRules, stateLabels, users } =
+  await import('#/db/schema.ts')
+const { listOrganizationRules, saveOrganizationRules, listStateLabels, saveStateLabels } =
+  await import('./store.ts')
 
 await initDatabase()
 
@@ -23,6 +27,7 @@ afterAll(() => {
 })
 
 beforeEach(async () => {
+  await db.delete(stateLabels)
   await db.delete(organizationRules)
   await db.delete(accounts)
   await db.delete(users)
@@ -41,6 +46,7 @@ describe('organization rule persistence', () => {
       {
         id: 'first',
         name: 'Finance',
+        description: 'Invoices and payments',
         field: 'sender-domain',
         value: 'ACME.example',
         enabled: true,
@@ -48,6 +54,7 @@ describe('organization rule persistence', () => {
       {
         id: 'second',
         name: 'Invoices',
+        description: '',
         field: 'subject-contains',
         value: 'Invoice',
         enabled: false,
@@ -70,6 +77,7 @@ describe('organization rule persistence', () => {
       {
         id: 'kept',
         name: 'Work',
+        description: 'Things from work',
         field: 'sender-domain',
         value: 'example.com',
         enabled: true,
@@ -89,6 +97,7 @@ describe('organization rule persistence', () => {
     const rule = {
       id: 'alice-rule',
       name: 'Work',
+      description: '',
       field: 'sender-domain',
       value: 'example.com',
       enabled: true,
@@ -102,6 +111,73 @@ describe('organization rule persistence', () => {
     expect(await listOrganizationRules('alice@example.com')).toEqual([])
     expect((await listOrganizationRules('bob@example.com'))[0]?.name).toBe(
       'Personal',
+    )
+  })
+})
+
+describe('state label persistence', () => {
+  function submission(labels: StateLabels) {
+    return CONVERSATION_STATES.map((state) => ({ state, ...labels[state] }))
+  }
+
+  test('reads as the defaults until the user edits a label', async () => {
+    expect(await listStateLabels('alice@example.com')).toEqual(
+      defaultStateLabels(),
+    )
+  })
+
+  test('keeps the user’s wording and isolates it by signed-in user', async () => {
+    const labels = defaultStateLabels()
+    labels['needs-action'] = {
+      name: 'Do this now',
+      description: 'Mail you are the one who has to answer.',
+    }
+    labels.informational.description = ''
+
+    expect(await saveStateLabels('Alice@Example.com', submission(labels))).toEqual(
+      labels,
+    )
+    expect(await listStateLabels('alice@example.com')).toEqual(labels)
+    expect(await listStateLabels('bob@example.com')).toEqual(
+      defaultStateLabels(),
+    )
+  })
+
+  test('saving the defaults clears every stored override', async () => {
+    const labels = defaultStateLabels()
+    labels['waiting-for-reply'] = {
+      name: 'Ball with them',
+      description: 'You replied and the next move is theirs.',
+    }
+    await saveStateLabels('alice@example.com', submission(labels))
+
+    const rowsBefore = await listStateLabels('alice@example.com')
+    expect(rowsBefore['waiting-for-reply'].name).toBe('Ball with them')
+
+    await saveStateLabels(
+      'alice@example.com',
+      submission(defaultStateLabels()),
+    )
+    expect(await listStateLabels('alice@example.com')).toEqual(
+      defaultStateLabels(),
+    )
+  })
+
+  test('invalid labels leave the previously saved wording in place', async () => {
+    const labels = defaultStateLabels()
+    labels.informational = {
+      name: 'FYI',
+      description: 'No answer needed.',
+    }
+    await saveStateLabels('alice@example.com', submission(labels))
+
+    expect(
+      await saveStateLabels('alice@example.com', [
+        { state: 'needs-action', name: '   ', description: '' },
+      ]),
+    ).toBeNull()
+    expect((await listStateLabels('alice@example.com')).informational.name).toBe(
+      'FYI',
     )
   })
 })

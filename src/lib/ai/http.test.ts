@@ -11,7 +11,7 @@ import type { FetchLike } from './http.ts'
 let logDir = ''
 
 beforeEach(() => {
-  logDir = mkdtempSync(join(tmpdir(), 'lumen-ai-http-'))
+  logDir = mkdtempSync(join(tmpdir(), 'nuntia-ai-http-'))
   process.env.AI_LOG_DIR = logDir
 })
 

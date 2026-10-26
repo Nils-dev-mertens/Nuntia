@@ -1,7 +1,7 @@
-# Lumen — MVP Plan
+# Nuntia — MVP Plan
 
 Chat-style Gmail client. Read email like chat, send email like email. Gmail stays the
-source of truth; Lumen is a presentation + composition layer.
+source of truth; Nuntia is a presentation + composition layer.
 
 ---
 
@@ -69,11 +69,11 @@ Pricing reality for MVP:
 - ~1,100 shadcn components + 22 ReUI primitives are **free / MIT**. No account needed.
 - Premium **blocks and icons** require a one-time license (`REUI_LICENSE_KEY`, $249
   all-access). Switch the registry to the authenticated object form to use them.
-- The components Lumen actually wants — `timeline`, `kanban`, `icon-stack`,
+- The components Nuntia actually wants — `timeline`, `kanban`, `icon-stack`,
   `file-upload`, `data-grid` — are in the free `c-*` tier. **MVP should not need the
   purchase.**
 
-ReUI adds semantic tokens beyond stock shadcn that map onto Lumen's conversation states.
+ReUI adds semantic tokens beyond stock shadcn that map onto Nuntia's conversation states.
 Single source of truth: `src/lib/conversation-state.ts`.
 
 ```
@@ -223,37 +223,66 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] **A second mailbox service** — Outlook / Microsoft 365 through Graph, behind the same `MailboxClient` seam; `accounts.provider`, the `provider_*` rename and `sync_cursors(account, kind, value)` land together (see "Outlook is the second service")
 - [x] **People, not one owner** — email/password sign-in (argon2id), revocable per-device
   sessions, and mailboxes, settings and contact context scoped by the signed-in user
-- [ ] **Request-only beta** — the next release: sign-in disabled for now, a request form and
+- [x] **Editable contact context** — role/company, relationship, topics, current work and a 1–10
+  importance per address, authored in the thread sidebar and scoped to the signed-in user
+- [x] **User-defined inbox sections** — rules on sender, domain, subject, topic or state, ordered
+  in Settings and rendered above the state groups (`src/lib/organization/`)
+- [ ] **Client mail and a person's kind** — an inbound webhook that registers clients (and, in a
+  later phase, accepts the mail itself), plus a `kind` per contact and a `work_kind` per user that
+  drive a built-in Clients section and the decision prompt (see "Client mail, and what kind of
+  person you're writing to")
+- [x] **Request-only beta** — sign-in disabled for now, a request form and
   an emailed invite, a six-step funnel, first-party feedback and a `/admin` view (see "Access is
   request-only, and the beta is measured")
+- [x] **Operator-authored forms** — `/admin/forms` builds and publishes a form from six question
+  types, the inbox banner and `/ask` deliver it, answers are stored once per person with a
+  shown/dismissed denominator and CSV export (see "The questions are the operator's, not the
+  code's")
+- [ ] **Auto-updating context** — the contact profile, the thread's topic and its goal refresh
+  after a thread settles, each change stored as a revision with a diff and an Undo (see "Context
+  keeps itself current")
+- [ ] **Organizations** — a workspace where members keep their own mailboxes but share one client
+  list and can assign a conversation to a colleague; solo stays the default (see "Organizations
+  are a second account type")
+- [x] **Editable label names and meanings** — the four states keep their fixed values, but a user
+  can rename each one and write what it means, stored per user (`state_labels`) and shown in the
+  inbox headings, the line under each heading, the badge and the thread's picker; a custom section
+  carries a name and a meaning of its own (`organization_rules.description`)
+- [x] **A compact inbox you can search** — a section picker that shows one section alone, a
+  ten-thread cap per section in the all-sections view with "Show all N", and a search over every
+  stored message (subject, topic, participants and body, archived mail included) that runs
+  server-side, is debounced, ignores stale responses and never triggers a sync
 
 ## Remaining work and requested features
 
 The MVP checklist above is complete. These are deferred or newly requested follow-ups; the
 existing per-message attachment chips and mail-learned contact names are useful foundations,
-but do not count as the consolidated media overview or editable contact context below.
+but do not count as the consolidated media overview or the client registry below.
 
-- [ ] **Request-only beta access and measurement** — sign-in disabled for now, a public request
-  form, an emailed single-use invite, a small event log, first-party feedback, and an operator page
-  that answers "how many signed up, do they use it, what do they say" (see "Access is
-  request-only, and the beta is measured").
 - [ ] **Right-side thread media overview** — add a sidebar to the conversation view that
   collects media and attachments from every message in the thread, rather than making the
   user find each message's attachment chip. Show useful file details (name, type, size, and
   the message/date it came from), with previews or open/download actions where supported.
   Deduplicate copies introduced when mailbox threads are merged. Keep the panel usable on
   narrow screens (for example, as a collapsible drawer).
-- [ ] **Editable context for an email address** — let the user save and edit a profile for a
-  correspondent, with fields such as role/company (e.g. "CEO of Acme"), how they relate to
-  the user, topics discussed, and what they are currently working on. Show the selected
-  correspondent's context alongside the thread. Key profiles by normalised email address
-  and signed-in user so the same profile is shared across that user's connected mailboxes,
-  without exposing it to another user. Keep this context explicitly user-authored; incoming
-  mail and AI decisions must not silently overwrite it.
-- [ ] **Real-time mailbox updates** — replace or complement inbox polling with provider push
-  notifications, while retaining a safe recovery path when notifications are missed.
-- [ ] **User-defined organization rules** — let users define rules for grouping or organizing
-  conversations beyond the current fixed state groups.
+- [ ] **Client mail, and what kind of person you're writing to** — a `kind` on the contact
+  profile and a `work_kind` on the user's own profile, driving a built-in Clients section and the
+  decision prompt, plus a manual import and an inbound webhook that registers clients by address
+  (phase 1) and later accepts the client mail itself (phase 2). For a corporation that import is
+  one call and one company-wide list, which is the organizations decision below (see "Client mail,
+  and what kind of person you're writing to").
+- [ ] **Organizations** — members with their own mailboxes, a shared client list, conversations
+  assignable to a colleague, and organisation-wide sections and rules; this is also what makes a
+  corporation's client import apply to every member rather than one (see "Organizations are a
+  second account type"). Design the model before building it: the open questions there change
+  ownership, not copy.
+- [ ] **Context that keeps itself current** — after a thread settles, refresh the contact profile,
+  the thread's topic and its goal, store every change as a revision with a diff and an Undo, and
+  keep the whole thing behind one setting (see "Context keeps itself current").
+- [ ] **Real-time mailbox updates** — Gmail push is in place (`users.watch` → Pub/Sub →
+  `/webhooks/gmail`, renewed from the inbox load), with polling as the fallback; Outlook still
+  relies on the poll, and Graph change notifications need their own subscription lifetime, client
+  state and renewal.
 - [ ] **IMAP/SMTP provider** — add a provider that reconstructs threads from email headers
   and supports sending through SMTP; unlike Gmail and Graph, IMAP does not supply a thread id.
 
@@ -402,7 +431,8 @@ Key rules:
 - **`topic` starts null.** Deriving it from the subject produces "Re: Project launch"
   noise, so it is left to the user and the future decision layer.
 - **`goal` is user-owned and never written by the decision layer.** `applyDecision`
-  copies it through untouched; there is a test asserting exactly that.
+  copies it through untouched; there is a test asserting exactly that. The separate context
+  updater may revise it, with a revision and an Undo, but the decision pipeline still does not.
 - **`state` is user-overridable, and the user wins.** The label is picked on the thread —
   any of the four, or **Automatic** for the app's own answer — and stored on the row
   (`state_override`, with the activity it was said against in `state_override_message_at`),
@@ -673,9 +703,9 @@ Approval has a side effect that is allowed to fail:
 The email is plain text and one link:
 
 ```
-You asked for access to Lumen. It's ready:
+You asked for access to Nuntia. It's ready:
 
-https://lumen.example/join/XXXX-XXXX-XXXX
+https://nuntia.example/join/XXXX-XXXX-XXXX
 
 The link works for 14 days.
 ```
@@ -695,8 +725,10 @@ What that costs: the operator needs a mailbox connected before approving sends a
 `src/lib/invites/notify.ts` picks the sender — `LUMEN_INVITE_SENDER` when it names one of the
 operator's addresses, otherwise the first connected mailbox — and when there is none, the
 approve button still works and shows the link to copy. `invites.notified_at` records a send the
-provider accepted, `notify_error` records the last failure, and Resend retries against the same
-invite rather than minting a second code.
+provider accepted, `notify_error` records the last failure. A resend **mints a new link** and
+revokes the old one. The code is stored encrypted as well as hashed, so "Copy link" can hand over
+the same invitation again; a replacement is for when the old link should stop working, or when
+no encryption key was configured and the code was never recoverable.
 
 ### Login is disabled for now
 
@@ -742,8 +774,8 @@ rather than a code change.
 `invites`:
 
 | Column         | Meaning                                                                     |
-| ------------ | --------------------------------------------------------------------------- |
-| `code_hash`    | SHA-256 of the code. The code is shown once, at creation.                   |
+| ------------ | --------------------------------------------------------------------------- || `code_hash`  | SHA-256 of the code — what redemption looks it up by.                      |
+| `code_encrypted` | AES-GCM ciphertext of the code, so `/admin` can copy the link again.   |
 | `label`        | Who it is for, free text — "Ada, from the design meetup".                   |
 | `email`        | Set for every approved request. When set, only that address may redeem it.  |
 | `max_uses`     | Default 1. A redemption by a _different_ address consumes one.              |
@@ -851,6 +883,40 @@ not null, `context` (route plus conversation id when there is one), `created_at`
 - **`/admin` is the loop.** Newest first, status controls, no email digest and no syncing to
   another tool. The point of collecting feedback is to close it, not to route it.
 
+### The questions are the operator's, not the code's
+
+Feedback is what someone says unprompted; a form is what the operator asks. A fixed question set
+in code cannot follow the beta — "what got in the way?" this week, "would you use saved replies?"
+next — so the questions are rows and `/admin/forms` is a small builder. It is a separate channel
+from `/feedback` on purpose: who started the conversation is the difference between a complaint
+and a survey, and mixing them would make the admin list ambiguous.
+
+- **Six question types** — short text, long text, one choice, multiple choices, a 1–5 scale with
+  endpoint labels, and yes/no. No branching and no images: branching makes answers incomparable
+  across weeks, and an external image URL is a tracking pixel waiting to happen.
+- **A published form is frozen.** A draft can be edited freely; changing a published form would
+  make the same prompt mean two things, so the only edit is Duplicate. Closing is allowed and
+  keeps the answers.
+- **One response per person, editable until the form closes.** `form_responses` is unique on
+  `(form_id, user_id)` and `form_answers` holds typed values (`value_text`, `value_number`,
+  `value_choices_json`), so tallies are SQL rather than JSON archaeology.
+- **The denominator is `form_participation`.** Shown, dismissed and submitted per person. The
+  inbox banner marks a form shown once; dismissing hides the banner but leaves the form in `/ask`,
+  because "not now" is not "never". No new product events were added — the participation rows
+  already answer "three answers out of how many".
+- **Audience is everyone with a mailbox, or a hand-picked list.** The banner promotes the newest
+  unsubmitted, undismissed form; several forms can be open at once and the rest wait under the
+  Questions link.
+- **Results are tallies plus a CSV.** Choice counts keep the question's option order, scales show
+  the average and the distribution, and free text is listed newest first with the address that
+  wrote it. The CSV quotes every cell and prefixes a formula-leading answer with an apostrophe.
+- **Answers are attributed and never leave the app.** No LLM reads them, no email is sent, and a
+  deleted user takes their answers with them. The form says so in one line.
+
+Built in migration `0021`: `forms`, `form_questions`, `form_audience`, `form_participation`,
+`form_responses`, `form_answers`; `src/lib/forms/` (validation, repository, tallies and CSV) with
+36 tests of its own, and `/admin/forms`, `/ask` and the inbox banner on top.
+
 ### The operator view is one page
 
 `/admin` belongs to `users.role = 'admin'`. **The first user created on an empty install is the
@@ -906,7 +972,7 @@ packages/core       auth, invites, email, metrics — no React
 packages/ui         later, if the two apps actually share components
 ```
 
-Moving to that is `git mv` and one alias change (`#/db/schema.ts` becomes `@lumen/db`), which is
+Moving to that is `git mv` and one alias change (`#/db/schema.ts` becomes `@nuntia/db`), which is
 cheap exactly as long as no inbox component imports an admin module. The rule that keeps it
 cheap: **`src/lib/admin` and `src/lib/invites` may import from `core` and `db`, never from
 `components`, and nothing in `components` may import them.**
@@ -959,6 +1025,9 @@ The split earns its keep when the database stops being a file:
 
 ### Build order
 
+**Scope chosen: checkpoint C, the whole list.** A (steps 1–4) and B (steps 1–6) are prefixes of
+it, so stopping at any point leaves working software rather than half a feature.
+
 1. **Migration** — `access_requests`, `invites`, `invite_redemptions`, `feedback`,
    `product_events`, plus `users.role` (default `member`; the first user is `admin`).
 2. **`lib/invites/`** — `createInvite`, `revokeInvite`, `redeemInvite` (hashed lookup,
@@ -977,6 +1046,16 @@ The split earns its keep when the database stops being a file:
 10. **Tests** — redemption refusals, invite-mode signup (one user per redemption, never two),
     the admin gate (404 for a member, allowlist override), approval email failure, feedback
     validation, and a check that no raw code and no IP is stored.
+
+**Built, and where it differs from the sketch above.** Steps 1–9 are in the tree: the migration,
+`lib/invites/` (codes, repository, redemption, requests, notification), the access mode and its
+bootstrap guards, `/join`, `/request-access`, `/admin` with `/admin/sign-in`, feedback, the event
+log, and `scripts/beta-report.ts`. Two deliberate deviations: feedback is a page reached from the
+inbox header and from the "done" banner rather than a modal prompt, and a resend mints a new
+link because only the code's hash exists. Verified by `bun run typecheck`, `bun test` (577 pass,
+including 30 new cases for redemption, the gate and the mode switch) and `bun run lint`, plus a
+dev-server walk: `/request-access` and `/join` render, `/sign-in` redirects to `/request-access`,
+a dead code redirects to `/join`, and `/admin` returns 404 without an operator session.
 
 ## Auth
 
@@ -1622,7 +1701,7 @@ one per message and fighting connector lines. The view is plain markup instead.
 
 ### Email HTML is kept, sanitised, and rendered in an iframe
 
-Two bugs shared one root cause: Lumen flattened HTML mail to text and then treated that
+Two bugs shared one root cause: Nuntia flattened HTML mail to text and then treated that
 flattening as the message. Emails looked unformatted on screen, and replies quoted the
 flattened text back at the sender as a wall of `>` lines describing a newsletter layout
 instead of showing the newsletter.
@@ -1805,6 +1884,261 @@ and keeping them separate is the whole point:
   the union's newest message) and *unions* Read, since reading a thread in either mailbox means
   the user has read the mail.
 
+## Client mail, and what kind of person you're writing to
+
+Customer support is where this starts: the mail that pays the bills comes from clients, and it
+arrives mixed into everything else. Two things are missing — Nuntia does not know who is a
+client, and mail a client sends through a form or a helpdesk never reaches the mailbox at all.
+
+Both hang off one idea: a person has a **kind**, and the inbox is allowed to act on it.
+
+### Phase 1 — a client registry, fed by hand or by webhook
+
+The cheap half, and the one that needs no new message storage: the mail is already there, Nuntia
+just does not know which senders are clients.
+
+- `contact_contexts.kind` — `client`, `prospect`, `vendor`, `partner`, `colleague`, `investor`,
+  `personal`, `other`; nullable, user-authored, sitting next to `roleCompany` and `importance`
+  in the editor that already lives in the thread sidebar. Marking one person is two clicks;
+  Settings gets a list of everyone with a kind, so a batch can be fixed without opening threads.
+- A built-in **Clients** section above the state groups. Computed at read time from
+  `contact_contexts.kind`, not stored on the conversation: a thread cannot then disagree with
+  the profile, and unmarking someone moves their old threads back immediately.
+- "Priority" means three concrete things rather than a vague score: client threads leave the
+  state groups for the Clients section and sort first inside it; `kind` and `importance` are
+  passed to Jev as facts ("this sender is a client, rated 9/10"), so "needs action" stops
+  depending on tone alone; and the Clients section is open by default with its count in the
+  header.
+- Manual import, so the webhook is never a prerequisite: paste addresses one per line, or a CSV
+  of `email,name,company`. A preview reports new / already listed / invalid before anything is
+  written. For a corporation this is the same write path the API uses; for a solo user it is the
+  whole feature.
+
+`POST /api/client-hook/<token>` (`src/routes/api/client-hook.$token.ts`) — one endpoint per user,
+no OAuth, no mailbox:
+
+```json
+{ "clients": [ { "email": "ana@acme.com", "name": "Ana Ruiz", "company": "Acme",
+                 "externalId": "crm-4711", "kind": "client" } ], "replace": false }
+```
+
+`replace: true` is the "sync my CRM" mode: a client missing from the payload loses `kind` (never
+the rest of their profile), so someone who churns stops being prioritised. Without it the call is
+an upsert — what a "new client" webhook sends.
+
+- The token is 32 random bytes, base64url, stored **hashed** (the shape invite codes already
+  use); the plaintext is shown once, and can be rotated or revoked. The path is the credential,
+  so `redactPath` must collapse `/api/client-hook/<token>` to `/api/client-hook/[token]` the way
+  it already does for `/join/<code>`, and headers are never logged.
+- Limits: 256 KB body, 500 clients per call, 60 calls/hour per token, JSON only, `429` with
+  `Retry-After`. The response is `{ accepted, updated, skipped, errors }` and a retry is safe:
+  writes are keyed on `(userId, email)`.
+- **For a corporation the list is the company's.** One CRM import should prioritise client mail
+  for every member, which means one list and one token per workspace rather than one per person.
+  That is not a detail of this endpoint — it is the organizations decision below, and it is why
+  the token stays per-user only until that model exists.
+- `externalId` is optional here; it exists for the message path below, where it is the dedupe key.
+
+### Phase 2 — the mail that never reached the mailbox
+
+A website form, a helpdesk, or a shared support box produces client mail the user's Gmail never
+sees. The same endpoint can take it:
+
+```json
+{ "source": "support-form", "threadKey": "ticket-9182",
+  "message": { "externalId": "form-5512", "from": "ana@acme.com", "to": "help@acme.com",
+               "subject": "Refund for order 88", "text": "…", "html": "…",
+               "receivedAt": "2026-10-22T09:14:00Z" },
+  "replyUrl": "https://crm.example.com/hooks/nuntia/reply" }
+```
+
+This is structural, and the reason it is second: `conversations.accountId` and
+`messages.providerMessageId` are both `NOT NULL`, because every row so far came from a mailbox.
+Two honest options:
+
+- **a pseudo-account** (`accounts.provider = 'webhook'`) — the detail view, decisions, sections
+  and search all work unchanged, but the fake account leaks into sync, staleness, reconnect and
+  the mailbox header, each needing an exception.
+- **its own storage** (`client_threads`, `client_messages`) merged into the inbox DTO at read
+  time — no exceptions in the mail pipeline, but a second detail view and a second place to wire
+  topics and drafts.
+
+Take the second. Mail sync is the most delicate part of this app; a webhook must not be able to
+break its invariants just to reuse a component.
+
+Rules either way:
+
+- **Idempotent on `(sourceId, externalId)`.** Webhook senders retry, and a retry must not double
+  a thread or bump it to the top.
+- **Thread by `threadKey` only.** No key means one conversation per message — a split thread is
+  better than a wrong merge.
+- **Sanitise `html` with the parser's sanitiser** and keep the text form. A webhook is untrusted
+  third-party input that renders in the same iframe as mail.
+- **Replies leave through a mailbox.** The customer's answer has to be a real email from one of
+  the user's addresses, so the composer picks a connected mailbox (defaulting to the thread's
+  `to`), and the sent copy is recorded on the client thread. When `replyUrl` is present the reply
+  is also POSTed there, HMAC-signed, so the helpdesk keeps it on the ticket.
+- **No attachments in v1.** The MIME upload path does not carry over to JSON, and a ticket that
+  needs a file can link it in the body.
+
+### Two kinds, and what they are allowed to change
+
+| Field | Whose | Values | Drives |
+| --- | --- | --- | --- |
+| `contact_contexts.kind` | the other person | client, prospect, vendor, partner, colleague, investor, personal, other | the Clients (later Prospects) section, priority, Jev's facts, a reply-tone hint |
+| `users.work_kind` | the signed-in person | support, sales, founder, freelancer, operations, other (+ one line of free text) | which sections start enabled, the Jev prompt's framing, first-run copy |
+
+`work_kind` is asked once on the first-run screen ("What do you mostly use Nuntia for?"),
+skippable, and editable in Settings. It **seeds defaults and nothing else**: a support user starts
+with Clients on and client mail ranked first, a founder with Clients and Prospects, a freelancer
+with Clients. All of those are ordinary settings afterwards, so the answer is a starting point,
+not a mode. It never hides mail, and it is not sent to the LLM as a label about the user's
+employer.
+
+The contact kind stays user-authored and is the one field AI never writes. Incoming mail and
+suggestions may *propose* it (the sidebar already has a suggest path), but a classification of a
+relationship is the user's answer rather than a fact to infer. The *text* fields beside it —
+role/company, relationship, topics, current work — now refresh automatically with a revision and
+an Undo; see "Context keeps itself current".
+
+### Open questions
+
+- Does `prospect` earn a section in v1, or is it a chip until a rule uses it?
+- Must a phase-2 reply also sync back to the helpdesk in v1, or is `replyUrl` phase 3? Without it
+  the ticket is only closed when the customer answers.
+- CSV or webhook first? They share one write path; the order is a UI question, not a data one.
+
+### What it must be tested for
+
+- Pure matching: a client leaves the state groups; unmarking restores them; Done still wins over
+  everything.
+- Webhook: a valid token writes rows; a wrong or rotated token is `404` (not `401` — a probe must
+  not be able to confirm a token exists); an over-limit body is `413`; a repeat call changes no
+  counts; `replace: true` clears only `kind`; HTML is sanitised; the token appears in `app.log`
+  zero times.
+- Profile: an unknown kind is rejected; the seeded defaults are all overridable; a missing
+  `work_kind` behaves exactly as today.
+
+## Organizations are a second account type
+
+Solo and corporation are not two skins on the same account. A solo person's inbox is private by
+default, and the product is one person's memory of their correspondents. A corporation is several
+people, each with **their own mailbox under their own address** — the Outlook model, not a shared
+mailbox — who still need a handful of things in common: one client list, the ability to assign
+a conversation to a colleague, and organisation-wide sections and rules. The things a solo user
+needs (a private profile, a private Done mark, a private topic) are close to the opposite of what
+a corporation needs (shared context, visible ownership, one priority list), so this belongs in the
+schema rather than in the copy. The longer version — what the project is today, the ownership
+table, and the migration sketch — is in [`docs/organizations.md`](docs/organizations.md).
+
+**Settled:**
+
+- **Mailboxes stay personal.** A member connects their own address, and being in the same
+  organisation does not put anyone's inbox in front of anyone else. Read marks, Done, state
+  overrides, drafts and parsing preferences stay theirs.
+- **Sharing is an explicit act.** Assignment is that act: a conversation can be assigned to a
+  member, and that assignment — not membership — is what is meant to give another person a view
+  of it.
+- **The client list is the organisation's.** A client imported by the company's CRM is a client
+  of the company, not of whoever ran the sync, so priority applies to every member's mail from
+  that address.
+- **The account type is not `work_kind`.** `work_kind` describes what one person does and only
+  seeds their defaults; the account type decides what is shared and who may see it. A solo support
+  person is a valid pair, which is why one field cannot carry both.
+
+**Not decided yet, deliberately** — these change ownership, so guessing costs a migration of
+semantics rather than a UI edit:
+
+- Whether a member's own contacts sit **on top of** the organisation list, whether the organisation
+  can forbid a personal client, and what a CRM's `replace: true` means when several members have
+  written.
+- Roles: owner / admin / member, and whether "admin" remains `users.role` or becomes a
+  per-organisation role. Today `/admin` is one operator on the install.
+- Seats, invitations and billing. Each member needs an invite, which means invites stop being
+  install-wide, and the beta's funnel becomes per organisation rather than per person.
+- Which per-user things become organisation-scoped: `organization_rules` (probably yes), parsing
+  defaults and reply style (probably per member), sections (yes), `contact_contexts` (the kind
+  shared and the private notes per member, or the whole profile shared?).
+- What happens to assigned conversations and shared clients when a member leaves, since deleting
+  the user row currently cascades all of their mail.
+
+**Why it blocks the client webhook.** `POST /api/client-hook/<token>` needs an owner. Per-user is
+the simple implementation and the wrong one for a corporation: four members importing the same CRM
+would produce four lists and four tokens. Decide the workspace scope first and the token table
+points at the workspace, so the import is done once. The recommendation that follows: **ship
+`kind` and the Clients section solo-first** — they need no token and no sharing — and treat the
+webhook as part of the organisation work rather than something before it.
+
+**The schema cost when it happens:** an `organizations` row and a `memberships` row, then a
+workspace id on `accounts`, `contact_contexts`, `organization_rules`, `invites` and
+`conversations`. Every ownership check moves from `userId` to a membership and every list query
+gains the workspace predicate, while the merged-inbox and decision paths keep reading "you" as the
+member's own connected addresses — an organisation must not turn one person's mail into another's
+context. That is a one-time migration done deliberately, not a column added later because it looked
+cheap.
+
+## Context keeps itself current
+
+A profile that describes the mail from three months ago is worse than an empty one: Jev is handed
+a stale "topics: launch" long after the launch shipped, the Clients section inherits old wording,
+and the user learns not to trust the sidebar. Today the AI can only *suggest* the contact fields,
+from a button, and `applyDecision` fills a topic only while it is null. Both are conservative for
+the wrong reason: the facts that go stale are exactly the ones a model can refresh from the thread
+it has just read.
+
+The updater runs **after a thread settles** — the sync that added messages, the send path, and the
+manual re-analyse action — over the thread's newest messages plus the values already stored. It
+writes three things in one pass:
+
+| Target          | Fields                                                   | Scope                                                 |
+| --------------- | -------------------------------------------------------- | ----------------------------------------------------- |
+| contact profile | `role_company`, `relationship`, `topics`, `current_work` | per address, so every thread with that sender sees it |
+| conversation    | `topic`                                                  | that thread                                           |
+| conversation    | `goal`                                                   | that thread                                           |
+
+`kind` is not on the list. It is the user's classification of a relationship rather than a fact in
+the mail, and auto-writing it would turn "Ana is a client" into a guess the app made on a Tuesday.
+
+Rules that make automatic safe:
+
+- **One call, not three.** The topic generator already runs on every decide and its answer is
+  discarded when a topic exists. That seam becomes `ContextUpdater`: it returns
+  `{ topic, goal, contact }` as JSON from one prompt, so a thread costs one call whether it is
+  labelling a topic or refreshing a profile. `NoContextUpdater` is the keyless default, exactly
+  like `NoTopicGenerator`.
+- **Every write is a revision, and Undo is the feature.** `context_revisions` holds `user_id`,
+  `scope` (`contact` | `conversation`), `target` (address or conversation id), `field`,
+  `previous_value`, `next_value`, `source` (`auto` | `user`), `thread_id`, `created_at`,
+  `undone_at`. The sidebar and the topic editor show "Updated from this thread" with the diff and
+  one Undo per change; undo restores the previous value and writes its own revision, so undoing
+  twice is not a special case. Keep the last 20 revisions per target and prune the rest — this is
+  a safety net, not an audit log.
+- **Automatic is not silent.** Nothing changes without a visible line where the field lives, the
+  thread it came from, and a way back. That is what the earlier "never write silently" rule was
+  protecting; a diff plus Undo protects it better than a button nobody presses.
+- **Only changed fields produce a revision.** An unchanged profile writes nothing, which keeps the
+  log readable and stops a sync of thirty threads from burying one real edit.
+- **Cheap and bounded.** Only threads that gained messages, debounced per thread (ten minutes is
+  enough), and never for machine mail (`is_automated`) — a verification code should not become
+  the contact's `current_work`. Contact writes are last-write-wins per address across concurrent
+  threads, and the revision row is what makes that recoverable.
+- **Failure is not the thread's problem.** A failed call goes to the AI log and leaves the stored
+  values alone, the same rule the decision model follows.
+- **One switch.** Settings gains "update context automatically", on when a model is configured.
+  Off leaves the manual Suggest path and nothing else changes.
+
+`applyDecision` keeps its boundary: it still never writes `goal` or `intent`, and read marks,
+Done and `state_override` are untouched. The updater is a separate seam beside the pipeline, so a
+Jev-only install, an LLM-only install and a keyless install all behave as they do today. The
+`goal` is the one field worth calling out: the app now maintains it, but a goal the user typed
+travels into the prompt as the current value and is only replaced when the thread clearly
+contradicts it — and then the diff says so and Undo puts it back.
+
+**What it must be tested for:** a user-set topic is replaced by a newer thread and restored by
+Undo; `kind` is never written by the updater; an unchanged profile writes no revision; a failed
+model call leaves every value and writes an error to the AI log; machine mail is skipped; the
+revision pruner keeps the newest 20.
+
 ## Tests must never touch the real database
 
 **This went wrong and it cost a real synced mailbox.** Worth reading before adding a test.
@@ -1830,8 +2164,8 @@ once at module load.** The guard is the backstop, not the mechanism.
 
 - `.cta.json` is TanStack's scaffold manifest (read by the CLI only, not at runtime).
   Keep it accurate — stale values make later `create` commands re-apply old config.
-- Root is `lumen` (not the `lumen-tmp` the CLI generated it as; files were moved up
-  from a temp dir because the CLI wants an empty target).
+- Root is `nuntia`. The CLI scaffolds into a temp dir because it wants an empty target, so
+  the files were moved up into this directory.
 - `src/routes/index.tsx` is the real inbox now (loader + server fn). The scaffold
   verification page is gone.
 - Server functions are `createServerFn` from `@tanstack/react-start`, not `@tanstack/start`.

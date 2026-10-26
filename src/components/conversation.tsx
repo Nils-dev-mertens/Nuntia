@@ -11,6 +11,7 @@
  * means inventing step numbers and fighting the connector lines.
  */
 
+import { Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { File, Image, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
@@ -35,7 +36,6 @@ import { StateBadge } from '#/components/state-badge'
 import {
   DONE_META,
   READ_META,
-  STATE_META,
   STATE_ORDER,
 } from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
@@ -254,10 +254,13 @@ function DoneButton({
  */
 function StateLabelPicker({
   current,
+  labels,
   onSet,
 }: {
   /** The stored label, or null when the app's own answer stands. */
   current: ConversationState | null
+  /** The user's wording for each label; the defaults when they left them. */
+  labels: ConversationDetail['stateLabels']
   onSet: (state: ConversationState | null) => Promise<{ error: string | null }>
 }) {
   const [busy, setBusy] = useState(false)
@@ -299,7 +302,7 @@ function StateLabelPicker({
           <option value="">Automatic</option>
           {STATE_ORDER.map((state) => (
             <option key={state} value={state}>
-              {STATE_META[state].label}
+              {labels[state].name}
             </option>
           ))}
         </select>
@@ -957,7 +960,7 @@ function ParsingProfileEditor({
       className="mt-3 space-y-3 rounded-md border border-border bg-muted/20 p-3"
     >
       <p className="text-xs font-medium text-foreground">
-        What Lumen removes from {profile.senderEmail}
+        What Nuntia removes from {profile.senderEmail}
       </p>
       <label className="flex items-center gap-2 text-sm text-foreground">
         <input
@@ -1856,7 +1859,10 @@ export function ConversationView({
           <div className="flex items-center gap-2">
             {!detail.replyable ? <NoReplyTag /> : null}
             {detail.done ? <DoneTag /> : null}
-            <StateBadge state={detail.state} />
+            <StateBadge
+              state={detail.state}
+              label={detail.stateLabels[detail.state].name}
+            />
           </div>
           <div className="flex items-start gap-2">
             {/*
@@ -1867,6 +1873,7 @@ export function ConversationView({
              */}
             <StateLabelPicker
               current={detail.stateOverride}
+              labels={detail.stateLabels}
               onSet={onSetStateOverride}
             />
             {/*
@@ -1900,7 +1907,19 @@ export function ConversationView({
       {detail.done ? (
         <p className="border-y border-border bg-success/5 px-6 py-2 text-xs text-muted-foreground">
           <span className="font-medium text-success">{DONE_META.label}</span> —{' '}
-          {DONE_META.detail}
+          {DONE_META.detail}{' '}
+          {/*
+           * The one moment worth asking: the thread has just been handled, so
+           * either the product helped or it got in the way, and the person knows
+           * which. No modal, and it never interrupts the next thread.
+           */}
+          <Link
+            to="/feedback"
+            search={{ thread: detail.providerThreadId }}
+            className="text-primary hover:underline"
+          >
+            What got in the way?
+          </Link>
         </p>
       ) : null}
 

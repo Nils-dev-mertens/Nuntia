@@ -14,7 +14,7 @@ import {
 let dir = ''
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'lumen-ai-log-'))
+  dir = mkdtempSync(join(tmpdir(), 'nuntia-ai-log-'))
   // The module skips writes under test unless a directory is named explicitly,
   // which is also what keeps these tests off the app's own log.
   process.env.AI_LOG_DIR = dir

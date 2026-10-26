@@ -82,7 +82,8 @@ import {
 import type { ContactContext } from '#/lib/contacts/context.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
-import { listOrganizationRules } from '#/lib/organization/store.ts'
+import { listOrganizationRules, listStateLabels } from '#/lib/organization/store.ts'
+import type { StateLabels } from '#/lib/organization/labels.ts'
 import { matchOrganizationRule } from '#/lib/organization/matching.ts'
 import type { OrganizationRule } from '#/lib/organization/matching.ts'
 import {
@@ -97,6 +98,7 @@ import { cursorKindFor } from '#/lib/mailbox/types.ts'
 import { createMailboxClientFor } from '#/lib/mailbox/provider.ts'
 import { MicrosoftAuthError } from '#/lib/microsoft/index.ts'
 import { DEFAULT_STALE_AFTER_MS, isCursorStale } from './freshness.ts'
+import { conversationMatchesQuery } from './search.ts'
 import { findAttachmentPart } from '#/lib/mailbox/message.ts'
 import {
   decideAndSave,
@@ -177,6 +179,11 @@ export type InboxPayload =
       counts: Record<ConversationState, number>
       /** Ordered user-defined rules used to create custom inbox sections. */
       organizationRules: OrganizationRule[]
+      /**
+       * The four state labels' names and meanings, as this user reads them.
+       * Defaults where they never edited one; see `listStateLabels`.
+       */
+      stateLabels: StateLabels
       /** Threads the user has marked done — listed apart from the groups. */
       doneCount: number
       /** ISO string of the most recent completed sync, or null if never. */
@@ -363,6 +370,8 @@ export type ConversationDetail = {
   }>
   contactContext: ContactContext | null
   senderImportance: number | null
+  /** The user's wording for the four labels, for the badge and the picker. */
+  stateLabels: StateLabels
   parsingProfile: {
     senderEmail: string
     useAccountParsingDefaults: boolean
@@ -497,6 +506,8 @@ export async function loadConversation(
   // Read once for the whole thread rather than per participant.
   const names = await contactNamesFor(accountRows.map((account) => account.id))
   const preferences = await getPreferences(userId)
+  // The user's wording for the label on the badge and in the picker.
+  const stateLabels = await listStateLabels(userId)
 
   return {
     providerThreadId: conversation.providerThreadId,
@@ -572,6 +583,7 @@ export async function loadConversation(
     }),
     contactContext,
     senderImportance: contactContext?.importance ?? null,
+    stateLabels,
     parsingProfile: senderEmail
       ? {
           senderEmail,
@@ -1505,6 +1517,15 @@ export type LoadInboxOptions = {
    */
   full?: boolean
   staleAfterMs?: number
+  /**
+   * Match stored mail instead of loading everything.
+   *
+   * A search reads what the last sync wrote and never talks to the provider, so
+   * typing in the search box cannot turn into a mailbox round trip. Archived
+   * threads are included: they are synced mail, and a search is exactly where
+   * one should be findable again.
+   */
+  search?: string
 }
 
 /**
@@ -1560,6 +1581,9 @@ export async function loadInbox(
   opts: LoadInboxOptions = {},
 ): Promise<InboxPayload> {
   const staleAfterMs = opts.staleAfterMs ?? DEFAULT_STALE_AFTER_MS
+  // Trimmed once here: an all-whitespace query is not a search, and every branch
+  // below has to agree about that.
+  const search = opts.search?.trim() ?? ''
 
   const accounts = (await listAccounts(userId)).map((account) => ({
     id: account.id,
@@ -1577,10 +1601,13 @@ export async function loadInbox(
 
   // Push registration is renewed in the background when it is close to lapsing.
   // Deliberately not awaited: a Google round trip must never be what the inbox
-  // is waiting for, and the poll still covers the mailbox if it fails.
-  void ensurePushRegistrations(userId, accounts).catch((error) => {
-    console.warn('[push] renewing a watch failed:', error)
-  })
+  // is waiting for, and the poll still covers the mailbox if it fails. A search
+  // is a read of stored mail, so it does not touch the provider at all.
+  if (!search) {
+    void ensurePushRegistrations(userId, accounts).catch((error) => {
+      console.warn('[push] renewing a watch failed:', error)
+    })
+  }
 
   let syncError: string | null = null
   let syncedNow = false
@@ -1592,8 +1619,9 @@ export async function loadInbox(
   }> = []
 
   // Each mailbox is synced and freshness-checked on its own: one revoked grant
-  // or one stale cursor must not stop the others from appearing.
-  for (const account of accounts) {
+  // or one stale cursor must not stop the others from appearing. Searching skips
+  // the loop entirely — there is nothing to refresh in a filtered read.
+  for (const account of search ? [] : accounts) {
     await ensureDerivedFields(userId, account.id)
 
     const lastSyncedAt = await getLastSyncedAt(account.id)
@@ -1659,7 +1687,11 @@ export async function loadInbox(
   const perAccount = await Promise.all(
     accounts.map(async (account) => ({
       accountId: account.id,
-      conversations: await listConversations(account.id),
+      // Archived threads stay in the database and out of the normal list; a
+      // search is the way back to one, so it reads them too.
+      conversations: await listConversations(account.id, {
+        includeArchived: Boolean(search),
+      }),
     })),
   )
   const merged = mergeAccountConversations(
@@ -1669,20 +1701,27 @@ export async function loadInbox(
     accounts,
   )
 
+  // A search narrows the merged list before anything is counted, so the section
+  // headers describe the results rather than the whole mailbox.
+  const matched = search
+    ? merged.filter((row) => conversationMatchesQuery(row.conversation, search))
+    : merged
+
   // Done threads are counted apart from the state groups, not inside them: the
   // groups are what is still open, and a handled thread sitting under "Needs
   // action" was the thing the user could not tell from work that was actually
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
-  const { counts, doneCount } = partitionByState(merged)
-  const [organizationRules, contactImportance] = await Promise.all([
+  const { counts, doneCount } = partitionByState(matched)
+  const [organizationRules, contactImportance, stateLabels] = await Promise.all([
     listOrganizationRules(userId),
     listContactImportanceByEmail(userId),
+    listStateLabels(userId),
   ])
 
   // The list is grouped by state in the UI, but ordering within a group is by
   // activity, and the union is not sorted by construction.
-  merged.sort(
+  matched.sort(
     (a, b) =>
       b.conversation.lastMessageAt.getTime() -
       a.conversation.lastMessageAt.getTime(),
@@ -1692,7 +1731,8 @@ export async function loadInbox(
     signedIn: true,
     accounts,
     organizationRules,
-    conversations: merged.map((row) =>
+    stateLabels,
+    conversations: matched.map((row) =>
       toSummary(
         row,
         emailById,

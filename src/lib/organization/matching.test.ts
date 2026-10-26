@@ -20,20 +20,52 @@ function rule(
   return {
     id: 'rule-1',
     name: 'Finance',
+    description: '',
     enabled: true,
     ...overrides,
   }
 }
 
 describe('normaliseOrganizationRules', () => {
-  test('trims names and values and normalizes sender addresses', () => {
+  test('trims names, meanings and values and normalizes sender addresses', () => {
     expect(
       normaliseOrganizationRules([
-        rule({ field: 'sender-email', value: ' Finance@Acme.Example ' }),
+        rule({
+          name: '  Finance ',
+          description: '  Invoices and payments  ',
+          field: 'sender-email',
+          value: ' Finance@Acme.Example ',
+        }),
       ]),
     ).toEqual([
-      rule({ field: 'sender-email', value: 'finance@acme.example' }),
+      rule({
+        name: 'Finance',
+        description: 'Invoices and payments',
+        field: 'sender-email',
+        value: 'finance@acme.example',
+      }),
     ])
+  })
+
+  test('defaults a missing meaning to empty and rejects an over-long one', () => {
+    const withoutMeaning = rule({ field: 'sender-domain', value: 'acme.example' }) as unknown as Record<
+      string,
+      unknown
+    >
+    delete withoutMeaning.description
+
+    expect(normaliseOrganizationRules([withoutMeaning])).toEqual([
+      rule({ field: 'sender-domain', value: 'acme.example' }),
+    ])
+    expect(
+      normaliseOrganizationRules([
+        rule({
+          field: 'sender-domain',
+          value: 'acme.example',
+          description: 'x'.repeat(301),
+        }),
+      ]),
+    ).toBeNull()
   })
 
   test('rejects invalid fields, duplicate ids, and an invalid state', () => {
@@ -87,7 +119,9 @@ describe('matchOrganizationRule', () => {
     ]
 
     expect(partitionOrganizationGroups(items, [groupedRule])).toEqual({
-      groups: [{ id: 'rule-1', name: 'Finance', items: [items[0]] }],
+      groups: [
+        { id: 'rule-1', name: 'Finance', description: '', items: [items[0]] },
+      ],
       ungrouped: [items[1]],
       done: [items[2]],
     })

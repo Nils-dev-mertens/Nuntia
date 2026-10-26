@@ -40,7 +40,7 @@ export type ParsedMessage = {
 /**
  * The result of stripping an email down to what the user actually wrote.
  *
- * `body` is what Lumen renders as a chat bubble. `greeting`, `signature` and
+ * `body` is what Nuntia renders as a chat bubble. `greeting`, `signature` and
  * `quote` are retained so the send path can put them back — the user never sees
  * them, but recipients still receive a normal-looking email.
  */

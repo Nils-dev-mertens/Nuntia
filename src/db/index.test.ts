@@ -9,7 +9,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-db-migration-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-db-migration-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 

@@ -1,203 +1,159 @@
-Welcome to your new TanStack Start app!
+# Nuntia
 
-# Getting Started
+A chat-style mail client. Threads read like conversations, replies are composed
+with the greeting, signature and quoting rules Nuntia learned from your own mail,
+and Gmail stays the source of truth.
 
-To run this application:
+Nuntia is currently a **private beta**: sign-in is replaced by an invite, and the
+operator approves people from `/admin`. The design decisions behind that (and
+everything else) are in [PLAN.md](./PLAN.md); provider setup guides are in
+[docs/](./docs), and the direction for shared workspaces is in
+[docs/organizations.md](./docs/organizations.md).
+
+## What it does
+
+- Gmail and Outlook (Microsoft 365 / outlook.com) through one sync pipeline,
+  merged into a single inbox.
+- Deterministic rules classify each thread; **Jev** (optional, your key) scores
+  importance/urgency; an **LLM** (optional, your key) names topics and drafts
+  replies. Drafts are text in the composer — Nuntia never sends without you.
+- Reply composition that restores the greeting and signature the parser stripped,
+  with per-sender overrides.
+- Attachments, contact context, organisation rules, and a beta funnel with
+  first-party feedback.
+
+## Requirements
+
+- [Bun](https://bun.sh) 1.3+
+- Node 22.12+ for tooling that expects it
+- SQLite (bundled via `@libsql/client`) — no database server
+- OAuth apps for Google and/or Microsoft — see [docs/google-setup.md](./docs/google-setup.md)
+  and [docs/outlook-setup.md](./docs/outlook-setup.md)
+
+## Setup
 
 ```bash
 bun install
-bun --bun run dev
+cp .env.example .env.local     # then fill in the values below
+bun run dev                    # http://localhost:3000
 ```
 
-# Building For Production
+The database file and its migrations are created on first boot
+(`data/lumen.db`), and existing databases are migrated at startup.
 
-To build this application for production:
+### Environment
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | `file:./data/lumen.db`, or a libSQL URL |
+| `TOKEN_ENCRYPTION_KEY` | yes | 32 bytes hex/base64 (`openssl rand -hex 32`). Encrypts OAuth tokens, AI keys and invite codes. Changing it makes stored secrets unreadable |
+| `LUMEN_APP_URL` | in beta | Public origin used in invite links (`https://mail.example.com`) |
+| `LUMEN_ACCESS_MODE` | no | `invite` (default) or `login` |
+| `LUMEN_ADMIN_EMAILS` | no | Comma-separated operator addresses — break-glass access to `/admin` |
+| `LUMEN_BOOTSTRAP_INVITE` | first boot | A 12-char code that may sign the first user in on an empty install. Ignored once a user exists |
+| `LUMEN_INVITE_SENDER` | no | Which connected mailbox sends approval emails (defaults to the operator's first) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Gmail | OAuth app credentials |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | Outlook | Microsoft identity app |
+| `GOOGLE_PUBSUB_TOPIC` / `GMAIL_PUSH_TOKEN` | no | Gmail push; polling is used without it |
+| `APP_LOG_DIR` | no | Where `app.log` is written (default `data/logs`) |
+| `BACKUP_DIR` / `BACKUP_KEEP` | no | Backup destination and retention (default `data/backups`, 14) |
+
+Redirect URI for both providers in development is
+`http://localhost:3000/auth/google/callback` and
+`http://localhost:3000/auth/microsoft/callback`.
+
+## The beta, end to end
+
+1. Someone asks at `/request-access`. The answer is the same sentence whatever
+   happens, so the form cannot reveal who already has an account.
+2. The operator opens `/admin`, reads the note, and approves. That creates a
+   single-use invite bound to the address and emails the link **from the
+   operator's own connected mailbox** — no email service is involved. With no
+   mailbox connected the approval still stands and the link is shown to copy.
+3. `/join/<code>` creates the user, starts a session, and lands on a first-run
+   screen: connect a mailbox, then (optionally) add AI keys in Settings.
+4. `/admin` shows the funnel — requested → approved → redeemed → activated →
+   used → returned — plus people, invites, feedback and the AI call log.
+
+On an empty install nobody can open `/admin`, so the first user comes from
+`LUMEN_BOOTSTRAP_INVITE`: set it, visit `/join/<code>`, and that user is an
+admin. Remove the variable afterwards.
+
+`/admin/sign-in` keeps the password form even in invite mode — otherwise an
+expired operator cookie would lock you out of the only page that can issue an
+invite.
+
+## Scripts
 
 ```bash
-bun --bun run build
+bun run dev              # dev server on :3000
+bun run build            # client + server bundles in dist/
+# production entry (deployment config is still manual):
+#   bun dist/server/server.js
+bun run typecheck        # tsc --noEmit
+bun test                 # 590+ tests
+bun run lint             # eslint
+bun run format           # prettier --write + eslint --fix
+bun run db:generate      # new migration from schema.ts
+bun run db:studio        # inspect the database
+bun run scripts/beta-report.ts            # funnel in the terminal
+bun run scripts/beta-report.ts --prune    # drop declined requests older than 90 days
+bun run scripts/backup-db.ts              # consistent database snapshot
+bun run scripts/diagnose-sync.ts          # why mail is missing from the inbox
 ```
 
-## Styling
+## Backups
 
-This project uses [Tailwind CSS](https://tailwindcss.com/) for styling.
-
-### Removing Tailwind CSS
-
-If you prefer not to use Tailwind CSS:
-
-1. Remove the demo pages in `src/routes/demo/`
-2. Replace the Tailwind import in `src/styles.css` with your own styles
-3. Remove `tailwindcss()` from the plugins array in `vite.config.ts`
-4. Remove `@tailwindcss/vite` and `tailwindcss` from `package.json`
-
-## Linting & Formatting
-
-
-This project uses [eslint](https://eslint.org/) and [prettier](https://prettier.io/) for linting and formatting. Eslint is configured using [tanstack/eslint-config](https://tanstack.com/config/latest/docs/eslint). The following scripts are available:
+Everything lives in `data/lumen.db` — including encrypted refresh tokens — so a
+lost file means every user re-authenticates and re-syncs. `scripts/backup-db.ts`
+writes a `VACUUM INTO` snapshot (consistent, includes the WAL), verifies it with
+`PRAGMA quick_check`, and prunes to the newest `BACKUP_KEEP` files.
 
 ```bash
-bun --bun run lint
-bun --bun run format
-bun --bun run check
+bun run scripts/backup-db.ts
 ```
 
+Schedule it (cron example is in the script header) and keep `BACKUP_DIR` on a
+different disk. Restoring is: stop the app, replace `data/lumen.db` with a
+backup, start the app.
 
-## Shadcn
+## Logging
 
-Add components using the latest version of [Shadcn](https://ui.shadcn.com/).
+Two files under `data/logs/`, both JSON lines, both rotated at ~1–2 MB with one
+previous file kept:
+
+- `app.log` — one line per request (`method`, `path`, `status`, `ms`) and every
+  thrown handler with its message. Invite codes are collapsed to
+  `/join/[code]` and query strings are dropped, so a code cannot leak into a log
+  that outlives the invite. Assets and dev-server internals are skipped.
+- `ai.log` — every Jev/LLM call: service, outcome, status, duration, model, URL,
+  and a truncated error. No prompt, no body, no key. Readable at `/admin`; it is
+  operator-only because records carry no user id.
+
+Warnings and errors also go to stdout, so a foreground dev server or a
+container's output shows them without tailing the file.
+
+## Tests
 
 ```bash
-pnpm dlx shadcn@latest add button
+bun test
 ```
 
+The suite uses a temporary database per run (`test/setup.ts` refuses to run
+against `data/lumen.db`). Coverage is heaviest where a mistake is expensive:
+sync and parsing, the decision pipeline, send paths, invite redemption (every
+refusal), and the access-mode gates. There is no DOM harness, so UI behaviour is
+covered by typecheck plus server-side checks against a running instance.
 
+## Layout
 
-## Routing
-
-This project uses [TanStack Router](https://tanstack.com/router) with file-based routing. Routes are managed as files in `src/routes`.
-
-### Adding A Route
-
-To add a new route to your application just add a new file in the `./src/routes` directory.
-
-TanStack will automatically generate the content of the route file for you.
-
-Now that you have two routes you can use a `Link` component to navigate between them.
-
-### Adding Links
-
-To use SPA (Single Page Application) navigation you will need to import the `Link` component from `@tanstack/react-router`.
-
-```tsx
-import { Link } from "@tanstack/react-router";
-```
-
-Then anywhere in your JSX you can use it like so:
-
-```tsx
-<Link to="/about">About</Link>
-```
-
-This will create a link that will navigate to the `/about` route.
-
-More information on the `Link` component can be found in the [Link documentation](https://tanstack.com/router/v1/docs/framework/react/api/router/linkComponent).
-
-### Using A Layout
-
-In the File Based Routing setup the layout is located in `src/routes/__root.tsx`. Anything you add to the root route will appear in all the routes. The route content will appear in the JSX where you render `{children}` in the `shellComponent`.
-
-Here is an example layout that includes a header:
-
-```tsx
-import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
-
-export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      { charSet: 'utf-8' },
-      { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'My App' },
-    ],
-  }),
-  shellComponent: ({ children }) => (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        <header>
-          <nav>
-            <Link to="/">Home</Link>
-            <Link to="/about">About</Link>
-          </nav>
-        </header>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  ),
-})
-```
-
-More information on layouts can be found in the [Layouts documentation](https://tanstack.com/router/latest/docs/framework/react/guide/routing-concepts#layouts).
-
-## Server Functions
-
-TanStack Start provides server functions that allow you to write server-side code that seamlessly integrates with your client components.
-
-```tsx
-import { createServerFn } from '@tanstack/react-start'
-
-const getServerTime = createServerFn({
-  method: 'GET',
-}).handler(async () => {
-  return new Date().toISOString()
-})
-
-// Use in a component
-function MyComponent() {
-  const [time, setTime] = useState('')
-  
-  useEffect(() => {
-    getServerTime().then(setTime)
-  }, [])
-  
-  return <div>Server time: {time}</div>
-}
-```
-
-## API Routes
-
-You can create API routes by using the `server` property in your route definitions:
-
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-import { json } from '@tanstack/react-start'
-
-export const Route = createFileRoute('/api/hello')({
-  server: {
-    handlers: {
-      GET: () => json({ message: 'Hello, World!' }),
-    },
-  },
-})
-```
-
-## Data Fetching
-
-There are multiple ways to fetch data in your application. You can use TanStack Query to fetch data from a server. But you can also use the `loader` functionality built into TanStack Router to load the data for a route before it's rendered.
-
-For example:
-
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-
-export const Route = createFileRoute('/people')({
-  loader: async () => {
-    const response = await fetch('https://swapi.dev/api/people')
-    return response.json()
-  },
-  component: PeopleComponent,
-})
-
-function PeopleComponent() {
-  const data = Route.useLoaderData()
-  return (
-    <ul>
-      {data.results.map((person) => (
-        <li key={person.name}>{person.name}</li>
-      ))}
-    </ul>
-  )
-}
-```
-
-Loaders simplify your data fetching logic dramatically. Check out more information in the [Loader documentation](https://tanstack.com/router/latest/docs/framework/react/guide/data-loading#loader-parameters).
-
-
-
-# Learn More
-
-You can learn more about all of the offerings from TanStack in the [TanStack documentation](https://tanstack.com).
-
-For TanStack Start specific documentation, visit [TanStack Start](https://tanstack.com/start).
+| Path | What lives there |
+| --- | --- |
+| `src/routes/` | File-based routes, including `/join`, `/request-access`, `/admin`, `/feedback` |
+| `src/components/` | UI. Components may only import browser-safe modules; server-only code stays behind server functions |
+| `src/lib/auth/` | Users, sessions, OAuth, per-user mailbox ownership, access mode |
+| `src/lib/invites/` | Codes, invites, redemption, access requests, approval email |
+| `src/lib/mailbox/`, `src/lib/gmail/`, `src/lib/microsoft/` | Provider adapters behind one `MailboxClient` seam |
+| `src/lib/conversation/`, `src/lib/ai/` | Classification, drafts, Jev/LLM clients and logs |
+| `src/db/` | Drizzle schema and connection; migrations in `drizzle/` |
+| `scripts/` | Operator scripts (report, backup, sync diagnostics) |

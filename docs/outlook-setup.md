@@ -1,6 +1,6 @@
 # Outlook setup
 
-Lumen reads Outlook.com and Microsoft 365 mailboxes through **Microsoft Graph**.
+Nuntia reads Outlook.com and Microsoft 365 mailboxes through **Microsoft Graph**.
 This is the second provider behind the mailbox seam; Gmail keeps working exactly
 as before, and one install can hold both.
 
@@ -11,7 +11,7 @@ bug cannot destroy mail.
 
 1. Open [Entra admin centre → App registrations](https://entra.microsoft.com)
    and choose **New registration**.
-2. Name it anything (`Lumen`). Under **Supported account types**, pick
+2. Name it anything (`Nuntia`). Under **Supported account types**, pick
    _Accounts in any organizational directory and personal Microsoft accounts_ —
    the `common` tenant in the next step expects that. If you only want one work
    tenant, pick that tenant instead and set `MICROSOFT_TENANT` to its id.
@@ -66,7 +66,7 @@ falls back to a backfill rather than guessing.
 - **Drafts and deleted items** are excluded the same way Gmail's are: drafts via
   `isDraft`, deleted items because Graph's message listing does not include them.
 - **Editing an existing message** is not picked up: only `receivedDateTime`
-  changes trigger a re-read. Lumen's model is "new mail arrives", and the same
+  changes trigger a re-read. Nuntia's model is "new mail arrives", and the same
   limitation applies to the Gmail path's reliance on `history.list`.
 - **Threading is Microsoft's `conversationId`.** A conversation Graph splits (or
   merges) differently from Gmail is stored the same way the provider reports it;

@@ -1,6 +1,6 @@
 # Setting up Google integration
 
-Lumen reads your Gmail through Google's OAuth 2.0 flow. This walks through creating the
+Nuntia reads your Gmail through Google's OAuth 2.0 flow. This walks through creating the
 credentials in Google Cloud and wiring them into the app.
 
 It takes about ten minutes. The step order below is deliberate — the console buries the
@@ -43,7 +43,7 @@ Left nav → **APIs & Services** → **OAuth consent screen**.
 | Field | Value |
 | --- | --- |
 | User type | **External** |
-| App name | `Lumen` (anything you like) |
+| App name | `Nuntia` (anything you like) |
 | User support email | your own address |
 | Developer contact email | your own address |
 
@@ -61,7 +61,7 @@ https://www.googleapis.com/auth/gmail.send
 https://www.googleapis.com/auth/userinfo.email
 ```
 
-That set is deliberately minimal. There is no modify or delete scope, so a bug in Lumen
+That set is deliberately minimal. There is no modify or delete scope, so a bug in Nuntia
 cannot destroy mail — the token physically cannot delete anything.
 
 ---
@@ -74,7 +74,7 @@ ID**.
 | Field | Value |
 | --- | --- |
 | Application type | **Web application** |
-| Name | `Lumen local` |
+| Name | `Nuntia local` |
 | Authorized JavaScript origins | `http://localhost:3000` |
 | Authorized redirect URIs | `http://localhost:3000/auth/google/callback` |
 
@@ -109,7 +109,7 @@ Generate the encryption key:
 openssl rand -hex 32
 ```
 
-`TOKEN_ENCRYPTION_KEY` is required and there is no default. Lumen encrypts your Gmail
+`TOKEN_ENCRYPTION_KEY` is required and there is no default. Nuntia encrypts your Gmail
 refresh token with AES-256-GCM before it touches the database, and `encrypt()` throws
 rather than falling back to a shared default key — a default would mean every install
 encrypts with the same key.
@@ -164,7 +164,7 @@ sqlite3 data/lumen.db "select count(*), state from conversations group by state;
 ### Refresh tokens expire after 7 days
 
 An app in *Testing* publishing status issues refresh tokens that expire in **seven days**.
-After that, sync fails with an `invalid_grant` error and Lumen will tell you the grant was
+After that, sync fails with an `invalid_grant` error and Nuntia will tell you the grant was
 revoked.
 
 Sign out and back in to get a fresh token. To avoid this entirely, publish the app to
@@ -179,20 +179,20 @@ account does a full 30-day backfill on its next load.
 
 ## Real-time push (optional)
 
-By default Lumen polls. Gmail can instead tell it when a mailbox changes, which is what
+By default Nuntia polls. Gmail can instead tell it when a mailbox changes, which is what
 makes new mail appear within seconds rather than within two minutes. It needs a Pub/Sub
 topic and somewhere for Google to deliver to — which a plain `localhost` install does not
 have, so this is worth doing only for a deployed instance (or through a tunnel such as
 `ngrok http 3000`).
 
-1. In Google Cloud, create a topic, e.g. `projects/my-project/topics/lumen-gmail`.
+1. In Google Cloud, create a topic, e.g. `projects/my-project/topics/nuntia-gmail`.
 2. Grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role on it.
 3. Create a **push subscription** on that topic with the endpoint
    `https://your-host/webhooks/gmail?token=<GMAIL_PUSH_TOKEN>`.
 4. Set both variables in `.env.local` and restart:
 
 ```bash
-GOOGLE_PUBSUB_TOPIC="projects/my-project/topics/lumen-gmail"
+GOOGLE_PUBSUB_TOPIC="projects/my-project/topics/nuntia-gmail"
 GMAIL_PUSH_TOKEN="$(openssl rand -hex 32)"
 ```
 
@@ -202,7 +202,7 @@ endpoint answers `503`, and with a wrong one `403`.
 
 How it behaves: the registration is created (and renewed) on inbox loads and is stored per
 mailbox, expiring after at most seven days. A notification only says *which mailbox*
-changed, so Lumen resolves it to a connected account, starts that mailbox's sync in the
+changed, so Nuntia resolves it to a connected account, starts that mailbox's sync in the
 background, and answers `204` immediately — including for an address it does not hold, so
 Pub/Sub never retries a notification that will never match. The poll stays on regardless:
 it is the fallback when the registration has lapsed, and the only path for Outlook, whose

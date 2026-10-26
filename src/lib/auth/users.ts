@@ -30,6 +30,8 @@ import { db } from '#/db/index.ts'
 import { accounts, appSettings, users } from '#/db/schema.ts'
 import type { User } from '#/db/schema.ts'
 
+import { invitesOnly } from './access.ts'
+
 /** What the UI and session payload may see. Never the hash. */
 export type PublicUser = {
   id: string
@@ -127,7 +129,7 @@ async function verifyPassword(
 let dummyHash: Promise<string> | null = null
 
 async function verifyAgainstDummy(password: string): Promise<boolean> {
-  dummyHash ??= hashPassword('lumen-dummy-password')
+  dummyHash ??= hashPassword('nuntia-dummy-password')
   return verifyPassword(password, await dummyHash)
 }
 
@@ -176,6 +178,11 @@ export type RegisterInput = {
 export async function registerUser(
   input: RegisterInput,
 ): Promise<{ user: PublicUser } | { error: string }> {
+  // The route already redirects, but the server function is its own endpoint.
+  if (invitesOnly()) {
+    return { error: 'Registration is invite-only right now.' }
+  }
+
   const email = input.email.trim().toLowerCase()
 
   if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
@@ -233,6 +240,81 @@ export async function registerUser(
       return { error: 'That email is already registered.' }
     }
 
+    return { error: 'Could not create the account. Try again.' }
+  }
+}
+
+/**
+ * Create (or find) the person an invite belongs to.
+ *
+ * This is registration without a password: `password_hash` is `NOT NULL`, so
+ * the column gets a hash of 32 random bytes. Nothing can ever match it, which
+ * is the honest way to say "this account has no password" without weakening the
+ * schema or leaving a sentinel string a future bug could special-case.
+ *
+ * An existing address returns its user instead of failing: an address-bound
+ * invite is also the way back in after a cleared cookie, and "already
+ * registered" would make that recovery impossible.
+ *
+ * The first person on an empty install becomes the admin. That is the only way
+ * `/admin` can exist before an operator does — otherwise nobody could approve
+ * the next request, and the beta would need a manual SQL insert to start.
+ */
+export async function createInvitedUser(input: {
+  email: string
+  name?: string | null
+}): Promise<{ user: PublicUser; created: boolean } | { error: string }> {
+  const email = input.email.trim().toLowerCase()
+
+  if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
+    return { error: 'Enter a valid email address.' }
+  }
+
+  const name = input.name?.trim() || null
+  if (name && name.length > MAX_NAME_LENGTH) {
+    return { error: 'That name is too long.' }
+  }
+
+  const existing = await db.query.users.findFirst({
+    where: eq(users.id, email),
+  })
+  if (existing) return { user: toPublic(existing), created: false }
+
+  const isFirst = (await countUsers()) === 0
+
+  try {
+    const passwordHash = await hashPassword(
+      randomBytes(32).toString('base64'),
+    )
+
+    await db.insert(users).values({
+      id: email,
+      email,
+      name,
+      passwordHash,
+      role: isFirst ? 'admin' : 'member',
+    })
+
+    if (isFirst) await adoptOrphans(email)
+
+    return {
+      user: { id: email, email, name, createdAt: new Date() },
+      created: true,
+    }
+  } catch (error) {
+    // Two redemptions of the same address-bound invite can race here. The row
+    // is the identity, so the loser signs in rather than seeing an error.
+    if (
+      error instanceof Error &&
+      /UNIQUE constraint failed/i.test(error.message)
+    ) {
+      const row = await db.query.users.findFirst({
+        where: eq(users.id, email),
+      })
+      if (row) return { user: toPublic(row), created: false }
+    }
+
+    console.error('[auth] could not create the invited user:', error)
     return { error: 'Could not create the account. Try again.' }
   }
 }
@@ -296,6 +378,11 @@ export function ensureBootstrapUser(): Promise<void> {
  * first. Production always goes through `ensureBootstrapUser`.
  */
 export async function bootstrapDefaultUser(): Promise<void> {
+  // In invite mode this variable has no meaning. It exists to seed a login
+  // install without opening the form, and honouring it here would quietly
+  // create a user nobody asked for on the first request to the beta.
+  if (invitesOnly()) return
+
   const email = process.env.LUMEN_DEFAULT_USER_EMAIL?.trim().toLowerCase()
   const password = process.env.LUMEN_DEFAULT_USER_PASSWORD
 

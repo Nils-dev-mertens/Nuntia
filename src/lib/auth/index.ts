@@ -10,6 +10,8 @@
  * `accounts.ts`— mailboxes, scoped by owner; the only place tokens are decrypted
  */
 
+export { ACCESS_MODES, accessMode, invitesOnly } from './access.ts'
+export type { AccessMode } from './access.ts'
 export { decrypt, encrypt, tryDecrypt } from './crypto.ts'
 export {
   createSession,
@@ -23,6 +25,7 @@ export {
   authenticateUser,
   bootstrapDefaultUser,
   countUsers,
+  createInvitedUser,
   ensureBootstrapUser,
   getUser,
   registerUser,

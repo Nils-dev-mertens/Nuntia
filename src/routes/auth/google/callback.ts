@@ -71,7 +71,7 @@ export const Route = createFileRoute('/auth/google/callback')({
         // connection completed.
         const session = await getSession()
         if (!session) {
-          return fail('Sign in to Lumen before connecting a mailbox.', 401)
+          return fail('Sign in to Nuntia before connecting a mailbox.', 401)
         }
 
         try {

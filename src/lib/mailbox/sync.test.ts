@@ -22,7 +22,7 @@ import type { SyncEvent } from '#/lib/mailbox/sync.ts'
  * test file with a static import of the conversation layer silently redirected
  * the entire suite at the real mailbox.
  */
-const tmpDir = mkdtempSync(join(tmpdir(), 'lumen-sync-test-'))
+const tmpDir = mkdtempSync(join(tmpdir(), 'nuntia-sync-test-'))
 const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 
@@ -2911,5 +2911,72 @@ describe('one user’s mail is another’s', () => {
 
     // The owner still sees all of it.
     expect(await loadConversation(USER, 't1')).not.toBeNull()
+  })
+})
+
+describe('searching synced mail', () => {
+  test('narrows to matching threads and reads stored mail instead of syncing', async () => {
+    await backfill(
+      new FakeMailboxClient({
+        threads: [
+          {
+            id: 'search-quarterly',
+            cursor: '900',
+            messages: [
+              message({
+                id: 'sq-1',
+                threadId: 'search-quarterly',
+                from: 'finance@acme.example',
+                subject: 'Quarterly numbers',
+                date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+                body: 'The quarterly report is ready.',
+              }),
+            ],
+          },
+          {
+            id: 'search-lunch',
+            cursor: '901',
+            messages: [
+              message({
+                id: 'sl-1',
+                threadId: 'search-lunch',
+                from: 'friend@example.com',
+                subject: 'Lunch on Friday',
+                date: 'Tue, 16 Jan 2024 10:00:00 +0000',
+                body: 'See you at noon.',
+              }),
+            ],
+          },
+        ],
+      }),
+      ACCOUNT,
+      { userId: USER },
+    )
+
+    const all = await loadInbox(USER)
+    if (!all.signedIn) throw new Error('expected a signed-in payload')
+    expect(all.conversations).toHaveLength(2)
+    // The labels ride along with the inbox, even when they are the defaults.
+    expect(all.stateLabels['needs-action'].name).toBe('Needs action')
+
+    const bySubject = await loadInbox(USER, { search: 'QUARTERLY' })
+    if (!bySubject.signedIn) throw new Error('expected a signed-in payload')
+    expect(bySubject.conversations.map((row) => row.subject)).toEqual([
+      'Quarterly numbers',
+    ])
+    // A search is a read: no provider call, no background sync, no error.
+    expect(bySubject.syncedNow).toBe(false)
+    expect(bySubject.syncError).toBeNull()
+    expect(bySubject.syncing).toEqual([])
+
+    const byBody = await loadInbox(USER, { search: 'noon' })
+    if (!byBody.signedIn) throw new Error('expected a signed-in payload')
+    expect(byBody.conversations.map((row) => row.subject)).toEqual([
+      'Lunch on Friday',
+    ])
+
+    const none = await loadInbox(USER, { search: 'unfindable' })
+    if (!none.signedIn) throw new Error('expected a signed-in payload')
+    expect(none.conversations).toEqual([])
   })
 })

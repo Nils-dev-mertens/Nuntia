@@ -21,6 +21,7 @@ import {
 
 import { AuthForm } from '#/components/auth-form.tsx'
 import {
+  accessMode,
   countUsers,
   createSession,
   getSession,
@@ -35,14 +36,22 @@ import {
  * refuses to import. Keeping the call behind an RPC boundary means the route's
  * loader works the same on the server and in the browser.
  */
-const loadSignUpState = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<
-    { signedIn: true } | { signedIn: false; firstAccount: boolean }
+const loadSignUpState = createServerFn({ method: 'GET' }).handler(    async (): Promise<
+    | { signedIn: true }
+    | {
+        signedIn: false
+        firstAccount: boolean
+        mode: 'invite' | 'login'
+      }
   > => {
     const session = await getSession()
     if (session) return { signedIn: true }
 
-    return { signedIn: false, firstAccount: (await countUsers()) === 0 }
+    return {
+      signedIn: false,
+      firstAccount: (await countUsers()) === 0,
+      mode: accessMode(),
+    }
   },
 )
 
@@ -67,6 +76,9 @@ export const Route = createFileRoute('/sign-up')({
   loader: async () => {
     const state = await loadSignUpState()
     if (state.signedIn) throw redirect({ to: '/' })
+
+    // Registration is closed during the beta; an invite is the credential.
+    if (state.mode === 'invite') throw redirect({ to: '/request-access' })
 
     return { firstAccount: state.firstAccount }
   },

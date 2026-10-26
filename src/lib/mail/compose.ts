@@ -1,5 +1,5 @@
 /**
- * The send side: rebuild a normal-looking email from what Lumen displays.
+ * The send side: rebuild a normal-looking email from what Nuntia displays.
  *
  * This is the inverse of `strip.ts`. The user edits a bubble with no greeting
  * and no signature; the recipient receives something that reads like every
@@ -316,7 +316,7 @@ function multipartAlternative(
   body: string,
   html: string,
 ): string {
-  const boundary = `----=_Lumen_${shortHash(`${body}\u0000${html}`)}`
+  const boundary = `----=_Nuntia_${shortHash(`${body}\u0000${html}`)}`
 
   return [
     ...headers,
@@ -357,7 +357,7 @@ function multipartMixed(
       hashBytes(a.data),
     ]),
   ].join('\u0000')
-  const boundary = `----=_Lumen_Mixed_${shortHash(contentKey)}`
+  const boundary = `----=_Nuntia_Mixed_${shortHash(contentKey)}`
   const textPart = html
     ? multipartAlternative([], body, html)
     : singlePart([], body)
