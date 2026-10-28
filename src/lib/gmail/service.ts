@@ -32,6 +32,7 @@ import {
   listAccounts,
   setDerivedVersion,
 } from '#/lib/auth/accounts.ts'
+import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
   activeDone,
   activeStateOverride,
@@ -169,9 +170,15 @@ export type ConversationSummary = {
 }
 
 export type InboxPayload =
-  | { signedIn: false }
+  | { signedIn: false; microsoftConfigured: boolean }
   | {
       signedIn: true
+      /**
+       * Whether Outlook (Microsoft) sign-in is available on this install. False
+       * when no app registration is configured, and that is what disables the
+       * Outlook buttons in the UI.
+       */
+      microsoftConfigured: boolean
       /** Every connected mailbox, in connection order. */
       accounts: Array<{ id: string; email: string; provider: Provider }>
       conversations: ConversationSummary[]
@@ -1729,6 +1736,7 @@ export async function loadInbox(
 
   return {
     signedIn: true,
+    microsoftConfigured: isMicrosoftConfigured(),
     accounts,
     organizationRules,
     stateLabels,

@@ -42,6 +42,20 @@ function clientSecret(): string {
   return secret
 }
 
+/**
+ * Whether the Microsoft app credentials are present.
+ *
+ * Outlook is optional: without an app registration the OAuth flow cannot run at
+ * all. The UI reads this to disable the Outlook buttons, so an install that has
+ * not set the key shows the integration as unavailable instead of sending
+ * someone to `/auth/microsoft` only to be told so after the redirect.
+ */
+export function isMicrosoftConfigured(): boolean {
+  return Boolean(
+    process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET,
+  )
+}
+
 /** `common`, `organizations`, `consumers`, or a tenant id. */
 export function tenant(): string {
   return process.env.MICROSOFT_TENANT ?? 'common'

@@ -16,6 +16,7 @@ import { useEffect } from 'react'
 
 import { Inbox } from '#/components/inbox'
 import { getSession } from '#/lib/auth/index.ts'
+import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
   dismissForm,
   listOpenFormsForUser,
@@ -44,7 +45,11 @@ const SYNCING_REVALIDATE_MS = 3_000
 const fetchInbox = createServerFn({ method: 'GET' }).handler(async () => {
   const session = await getSession()
 
-  if (!session) return { signedIn: false } as const
+  if (!session)
+    return {
+      signedIn: false,
+      microsoftConfigured: isMicrosoftConfigured(),
+    } as const
 
   // Scoped to the signed-in user: every mailbox they own is read and merged into
   // one list, and no other account's mail is reachable from here.

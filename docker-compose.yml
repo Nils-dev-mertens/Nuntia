@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Secrets and URLs (TOKEN_ENCRYPTION_KEY, LUMEN_APP_URL, the Google and
+    # Microsoft credentials) live in `.env` on the host. The image carries no
+    # configuration of its own.
+    env_file:
+      - .env
+    environment:
+      # Relative to the container's /app, and therefore inside the volume below.
+      # Set DATABASE_URL in `.env` to point at a remote libSQL database instead.
+      - DATABASE_URL=${DATABASE_URL:-file:./data/lumen.db}
+    ports:
+      - '3251:3000'
+    volumes:
+      # The database, its WAL sidecars, the request log and the attachment cache.
+      # Losing this volume means every mailbox has to be re-authenticated.
+      - lumen-data:/app/data
+
+volumes:
+  lumen-data:

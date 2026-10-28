@@ -1,0 +1,33 @@
+# Build context: source and config only. Everything here is either rebuilt in
+# the image (`node_modules`, `dist`) or belongs to the host (the database, the
+# environment, editor and tool state).
+
+# Dependencies and build output
+node_modules
+dist
+dist-ssr
+.output
+.cache
+.tanstack
+
+# The database, its WAL sidecars, logs and backups
+data
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.log
+
+# Environment — the template is committed, real values stay on the host
+.env
+.env.*
+!.env.example
+
+# Version control and local tooling
+.git
+.github
+.vscode
+.freebuff
+tmp

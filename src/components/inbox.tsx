@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 
 import type { ConversationState } from '#/db/schema.ts'
 import type {
@@ -422,7 +423,7 @@ function SyncBanner({ syncing }: { syncing: AccountSyncProgress[] }) {
  * The steps are ordered by what the person has to *do*, not by what the app does
  * internally. Step one is the only interactive one.
  */
-function GetStarted() {
+function GetStarted({ microsoftConfigured }: { microsoftConfigured: boolean }) {
   return (
     <div className="mx-auto max-w-2xl p-8">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -456,15 +457,15 @@ function GetStarted() {
               >
                 Connect Gmail
               </a>
-              <a
-                href="/auth/microsoft"
+              <OutlookButton
+                configured={microsoftConfigured}
                 className={cn(
                   'inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
                   'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
                 )}
               >
                 Connect Outlook
-              </a>
+              </OutlookButton>
             </div>
           </div>
         </li>
@@ -542,7 +543,48 @@ function GetStarted() {
   )
 }
 
-function SignInPrompt() {
+/**
+ * The Outlook connection action.
+ *
+ * Microsoft sign-in is optional — an install with no app registration cannot run
+ * the flow at all — so while `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET` are
+ * unset the button renders as a disabled control rather than as a link to a
+ * callback that would only refuse. It becomes a real link the moment the key is
+ * added, with nothing else to change.
+ */
+function OutlookButton({
+  configured,
+  className,
+  children,
+}: {
+  configured: boolean
+  className: string
+  children: ReactNode
+}) {
+  if (!configured) {
+    return (
+      <span
+        aria-disabled="true"
+        title="Outlook is not configured on this install"
+        className={cn(className, 'cursor-not-allowed opacity-50')}
+      >
+        {children}
+      </span>
+    )
+  }
+
+  return (
+    <a href="/auth/microsoft" className={className}>
+      {children}
+    </a>
+  )
+}
+
+function SignInPrompt({
+  microsoftConfigured,
+}: {
+  microsoftConfigured: boolean
+}) {
   return (
     <div className="rounded-lg border border-border bg-card p-8 text-center">
       <h2 className="text-lg font-semibold text-card-foreground">
@@ -562,15 +604,15 @@ function SignInPrompt() {
         >
           Connect Gmail
         </a>
-        <a
-          href="/auth/microsoft"
+        <OutlookButton
+          configured={microsoftConfigured}
           className={cn(
             'inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
             'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
           )}
         >
           Connect Outlook
-        </a>
+        </OutlookButton>
       </div>
     </div>
   )
@@ -706,7 +748,7 @@ export function Inbox({
       <div className="mx-auto max-w-2xl p-8">
         <h1 className="text-3xl font-bold">Nuntia</h1>
         <div className="mt-8">
-          <SignInPrompt />
+          <SignInPrompt microsoftConfigured={payload.microsoftConfigured} />
         </div>
       </div>
     )
@@ -715,7 +757,8 @@ export function Inbox({
   // Signed in with nothing connected is not an empty inbox — it is a first run.
   // Checked before the inbox chrome so a new invitee never sees filters and a
   // "nothing in the synced window" message about mail that cannot exist yet.
-  if (payload.accounts.length === 0) return <GetStarted />
+  if (payload.accounts.length === 0)
+    return <GetStarted microsoftConfigured={payload.microsoftConfigured} />
 
   const {
     accounts,
@@ -850,15 +893,15 @@ export function Inbox({
           >
             Add Gmail
           </a>
-          <a
-            href="/auth/microsoft"
+          <OutlookButton
+            configured={payload.microsoftConfigured}
             className={cn(
               'shrink-0 inline-flex h-8 items-center rounded-md border border-border bg-background px-3',
               'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
             )}
           >
             Add Outlook
-          </a>
+          </OutlookButton>
           {openFormCount > 0 ? (
             <Link
               to="/ask"
