@@ -17,6 +17,12 @@
  *
  * Logging happens after the response exists, through a queued write, so it adds
  * no latency to the request it describes.
+ *
+ * The third job is static files, and it is not optional. The built server bundle
+ * only exports a `fetch` handler; it does not serve `dist/client` itself. Run on
+ * its own, every `/assets/*.js` request fell through to the router, came back as
+ * the HTML 404 page, and the browser refused to execute it as a module
+ * ("disallowed MIME type text/html"). The client found no JavaScript at all.
  */
 
 import entry from '@tanstack/react-start/server-entry'
@@ -27,12 +33,57 @@ import { isQuietPath, log, redactPath } from '#/lib/log.ts'
 
 const ready = initDatabase()
 
+/**
+ * `dist/client/` sits next to the server bundle, not inside it, so it is resolved
+ * relative to this module rather than to the working directory.
+ */
+const clientRoot = new URL('../client/', import.meta.url)
+
+/**
+ * Only build output is reachable: the hashed files under `assets/` plus the files
+ * `public/` puts at the root. The character set excludes `.` runs and separators,
+ * so no request can climb out of `dist/client`.
+ */
+const STATIC_PATH = /^\/(?:assets\/[\w-][\w.-]*|drizzle\.svg)$/
+
+/**
+ * Answers a request from the client build, or returns null to let it continue to
+ * the router. The existence check is what keeps this off in development: `vite
+ * dev` serves its own modules, and `dist/` is usually absent.
+ */
+async function serveStatic(pathname: string): Promise<Response | null> {
+  if (!STATIC_PATH.test(pathname)) return null
+
+  const file = Bun.file(new URL(pathname.slice(1), clientRoot))
+  if (!(await file.exists())) return null
+
+  // Vite hashes the contents into the filename under `assets/`, so those can be
+  // cached forever; the public files have stable names and cannot.
+  const immutable = pathname.startsWith('/assets/')
+
+  return new Response(file, {
+    headers: {
+      'Cache-Control': immutable
+        ? 'public, max-age=31536000, immutable'
+        : 'public, max-age=3600',
+    },
+  })
+}
+
 const serverEntry: ServerEntry = {
   async fetch(...args) {
-    await ready
-
     const request = args[0]
     const url = new URL(request.url)
+
+    // Before `ready`: an asset does not touch the database, and the page itself
+    // cannot render without its JavaScript.
+    if (request.method === 'GET' || request.method === 'HEAD') {
+      const asset = await serveStatic(url.pathname)
+      if (asset) return asset
+    }
+
+    await ready
+
     const started = performance.now()
     const quiet = isQuietPath(url.pathname)
 
