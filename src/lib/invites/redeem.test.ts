@@ -34,10 +34,11 @@ const {
   sessions,
   users,
 } = await import('#/db/schema.ts')
+const { authenticateUser, createInvitedUser, setUserPassword } =
+  await import('#/lib/auth/users.ts')
 const { createInvite } = await import('#/lib/invites/repository.ts')
-const { INVITE_REFUSAL, redeemInvite, resetInviteThrottle } = await import(
-  '#/lib/invites/redeem.ts'
-)
+const { INVITE_REFUSAL, redeemInvite, resetInviteThrottle } =
+  await import('#/lib/invites/redeem.ts')
 const { migrate } = await import('drizzle-orm/libsql/migrator')
 
 await initDatabase()
@@ -180,6 +181,105 @@ describe('redeemInvite', () => {
     expect(redemptions).toHaveLength(1)
   })
 
+  test('stores the password chosen on the invite form, so a later visit can sign in', async () => {
+    const invite = await createInvite({ email: ALICE })
+
+    const result = await redeemInvite({
+      code: invite.code,
+      email: ALICE,
+      password: 'a-proper-password',
+    })
+    expect(result.ok).toBe(true)
+
+    // The point of the password: signing in must not need the invite email.
+    const signedIn = await authenticateUser(ALICE, 'a-proper-password')
+    expect('user' in signedIn).toBe(true)
+
+    const wrong = await authenticateUser(ALICE, 'something-else-entirely')
+    expect('error' in wrong).toBe(true)
+  })
+
+  test('re-redeeming a bound invite replaces the password', async () => {
+    const invite = await createInvite({ email: ALICE })
+
+    await redeemInvite({
+      code: invite.code,
+      email: ALICE,
+      password: 'the-first-password',
+    })
+    const again = await redeemInvite({
+      code: invite.code,
+      email: ALICE,
+      password: 'the-second-password',
+    })
+    expect(again.ok).toBe(true)
+
+    expect(
+      'user' in (await authenticateUser(ALICE, 'the-second-password')),
+    ).toBe(true)
+    expect(
+      'error' in (await authenticateUser(ALICE, 'the-first-password')),
+    ).toBe(true)
+  })
+
+  test('a too-short password is a form error, and the invite is not spent', async () => {
+    const invite = await createInvite()
+
+    const result = await redeemInvite({
+      code: invite.code,
+      email: ALICE,
+      password: 'short',
+    })
+    expect(result).toEqual({
+      ok: false,
+      error: 'Use a password of at least 10 characters.',
+    })
+
+    const usersAfter = await db.query.users.findMany()
+    expect(usersAfter).toHaveLength(0)
+
+    const retry = await redeemInvite({
+      code: invite.code,
+      email: ALICE,
+      password: 'a-proper-password',
+    })
+    expect(retry.ok).toBe(true)
+  })
+
+  test('the bootstrap code also carries a password', async () => {
+    process.env.LUMEN_BOOTSTRAP_INVITE = 'AAAA-BBBB-CCCC'
+
+    const result = await redeemInvite({
+      code: 'AAAA-BBBB-CCCC',
+      email: ALICE,
+      password: 'first-admin-password',
+    })
+    expect(result.ok).toBe(true)
+    expect(
+      'user' in (await authenticateUser(ALICE, 'first-admin-password')),
+    ).toBe(true)
+
+    delete process.env.LUMEN_BOOTSTRAP_INVITE
+  })
+
+  test('the operator script sets a password on an account that has none', async () => {
+    // An invite redeemed without a password is how every account made before
+    // the form asked for one looks: a hash nothing can match.
+    await createInvitedUser({ email: ALICE })
+    expect('error' in (await authenticateUser(ALICE, 'anything-at-all'))).toBe(
+      true,
+    )
+
+    const set = await setUserPassword(ALICE, 'the-operator-set-this')
+    expect('user' in set).toBe(true)
+    expect(
+      'user' in (await authenticateUser(ALICE, 'the-operator-set-this')),
+    ).toBe(true)
+
+    const missing = await setUserPassword(BOB, 'the-operator-set-this')
+    expect(missing).toEqual({ error: `No account for ${BOB}.` })
+  })
+
   test('the first person on the install is the admin, the next is a member', async () => {
     const firstInvite = await createInvite()
     const secondInvite = await createInvite()
@@ -216,7 +316,10 @@ describe('redeemInvite', () => {
   test('a bad form value returns the form error, not the refusal, and gives the use back', async () => {
     const invite = await createInvite()
 
-    const result = await redeemInvite({ code: invite.code, email: 'not-an-email' })
+    const result = await redeemInvite({
+      code: invite.code,
+      email: 'not-an-email',
+    })
     expect(result).toEqual({ ok: false, error: 'Enter a valid email address.' })
 
     // The invite is still usable: a typo is not a spent link.

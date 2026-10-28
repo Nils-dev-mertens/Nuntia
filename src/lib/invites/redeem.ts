@@ -70,6 +70,12 @@ export type RedeemInput = {
   code: string
   email: string
   name?: string | null
+  /**
+   * The password chosen on the invite form. It is stored on the account so that
+   * signing in later does not depend on finding the original email again.
+   * Optional only for callers that redeem a bare code.
+   */
+  password?: string | null
   /** Browser hint for the redemption row; never used for authorisation. */
   userAgent?: string | null
 }
@@ -104,7 +110,8 @@ export async function matchesBootstrapCode(code: string): Promise<boolean> {
 
   const submitted = Buffer.from(normaliseCode(code) ?? '')
   const expected = Buffer.from(normaliseCode(configured) ?? '')
-  if (submitted.length === 0 || submitted.length !== expected.length) return false
+  if (submitted.length === 0 || submitted.length !== expected.length)
+    return false
 
   return timingSafeEqual(submitted, expected)
 }
@@ -120,6 +127,7 @@ export async function redeemInvite(input: RedeemInput): Promise<RedeemResult> {
     const created = await createInvitedUser({
       email: input.email,
       name: input.name ?? null,
+      password: input.password ?? null,
     })
     if ('error' in created) return { ok: false, error: created.error }
 
@@ -159,17 +167,18 @@ export async function redeemInvite(input: RedeemInput): Promise<RedeemResult> {
           eq(invites.id, invite.id),
           sql`${invites.useCount} < ${invites.maxUses}`,
           isNull(invites.revokedAt),
-          or(
-            isNull(invites.expiresAt),
-            gt(invites.expiresAt, new Date()),
-          ),
+          or(isNull(invites.expiresAt), gt(invites.expiresAt, new Date())),
         ),
       )
 
     if (reserved.rowsAffected === 0) return refusal()
   }
 
-  const created = await createInvitedUser({ email, name: input.name ?? null })
+  const created = await createInvitedUser({
+    email,
+    name: input.name ?? null,
+    password: input.password ?? null,
+  })
 
   if ('error' in created) {
     // Give the use back. The failure is about the form, not about the invite,

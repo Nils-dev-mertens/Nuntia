@@ -64,8 +64,9 @@ export type UserRole = (typeof USER_ROLES)[number]
  *
  * `id` is the lowercased email address, the same convention accounts use: it is
  * stable, already unique, and makes a session payload readable in a log without
- * a second lookup. Passwords are argon2id hashes (via `hash-wasm`); there is
- * no password reset yet, so losing it means an owner has to re-create the user.
+ * a second lookup. Passwords are argon2id hashes (via `hash-wasm`); there is no
+ * reset-by-email flow, so a lost password is replaced by the operator running
+ * `scripts/set-password.ts` rather than by re-creating the user.
  */
 export const users = sqliteTable(
   'users',
@@ -649,7 +650,10 @@ export const organizationRules = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [
-    index('organization_rules_user_position_idx').on(table.userId, table.position),
+    index('organization_rules_user_position_idx').on(
+      table.userId,
+      table.position,
+    ),
   ],
 )
 

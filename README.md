@@ -70,8 +70,11 @@ Redirect URI for both providers in development is
    single-use invite bound to the address and emails the link **from the
    operator's own connected mailbox** — no email service is involved. With no
    mailbox connected the approval still stands and the link is shown to copy.
-3. `/join/<code>` creates the user, starts a session, and lands on a first-run
-   screen: connect a mailbox, then (optionally) add AI keys in Settings.
+3. `/join/<code>` creates the user with the password they choose, starts a
+   session, and lands on a first-run screen: connect a mailbox, then
+   (optionally) add AI keys in Settings. From then on `/sign-in` with that
+   address and password is the way back in — the invite link is not needed
+   again, and neither is the email it came in.
 4. `/admin` shows the funnel — requested → approved → redeemed → activated →
    used → returned — plus people, invites, feedback and the AI call log.
 
@@ -81,7 +84,14 @@ admin. Remove the variable afterwards.
 
 `/admin/sign-in` keeps the password form even in invite mode — otherwise an
 expired operator cookie would lock you out of the only page that can issue an
-invite.
+invite. An account created before invites asked for a password (the first admin
+on an existing install, most of all) gets one from the operator:
+
+```bash
+bun run scripts/set-password.ts you@example.com 'a long enough password'
+# in Docker, where the image has no source:
+#   docker compose exec app bun dist/set-password.js you@example.com '...'
+```
 
 ## Scripts
 
@@ -98,6 +108,7 @@ bun run db:generate      # new migration from schema.ts
 bun run db:studio        # inspect the database
 bun run scripts/beta-report.ts            # funnel in the terminal
 bun run scripts/beta-report.ts --prune    # drop declined requests older than 90 days
+bun run scripts/set-password.ts <email>   # give an existing account a password
 bun run scripts/backup-db.ts              # consistent database snapshot
 bun run scripts/diagnose-sync.ts          # why mail is missing from the inbox
 ```

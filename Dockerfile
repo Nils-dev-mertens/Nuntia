@@ -17,6 +17,13 @@ RUN bun install --frozen-lockfile
 COPY . .
 RUN bun run build
 
+# The image ships no source, and one maintenance script has to be runnable from
+# inside the container: giving a locked-out account a password. Bundled beside
+# the server so it resolves the same runtime dependencies:
+#   docker compose exec app bun dist/set-password.js <email> <password>
+RUN bun build scripts/set-password.ts --target bun --packages external \
+    --outfile dist/set-password.js
+
 FROM oven/bun:1.3.14-slim
 WORKDIR /app
 

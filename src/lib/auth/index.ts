@@ -29,6 +29,7 @@ export {
   ensureBootstrapUser,
   getUser,
   registerUser,
+  setUserPassword,
 } from './users.ts'
 export type { PublicUser, RegisterInput } from './users.ts'
 export {

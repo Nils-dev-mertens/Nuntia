@@ -5,6 +5,11 @@
  * screen is the one thing to do. The loader sends an already-signed-in visitor
  * straight to the inbox, so a bookmark to the inbox and a refresh both keep
  * working whether or not a session exists.
+ *
+ * The form works in both access modes. In the beta it used to redirect to
+ * `/request-access`, which made an invite link the only way back into an account
+ * — for a tester with a cleared cookie, and for the operator's own admin, that
+ * meant hunting through mail. Registration is still gated; signing in is not.
  */
 
 import { createServerFn } from '@tanstack/react-start'
@@ -74,17 +79,13 @@ export const Route = createFileRoute('/sign-in')({
     const state = await loadSignInState()
     if (state.signedIn) throw redirect({ to: '/' })
 
-    // The beta has no sign-in form. Operators keep theirs at `/admin/sign-in`,
-    // which is a different route and not affected by this.
-    if (state.mode === 'invite') throw redirect({ to: '/request-access' })
-
-    return { emptyInstall: state.emptyInstall }
+    return { emptyInstall: state.emptyInstall, mode: state.mode }
   },
   component: SignIn,
 })
 
 function SignIn() {
-  const { emptyInstall } = Route.useLoaderData()
+  const { emptyInstall, mode } = Route.useLoaderData()
   const router = useRouter()
 
   return (
@@ -105,13 +106,24 @@ function SignIn() {
         return result
       }}
       hint={
-        <>
-          {emptyInstall ? 'No accounts exist yet — ' : 'No account yet? '}
-          <Link to="/sign-up" className="text-primary hover:underline">
-            create one
-          </Link>
-          .
-        </>
+        mode === 'invite' ? (
+          <>
+            {emptyInstall ? 'No accounts exist yet — ' : 'No account yet? '}
+            Nuntia is invite-only:{' '}
+            <Link to="/request-access" className="text-primary hover:underline">
+              ask for access
+            </Link>
+            . Joined before there were passwords? Ask the operator to set one.
+          </>
+        ) : (
+          <>
+            {emptyInstall ? 'No accounts exist yet — ' : 'No account yet? '}
+            <Link to="/sign-up" className="text-primary hover:underline">
+              create one
+            </Link>
+            .
+          </>
+        )
       }
     />
   )

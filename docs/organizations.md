@@ -184,10 +184,11 @@ The shape, not the migration files:
 - **The beta funnel changes unit.** One request, one invite, one activated user
   becomes one organisation and n seats. The admin page and `beta-report.ts` will
   need both numbers, or the funnel stops answering "is this working".
-- **Invite mode has no password reset.** A member who loses their session needs
-  an address-bound invite that lands them in the _right_ organisation, not just
-  any account with that email. The existing-user path in `/join` has to check
-  membership, not only identity.
+- **Invite mode has no password reset.** Signing in with a password works in
+  invite mode, but a member who has forgotten theirs still needs the address-bound
+  invite that lands them in the _right_ organisation, not just any account with
+  that email. The existing-user path in `/join` has to check membership, not only
+  identity.
 
 ## Where the rest of the design lives
 

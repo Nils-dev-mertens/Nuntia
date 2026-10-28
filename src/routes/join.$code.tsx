@@ -17,11 +17,7 @@ import { getRequestHeader } from '@tanstack/react-start/server'
 import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
 
 import { JoinForm } from '#/components/join-form.tsx'
-import {
-  createSession,
-  getSession,
-  invitesOnly,
-} from '#/lib/auth/index.ts'
+import { createSession, getSession, invitesOnly } from '#/lib/auth/index.ts'
 import { findInviteByCode } from '#/lib/invites/repository.ts'
 import { matchesBootstrapCode, redeemInvite } from '#/lib/invites/redeem.ts'
 
@@ -42,7 +38,8 @@ const inspectInvite = createServerFn({ method: 'GET' })
     if (!invitesOnly()) return { mode: 'login' }
 
     const session = await getSession()
-    if (session) return { mode: 'invite', signedIn: true, valid: false, email: null }
+    if (session)
+      return { mode: 'invite', signedIn: true, valid: false, email: null }
 
     const invite = await findInviteByCode(code)
     const expired = invite?.expiresAt
@@ -66,10 +63,16 @@ const inspectInvite = createServerFn({ method: 'GET' })
 
 const joinAction = createServerFn({ method: 'POST' })
   .validator(
-    (data: { code: string; email: string; name: string | null }) => data,
+    (data: {
+      code: string
+      email: string
+      name: string | null
+      password: string
+    }) => data,
   )
   .handler(async ({ data }): Promise<{ error: string | null }> => {
-    if (!invitesOnly()) return { error: 'This install uses sign-in, not invites.' }
+    if (!invitesOnly())
+      return { error: 'This install uses sign-in, not invites.' }
 
     let userAgent: string | null = null
     try {
@@ -82,6 +85,10 @@ const joinAction = createServerFn({ method: 'POST' })
       code: data.code,
       email: data.email,
       name: data.name,
+      // The invite buys the account; the password is what gets them back into it
+      // without the email. Length is checked in `createInvitedUser`, next to the
+      // other rules, so both entry points give the same sentence.
+      password: data.password,
       userAgent,
     })
 
@@ -121,6 +128,7 @@ function JoinWithCode() {
             code: credentials.code,
             email: credentials.email,
             name: credentials.name,
+            password: credentials.password,
           },
         })
 

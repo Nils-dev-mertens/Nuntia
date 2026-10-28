@@ -18,7 +18,11 @@ export type JoinCredentials = {
   code: string
   email: string
   name: string | null
+  password: string
 }
+
+/** Matches the server's rule in `lib/auth/users.ts`; the server decides. */
+const MIN_PASSWORD_LENGTH = 10
 
 export function JoinForm({
   code,
@@ -35,12 +39,21 @@ export function JoinForm({
   const [enteredCode, setEnteredCode] = useState(code)
   const [email, setEmail] = useState(lockedEmail ?? '')
   const [name, setName] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
+
+    // A mistyped confirmation is a keystroke-level mistake; a round trip to be
+    // told so is annoying. The server holds the rule that matters.
+    if (password !== confirm) {
+      setError('Those passwords do not match.')
+      return
+    }
 
     setBusy(true)
     setError(null)
@@ -49,6 +62,7 @@ export function JoinForm({
         code: enteredCode,
         email,
         name: name.trim() || null,
+        password,
       })
       setError(result.error)
     } catch {
@@ -65,8 +79,9 @@ export function JoinForm({
     <div className="mx-auto flex min-h-screen max-w-sm flex-col justify-center p-8">
       <h1 className="text-2xl font-bold">You&apos;re in</h1>
       <p className="mt-2 text-sm text-muted-foreground">
-        One step: confirm the address this invite is for. There is no password —
-        the link is the credential.
+        Confirm the address this invite is for and choose a password. The invite
+        is what gets you in today; the password is what brings you back without
+        digging up this email again.
       </p>
 
       <form
@@ -111,6 +126,35 @@ export function JoinForm({
           />
         </label>
 
+        <label className="block text-xs text-muted-foreground">
+          Password
+          <input
+            type="password"
+            required
+            minLength={MIN_PASSWORD_LENGTH}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="new-password"
+            className={inputClass}
+          />
+          <span className="mt-1 block text-muted-foreground/60">
+            At least {MIN_PASSWORD_LENGTH} characters.
+          </span>
+        </label>
+
+        <label className="block text-xs text-muted-foreground">
+          Confirm password
+          <input
+            type="password"
+            required
+            minLength={MIN_PASSWORD_LENGTH}
+            value={confirm}
+            onChange={(event) => setConfirm(event.target.value)}
+            autoComplete="new-password"
+            className={inputClass}
+          />
+        </label>
+
         {error ? (
           <p
             role="alert"
@@ -131,7 +175,8 @@ export function JoinForm({
 
       <p className="mt-4 text-xs text-muted-foreground">
         Nuntia will ask for a mailbox next — that is what proves the address
-        works, and where the mail comes from.
+        works, and where the mail comes from. You can sign in at{' '}
+        <code>/sign-in</code> with this address and password from any browser.
       </p>
     </div>
   )

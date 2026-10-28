@@ -83,7 +83,8 @@ export async function notifyInvite(input: {
     '',
     inviteLink(input.code),
     '',
-    'The link works for 14 days.',
+    'The link works for 14 days. It asks you to choose a password, and that is',
+    'what you sign in with from then on — this email is not needed again.',
   ].join('\n')
 
   try {

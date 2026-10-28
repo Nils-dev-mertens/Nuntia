@@ -49,6 +49,22 @@ const MAX_NAME_LENGTH = 100
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 /**
+ * One sentence per way a password can be unacceptable.
+ *
+ * Shared by sign-up, invite redemption and the set-password script so the three
+ * cannot drift into telling the same person different rules.
+ */
+function passwordProblem(password: string | null | undefined): string | null {
+  if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+    return `Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return 'That password is too long.'
+  }
+  return null
+}
+
+/**
  * Failed sign-in throttle, per email address.
  *
  * In memory on purpose: this is one Bun process, the protection is against a
@@ -188,17 +204,8 @@ export async function registerUser(
   if (!email || email.length > MAX_EMAIL_LENGTH || !EMAIL_RE.test(email)) {
     return { error: 'Enter a valid email address.' }
   }
-  if (
-    typeof input.password !== 'string' ||
-    input.password.length < MIN_PASSWORD_LENGTH
-  ) {
-    return {
-      error: `Use a password of at least ${MIN_PASSWORD_LENGTH} characters.`,
-    }
-  }
-  if (input.password.length > MAX_PASSWORD_LENGTH) {
-    return { error: 'That password is too long.' }
-  }
+  const problem = passwordProblem(input.password)
+  if (problem) return { error: problem }
 
   const name = input.name?.trim() || null
   if (name && name.length > MAX_NAME_LENGTH) {
@@ -247,14 +254,18 @@ export async function registerUser(
 /**
  * Create (or find) the person an invite belongs to.
  *
- * This is registration without a password: `password_hash` is `NOT NULL`, so
- * the column gets a hash of 32 random bytes. Nothing can ever match it, which
- * is the honest way to say "this account has no password" without weakening the
- * schema or leaving a sentinel string a future bug could special-case.
+ * The invite form asks for a password, and this stores it: redemption is
+ * registration, and an account nobody can sign in to again is a support problem
+ * the moment the session cookie is gone. The password is optional only so the
+ * bare-code paths keep working (the environment bootstrap code, the tests, a
+ * script): without one, `password_hash` — `NOT NULL` — gets a hash of 32 random
+ * bytes that nothing can match.
  *
  * An existing address returns its user instead of failing: an address-bound
  * invite is also the way back in after a cleared cookie, and "already
- * registered" would make that recovery impossible.
+ * registered" would make that recovery impossible. A password submitted on that
+ * second visit replaces the stored hash, which is what makes the same link a
+ * "set my password" path for an account created before this form asked for one.
  *
  * The first person on an empty install becomes the admin. That is the only way
  * `/admin` can exist before an operator does — otherwise nobody could approve
@@ -263,6 +274,8 @@ export async function registerUser(
 export async function createInvitedUser(input: {
   email: string
   name?: string | null
+  /** Absent only on the code-only paths; the invite form always sends one. */
+  password?: string | null
 }): Promise<{ user: PublicUser; created: boolean } | { error: string }> {
   const email = input.email.trim().toLowerCase()
 
@@ -275,16 +288,32 @@ export async function createInvitedUser(input: {
     return { error: 'That name is too long.' }
   }
 
+  const password = input.password ?? null
+  if (password !== null) {
+    const problem = passwordProblem(password)
+    if (problem) return { error: problem }
+  }
+
   const existing = await db.query.users.findFirst({
     where: eq(users.id, email),
   })
-  if (existing) return { user: toPublic(existing), created: false }
+  if (existing) {
+    // Presented with the link for their own address, the person may set (or
+    // replace) the password. Possession of a bound invite already signs this
+    // address in, so resetting the hash grants nothing the link did not.
+    if (password !== null) {
+      const passwordHash = await hashPassword(password)
+      await db.update(users).set({ passwordHash }).where(eq(users.id, email))
+    }
+
+    return { user: toPublic(existing), created: false }
+  }
 
   const isFirst = (await countUsers()) === 0
 
   try {
     const passwordHash = await hashPassword(
-      randomBytes(32).toString('base64'),
+      password ?? randomBytes(32).toString('base64'),
     )
 
     await db.insert(users).values({
@@ -317,6 +346,33 @@ export async function createInvitedUser(input: {
     console.error('[auth] could not create the invited user:', error)
     return { error: 'Could not create the account. Try again.' }
   }
+}
+
+/**
+ * Set the password of an account that already exists.
+ *
+ * The way back in for anyone who got in before the invite form asked for a
+ * password — the first admin on an existing install being the case that matters.
+ * A script rather than a form, because proving an address with neither a
+ * password nor a mailbox is something only the operator of the machine can do.
+ */
+export async function setUserPassword(
+  email: string,
+  password: string,
+): Promise<{ user: PublicUser } | { error: string }> {
+  const id = email.trim().toLowerCase()
+  if (!id) return { error: 'Enter the address of an existing account.' }
+
+  const problem = passwordProblem(password)
+  if (problem) return { error: problem }
+
+  const row = await db.query.users.findFirst({ where: eq(users.id, id) })
+  if (!row) return { error: `No account for ${id}.` }
+
+  const passwordHash = await hashPassword(password)
+  await db.update(users).set({ passwordHash }).where(eq(users.id, id))
+
+  return { user: toPublic(row) }
 }
 
 /**
