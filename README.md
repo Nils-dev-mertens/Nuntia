@@ -80,7 +80,10 @@ Redirect URI for both providers in development is
 
 On an empty install nobody can open `/admin`, so the first user comes from
 `LUMEN_BOOTSTRAP_INVITE`: set it, visit `/join/<code>`, and that user is an
-admin. Remove the variable afterwards.
+admin. Remove the variable afterwards. Alternatively set
+`LUMEN_DEFAULT_USER_EMAIL` / `LUMEN_DEFAULT_USER_PASSWORD` and the app creates
+that account as the admin on the first request — in either access mode, and only
+while no user exists.
 
 `/admin/sign-in` keeps the password form even in invite mode — otherwise an
 expired operator cookie would lock you out of the only page that can issue an
@@ -88,9 +91,10 @@ invite. An account created before invites asked for a password (the first admin
 on an existing install, most of all) gets one from the operator:
 
 ```bash
-bun run scripts/set-password.ts you@example.com 'a long enough password'
+# also creates the account when it does not exist; --admin makes it an operator
+bun run scripts/set-password.ts you@example.com 'a long enough password' --admin
 # in Docker, where the image has no source:
-#   docker compose exec app bun dist/set-password.js you@example.com '...'
+#   docker compose exec app bun dist/set-password.js you@example.com '...' --admin
 ```
 
 ## Scripts
@@ -108,7 +112,7 @@ bun run db:generate      # new migration from schema.ts
 bun run db:studio        # inspect the database
 bun run scripts/beta-report.ts            # funnel in the terminal
 bun run scripts/beta-report.ts --prune    # drop declined requests older than 90 days
-bun run scripts/set-password.ts <email>   # give an existing account a password
+bun run scripts/set-password.ts <email>   # set a password, creating the account
 bun run scripts/backup-db.ts              # consistent database snapshot
 bun run scripts/diagnose-sync.ts          # why mail is missing from the inbox
 ```

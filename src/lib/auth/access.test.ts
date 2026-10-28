@@ -7,7 +7,14 @@
  * directly rather than through its route.
  */
 
-import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,9 +26,8 @@ process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 const { db, initDatabase } = await import('#/db/index.ts')
 const { users } = await import('#/db/schema.ts')
 const { accessMode, invitesOnly } = await import('#/lib/auth/access.ts')
-const { bootstrapDefaultUser, registerUser } = await import(
-  '#/lib/auth/users.ts'
-)
+const { bootstrapDefaultUser, registerUser } =
+  await import('#/lib/auth/users.ts')
 const { migrate } = await import('drizzle-orm/libsql/migrator')
 
 await initDatabase()
@@ -72,8 +78,24 @@ describe('accessMode', () => {
 })
 
 describe('invite mode', () => {
-  test('ignores the environment bootstrap, so nobody is created uninvited', async () => {
+  test('still creates the account the operator configured, as an admin', async () => {
     process.env.LUMEN_ACCESS_MODE = 'invite'
+
+    await bootstrapDefaultUser()
+
+    // The variables are set by whoever runs the machine, so this account was
+    // asked for by name. Without it a beta install configured this way came up
+    // with nobody able to sign in or issue the first invite.
+    const rows = await db.query.users.findMany()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.id).toBe('owner@example.com')
+    expect(rows[0]?.role).toBe('admin')
+  })
+
+  test('creates nobody when those variables are absent', async () => {
+    process.env.LUMEN_ACCESS_MODE = 'invite'
+    delete process.env.LUMEN_DEFAULT_USER_EMAIL
+    delete process.env.LUMEN_DEFAULT_USER_PASSWORD
 
     await bootstrapDefaultUser()
 

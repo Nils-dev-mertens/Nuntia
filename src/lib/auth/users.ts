@@ -13,12 +13,14 @@
  * Bootstrap rules, in order:
  *
  * 1. If `LUMEN_DEFAULT_USER_EMAIL` / `LUMEN_DEFAULT_USER_PASSWORD` are set and
- *    there are no users yet, that account is created on the first request.
+ *    there are no users yet, that account is created on the first request — in
+ *    either access mode, as the admin.
  * 2. Otherwise the first sign-up adopts any mailboxes written before accounts
  *    existed (`user_id IS NULL`), so an existing install is not stranded.
  *
- * Open registration after that: anyone who reaches the deployment can create an
- * account, and nobody sees anyone else's mail.
+ * After that, who may create an account is `access.ts`'s decision: the beta takes
+ * an invite, `login` mode takes the open form. Signing in with a password works
+ * either way, and nobody sees anyone else's mail.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -349,30 +351,39 @@ export async function createInvitedUser(input: {
 }
 
 /**
- * Set the password of an account that already exists.
+ * Set the password of an account, creating it when it does not exist.
  *
- * The way back in for anyone who got in before the invite form asked for a
- * password — the first admin on an existing install being the case that matters.
- * A script rather than a form, because proving an address with neither a
- * password nor a mailbox is something only the operator of the machine can do.
+ * The way in for anyone who got in before the invite form asked for a password,
+ * and for an install whose account was never created at all — the case that
+ * matters most, because with no user there is nothing to sign in as and no
+ * invite can be issued either. Creating is part of the job for the same reason
+ * as setting: whoever holds the shell is the only party who can prove an address
+ * with neither a password nor a mailbox.
+ *
+ * A reset of an existing account goes through `createInvitedUser`, so the rules
+ * (password length, first user becomes admin) are the same ones redemption uses.
  */
 export async function setUserPassword(
   email: string,
   password: string,
-): Promise<{ user: PublicUser } | { error: string }> {
+  options: { admin?: boolean } = {},
+): Promise<{ user: PublicUser; created: boolean } | { error: string }> {
   const id = email.trim().toLowerCase()
-  if (!id) return { error: 'Enter the address of an existing account.' }
+  if (!id) return { error: 'Enter the address of the account.' }
 
   const problem = passwordProblem(password)
   if (problem) return { error: problem }
 
-  const row = await db.query.users.findFirst({ where: eq(users.id, id) })
-  if (!row) return { error: `No account for ${id}.` }
+  const result = await createInvitedUser({ email: id, password })
+  if ('error' in result) return result
 
-  const passwordHash = await hashPassword(password)
-  await db.update(users).set({ passwordHash }).where(eq(users.id, id))
+  // Asked for explicitly, because an install that already has users makes this
+  // one a member — and the person running the command is usually the operator.
+  if (options.admin) {
+    await db.update(users).set({ role: 'admin' }).where(eq(users.id, id))
+  }
 
-  return { user: toPublic(row) }
+  return result
 }
 
 /**
@@ -434,11 +445,12 @@ export function ensureBootstrapUser(): Promise<void> {
  * first. Production always goes through `ensureBootstrapUser`.
  */
 export async function bootstrapDefaultUser(): Promise<void> {
-  // In invite mode this variable has no meaning. It exists to seed a login
-  // install without opening the form, and honouring it here would quietly
-  // create a user nobody asked for on the first request to the beta.
-  if (invitesOnly()) return
-
+  // Honoured in both access modes. These variables are set by whoever runs the
+  // machine, so the account they describe is one somebody explicitly asked for —
+  // the opposite of registering through the open form, which is the only thing
+  // invite mode closes. Gating it on `login` meant a beta deployment configured
+  // this way came up with no account at all, and its operator had no way in to
+  // approve the first request either.
   const email = process.env.LUMEN_DEFAULT_USER_EMAIL?.trim().toLowerCase()
   const password = process.env.LUMEN_DEFAULT_USER_PASSWORD
 
@@ -457,7 +469,11 @@ export async function bootstrapDefaultUser(): Promise<void> {
 
   const passwordHash = await hashPassword(password)
 
-  await db.insert(users).values({ id: email, email, passwordHash })
+  // `admin` for the same reason `createInvitedUser` promotes the first person:
+  // without it, a freshly bootstrapped install has no way into `/admin`.
+  await db
+    .insert(users)
+    .values({ id: email, email, passwordHash, role: 'admin' })
   await adoptOrphans(email)
-  console.info(`[auth] created the default user ${email}`)
+  console.info(`[auth] created the default admin ${email}`)
 }

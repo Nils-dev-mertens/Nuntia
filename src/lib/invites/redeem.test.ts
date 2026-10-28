@@ -271,13 +271,30 @@ describe('redeemInvite', () => {
     )
 
     const set = await setUserPassword(ALICE, 'the-operator-set-this')
-    expect('user' in set).toBe(true)
+    expect('error' in set).toBe(false)
+    if ('error' in set) return
+    expect(set.created).toBe(false)
     expect(
       'user' in (await authenticateUser(ALICE, 'the-operator-set-this')),
     ).toBe(true)
+  })
 
-    const missing = await setUserPassword(BOB, 'the-operator-set-this')
-    expect(missing).toEqual({ error: `No account for ${BOB}.` })
+  test('the operator script creates the account when it does not exist', async () => {
+    // The case that has no other way out: an install with no user at all, where
+    // there is nothing to sign in as and no invite to issue either.
+    const created = await setUserPassword(BOB, 'chosen-on-the-server', {
+      admin: true,
+    })
+
+    expect('error' in created).toBe(false)
+    if ('error' in created) return
+    expect(created.created).toBe(true)
+    expect(
+      'user' in (await authenticateUser(BOB, 'chosen-on-the-server')),
+    ).toBe(true)
+
+    const bob = await db.query.users.findFirst({ where: eq(users.id, BOB) })
+    expect(bob?.role).toBe('admin')
   })
 
   test('the first person on the install is the admin, the next is a member', async () => {
