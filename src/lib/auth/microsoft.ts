@@ -11,6 +11,8 @@
  * demand and cached by the client that uses them.
  */
 
+import { appUrlFor } from '#/lib/app-url.ts'
+
 import { tryDecrypt } from './crypto.ts'
 import { codeChallenge, stashOAuthRoundTrip } from './oauth.ts'
 
@@ -61,10 +63,17 @@ export function tenant(): string {
   return process.env.MICROSOFT_TENANT ?? 'common'
 }
 
+/**
+ * Where Microsoft sends the browser back.
+ *
+ * Derived from `LUMEN_APP_URL` for the same reason as Google's: one origin in
+ * configuration, not one per provider. `MICROSOFT_REDIRECT_URI` overrides it,
+ * and an empty value counts as unset.
+ */
 export function redirectUri(): string {
   return (
-    process.env.MICROSOFT_REDIRECT_URI ??
-    'http://localhost:3000/auth/microsoft/callback'
+    process.env.MICROSOFT_REDIRECT_URI?.trim() ||
+    appUrlFor('/auth/microsoft/callback')
   )
 }
 

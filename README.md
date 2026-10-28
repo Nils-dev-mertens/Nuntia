@@ -47,7 +47,7 @@ The database file and its migrations are created on first boot
 | --- | --- | --- |
 | `DATABASE_URL` | yes | `file:./data/lumen.db`, or a libSQL URL |
 | `TOKEN_ENCRYPTION_KEY` | yes | 32 bytes hex/base64 (`openssl rand -hex 32`). Encrypts OAuth tokens, AI keys and invite codes. Changing it makes stored secrets unreadable |
-| `LUMEN_APP_URL` | in beta | Public origin used in invite links (`https://mail.example.com`) |
+| `LUMEN_APP_URL` | in beta | Public origin (`https://mail.example.com`). Used for invite links **and both OAuth callbacks** (`/auth/google/callback`, `/auth/microsoft/callback`), so it must match the redirect URIs registered with each provider |
 | `LUMEN_ACCESS_MODE` | no | `invite` (default) or `login` |
 | `LUMEN_ADMIN_EMAILS` | no | Comma-separated operator addresses — break-glass access to `/admin` |
 | `LUMEN_BOOTSTRAP_INVITE` | first boot | A 12-char code that may sign the first user in on an empty install. Ignored once a user exists |

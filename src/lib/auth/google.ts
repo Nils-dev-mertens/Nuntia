@@ -9,6 +9,8 @@
 import { google } from 'googleapis'
 import { CodeChallengeMethod } from 'google-auth-library'
 
+import { appUrlFor } from '#/lib/app-url.ts'
+
 import { encrypt, tryDecrypt } from './crypto.ts'
 import { codeChallenge, stashOAuthRoundTrip } from './oauth.ts'
 
@@ -38,10 +40,20 @@ function clientSecret(): string {
   return secret
 }
 
-function redirectUri(): string {
+/**
+ * Where Google sends the browser back.
+ *
+ * `LUMEN_APP_URL` is the base, so a deployment configures its origin once and
+ * both providers follow it. A hard-coded `localhost` default here meant every
+ * deployed install came back to the visitor's own machine after consent unless
+ * it also set a second, provider-specific variable. `GOOGLE_REDIRECT_URI` still
+ * wins when set, for a callback on a different host — a `GOOGLE_REDIRECT_URI` in
+ * `.env` that is present but empty is treated as unset.
+ */
+export function redirectUri(): string {
   return (
-    process.env.GOOGLE_REDIRECT_URI ??
-    'http://localhost:3000/auth/google/callback'
+    process.env.GOOGLE_REDIRECT_URI?.trim() ||
+    appUrlFor('/auth/google/callback')
   )
 }
 

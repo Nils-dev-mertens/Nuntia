@@ -15,6 +15,7 @@
  * copy instead. `/admin` says which of the two happened.
  */
 
+import { appUrl } from '#/lib/app-url.ts'
 import { listAccounts } from '#/lib/auth/accounts.ts'
 import { sendNewMessage } from '#/lib/mailbox/send-new.ts'
 
@@ -27,13 +28,7 @@ export type NotifyResult = {
   reason: string | null
 }
 
-/** The origin invitations point at. */
-export function appUrl(): string {
-  const configured = process.env.LUMEN_APP_URL?.trim()
-  // A link built from `request.url` is the internal origin behind the reverse
-  // proxy that will host this, which is the one thing a copied link cannot fix.
-  return (configured || 'http://localhost:3000').replace(/\/+$/, '')
-}
+export { appUrl }
 
 export function inviteLink(code: string): string {
   return `${appUrl()}/join/${formatCode(code)}`

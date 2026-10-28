@@ -74,13 +74,20 @@ ID**.
 | Field | Value |
 | --- | --- |
 | Application type | **Web application** |
-| Name | `Nuntia local` |
+| Name | `Nuntia` |
 | Authorized JavaScript origins | `http://localhost:3000` |
 | Authorized redirect URIs | `http://localhost:3000/auth/google/callback` |
 
 The redirect URI must match **exactly** — scheme, host, port and path, with no trailing
 slash. A mismatch produces `redirect_uri_mismatch`, and Google does not say which part
 differed.
+
+In a deployment both rows use your public origin instead, and it must be HTTPS for
+anything that is not `localhost`: with `LUMEN_APP_URL=https://mail.example.com` the
+redirect URI is `https://mail.example.com/auth/google/callback`. The app builds its
+callback from `LUMEN_APP_URL`, so there is one origin to configure rather than one per
+provider. A `localhost` value there is what sends a deployed browser back to the
+visitor's own machine after consent.
 
 When you're done, copy the **Client ID** and **Client secret**.
 

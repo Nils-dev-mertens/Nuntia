@@ -16,9 +16,11 @@ bug cannot destroy mail.
    the `common` tenant in the next step expects that. If you only want one work
    tenant, pick that tenant instead and set `MICROSOFT_TENANT` to its id.
 3. **Redirect URI**: platform _Web_, value
-   `http://localhost:3000/auth/microsoft/callback`.
-   Use your real origin in a deployment; it must match
-   `MICROSOFT_REDIRECT_URI` exactly.
+   `http://localhost:3000/auth/microsoft/callback` for local development, or
+   `<LUMEN_APP_URL>/auth/microsoft/callback` in a deployment — HTTPS, since
+   Microsoft only allows plain HTTP on `localhost`. The app builds the callback
+   from `LUMEN_APP_URL`, and `MICROSOFT_REDIRECT_URI` overrides it when the
+   callback lives on a different host; whichever you use must match here exactly.
 4. **Certificates & secrets → New client secret**. Copy the _value_ immediately —
    Entra never shows it again.
 5. **API permissions → Add a permission → Microsoft Graph → Delegated**:
