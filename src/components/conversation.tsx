@@ -14,12 +14,20 @@
 import { Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { File, Image, PanelRightClose, PanelRightOpen, X } from 'lucide-react'
+import {
+  ChevronRight,
+  File,
+  Image,
+  PanelRightClose,
+  PanelRightOpen,
+  X,
+} from 'lucide-react'
 
 import type {
   ActionFailure,
   ConversationDetail,
   ReplyDraftOutcome,
+  ReplyGoalCheck,
 } from '#/lib/gmail/service.ts'
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
@@ -33,11 +41,7 @@ import type {
 
 import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
-import {
-  DONE_META,
-  READ_META,
-  STATE_ORDER,
-} from '#/lib/conversation-state'
+import { DONE_META, READ_META, STATE_ORDER } from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
 
 /**
@@ -69,16 +73,25 @@ function MessageBody({
   text: string
   mine: boolean
 }) {
-  const base = 'max-w-[80%] rounded-lg border text-sm'
+  // Incoming mail gets the wider measure: it is the thing being read, and a
+  // bubble sized for a short chat reply was narrowing every newsletter and
+  // invoice to a column that email layouts were never drawn for. What the user
+  // sent stays narrow, because it is a reply rather than the content itself.
+  const base = cn(
+    'rounded-lg border text-sm',
+    mine ? 'max-w-[88%] sm:max-w-[80%]' : 'max-w-full sm:max-w-[92%]',
+  )
   const tone = mine
     ? 'border-primary/20 bg-primary/10 text-foreground'
     : 'border-border bg-card text-card-foreground'
 
   // Rich mail fills the bubble edge to edge: the sender's own padding would
-  // otherwise sit inside ours and read as a stray white inset.
+  // otherwise sit inside ours and read as a stray white inset. Incoming rich
+  // mail also takes the full column, since its fixed-width tables would
+  // otherwise be clipped by the chat measure.
   if (isRichHtml(html)) {
     return (
-      <div className={cn(base, tone, 'overflow-hidden p-0')}>
+      <div className={cn(base, tone, 'overflow-hidden p-0', !mine && 'w-full')}>
         <EmailFrame html={html as string} />
       </div>
     )
@@ -142,27 +155,6 @@ function EmailFrame({ html }: { html: string }) {
       className="block w-full border-0 bg-white"
       style={{ height: height > 0 ? `${height}px` : '24px' }}
     />
-  )
-}
-
-/** Marks a thread there is nobody to answer, next to the state badge. */
-function NoReplyTag() {
-  return (
-    <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-      No reply
-    </span>
-  )
-}
-
-/** The user's own "handled" mark, shown beside the state it did not change. */
-function DoneTag() {
-  return (
-    <span
-      title={DONE_META.description}
-      className="shrink-0 rounded-full border border-success/30 bg-success/15 px-1.5 py-px text-[10px] font-medium tracking-wide text-success uppercase"
-    >
-      {DONE_META.label}
-    </span>
   )
 }
 
@@ -320,6 +312,72 @@ function StateLabelPicker({
 }
 
 /**
+ * The user's own score for a thread.
+ *
+ * A picker rather than a read-only number, because importance is the one score
+ * that decides both where the thread sits in the list and whether a draft is
+ * worth offering — and only the user knows their own priorities. **Automatic**
+ * names the app's number so handing it back is a visible choice rather than an
+ * empty option.
+ */
+function ImportancePicker({
+  current,
+  effective,
+  onSet,
+}: {
+  /** The stored score, or null when the decision layer's number stands. */
+  current: number | null
+  /** The number on screen and in the sort, override included. */
+  effective: number
+  onSet: (importance: number | null) => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const value = current === null ? '' : String(current)
+
+  async function choose(next: string) {
+    if (busy || next === value) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onSet(next === '' ? null : Number(next))
+      if (result.error) setError(result.error)
+    } catch {
+      setError('Could not change the importance.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <label
+        className="flex items-center gap-2 text-xs text-muted-foreground"
+        title="How much this thread needs you. Automatic is the app's own score; a number you pick stays on this thread until newer mail arrives."
+      >
+        Importance
+        <select
+          value={value}
+          onChange={(event) => void choose(event.target.value)}
+          disabled={busy}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          <option value="">Automatic ({effective}/10)</option>
+          {Array.from({ length: 10 }, (_, index) => index + 1).map((score) => (
+            <option key={score} value={score}>
+              {score}/10
+            </option>
+          ))}
+        </select>
+      </label>
+      {error ? (
+        <span className="max-w-48 text-xs text-destructive">{error}</span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
  * Mark this thread's sender as one a reply cannot reach.
  *
  * The quick end of the can't-reply list: the address and the mailbox are both
@@ -354,13 +412,13 @@ function CantReplyButton({
   }
 
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex flex-col items-start gap-1">
       <button
         type="button"
         onClick={() => void run()}
         disabled={busy}
         title={`Hide the reply box on every thread from ${senderEmail}. Undo this from the can’t-reply list in Settings.`}
-        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
+        className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
       >
         {busy ? 'Marking…' : 'Can’t reply'}
       </button>
@@ -376,7 +434,14 @@ function CantReplyButton({
   )
 }
 
-/** Re-run the decision layer for this thread, without waiting for a sync. */
+/**
+ * Re-run the decision layer for this thread.
+ *
+ * Kept out of the header's action row on purpose: it overwrites the stored
+ * label, importance and urgency with a fresh decision, so sitting beside "Mark
+ * done" it was one misclick away from undoing a label the user had chosen. It
+ * lives in Thread details and asks once before replacing anything.
+ */
 function ReanalyseButton({
   onReanalyse,
 }: {
@@ -384,6 +449,7 @@ function ReanalyseButton({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
 
   async function run() {
     if (busy) return
@@ -392,6 +458,7 @@ function ReanalyseButton({
     try {
       const result = await onReanalyse()
       if (result.error) setError(result.error)
+      else setConfirming(false)
     } catch {
       setError('Could not re-analyse this conversation.')
     } finally {
@@ -399,18 +466,52 @@ function ReanalyseButton({
     }
   }
 
+  if (!confirming) {
+    return (
+      <div className="flex flex-col items-start gap-1">
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          className="rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted"
+        >
+          Re-analyse
+        </button>
+        <p className="text-[11px] text-muted-foreground">
+          Replaces this thread’s label and importance with a new decision.
+        </p>
+      </div>
+    )
+  }
+
   return (
-    <div className="flex flex-col items-end gap-1">
-      <button
-        type="button"
-        onClick={() => void run()}
-        disabled={busy}
-        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
-      >
-        {busy ? 'Re-analysing…' : 'Re-analyse'}
-      </button>
+    <div className="flex flex-col items-start gap-2">
+      <p className="text-[11px] text-foreground">
+        Re-analyse this thread? Its current label and importance will be
+        replaced.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => void run()}
+          disabled={busy}
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1 text-[11px] font-medium text-destructive disabled:opacity-50"
+        >
+          {busy ? 'Re-analysing…' : 'Re-analyse'}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setConfirming(false)
+            setError(null)
+          }}
+          disabled={busy}
+          className="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
       {error ? (
-        <span role="alert" className="text-right text-xs text-destructive">
+        <span role="alert" className="text-xs text-destructive">
           {error}
         </span>
       ) : null}
@@ -681,11 +782,11 @@ function ContactContextEditor({
 
   const hasContext = Boolean(
     initialContext?.roleCompany ||
-      initialContext?.relationship ||
-      initialContext?.topics ||
-      initialContext?.currentWork ||
-      initialContext?.importance !== null &&
-        initialContext?.importance !== undefined,
+    initialContext?.relationship ||
+    initialContext?.topics ||
+    initialContext?.currentWork ||
+    (initialContext?.importance !== null &&
+      initialContext?.importance !== undefined),
   )
 
   return (
@@ -724,16 +825,25 @@ function ContactContextEditor({
             <select
               value={importance === null ? '' : String(importance)}
               onChange={(event) =>
-                setImportance(event.target.value ? Number(event.target.value) : null)
+                setImportance(
+                  event.target.value ? Number(event.target.value) : null,
+                )
               }
               className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
             >
               <option value="">Not rated</option>
-              {Array.from({ length: 10 }, (_, index) => index + 1).map((score) => (
-                <option key={score} value={score}>
-                  {score}/10{score === 10 ? ' · Very important' : score === 1 ? ' · Low importance' : ''}
-                </option>
-              ))}
+              {Array.from({ length: 10 }, (_, index) => index + 1).map(
+                (score) => (
+                  <option key={score} value={score}>
+                    {score}/10
+                    {score === 10
+                      ? ' · Very important'
+                      : score === 1
+                        ? ' · Low importance'
+                        : ''}
+                  </option>
+                ),
+              )}
             </select>
           </label>
           <label className="block text-xs text-muted-foreground">
@@ -816,7 +926,8 @@ function ContactContextEditor({
         </form>
       ) : hasContext ? (
         <>
-          {initialContext?.importance !== null && initialContext?.importance !== undefined ? (
+          {initialContext?.importance !== null &&
+          initialContext?.importance !== undefined ? (
             <span
               title="Your importance rating for this correspondent; used as context when classifying their mail."
               className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
@@ -844,7 +955,8 @@ function ContactContextEditor({
             )}
           </dl>
         </>
-      ) : initialContext?.importance !== null && initialContext?.importance !== undefined ? (
+      ) : initialContext?.importance !== null &&
+        initialContext?.importance !== undefined ? (
         <>
           <span className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
             Contact importance · {initialContext.importance}/10
@@ -1198,6 +1310,7 @@ function Composer({
   suggest,
   onDraft,
   onSend,
+  onReviewReply,
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
@@ -1212,6 +1325,11 @@ function Composer({
     attachments: ReplyAttachmentUpload[],
     fromAccountId: string,
   ) => Promise<ActionFailure>
+  /** Judge the reply just sent against the thread's goal. Never blocks a send. */
+  onReviewReply: (body: string) => Promise<{
+    check: ReplyGoalCheck | null
+    error: string | null
+  }>
 }) {
   const [body, setBody] = useState('')
   const [attachments, setAttachments] = useState<ReplyAttachmentUpload[]>([])
@@ -1225,6 +1343,11 @@ function Composer({
   // Set when the failure was Google rejecting the stored grant. A retry cannot
   // fix that, so the composer offers the one action that can.
   const [authRequired, setAuthRequired] = useState(false)
+  // The send has already happened by the time any of this exists, so it is
+  // advice in a box rather than a state the reply is waiting on.
+  const [goalCheck, setGoalCheck] = useState<ReplyGoalCheck | null>(null)
+  const [reviewingGoal, setReviewingGoal] = useState(false)
+  const [goalError, setGoalError] = useState<string | null>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
 
   // Grow to fit, up to a cap, so a long reply does not scroll in a tiny box.
@@ -1235,6 +1358,24 @@ function Composer({
     el.style.height = 'auto'
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [body])
+
+  /** Ask whether the reply just sent reaches the goal, without delaying the send. */
+  async function reviewGoal(sentBody: string) {
+    setReviewingGoal(true)
+    setGoalError(null)
+    try {
+      const result = await onReviewReply(sentBody)
+      if (result.error) {
+        setGoalError(result.error)
+        return
+      }
+      setGoalCheck(result.check)
+    } catch {
+      setGoalError('Could not check that reply against your goal.')
+    } finally {
+      setReviewingGoal(false)
+    }
+  }
 
   async function submit() {
     const trimmed = body.trim()
@@ -1255,6 +1396,11 @@ function Composer({
         setBody('')
         setAttachments([])
         if (filePicker.current) filePicker.current.value = ''
+        setGoalCheck(null)
+        setGoalError(null)
+        // After the send, never before it: the message is already on its way, so
+        // this can only ever add advice to a reply that went out.
+        void reviewGoal(trimmed)
       }
     } catch {
       setError('Could not send the reply. Please try again.')
@@ -1318,7 +1464,7 @@ function Composer({
   }
 
   return (
-    <div className="border-t border-border bg-card p-4">
+    <div className="border-t border-border bg-card p-3 sm:p-4">
       {error ? (
         <div
           role="alert"
@@ -1339,6 +1485,61 @@ function Composer({
             </a>
           ) : null}
         </div>
+      ) : null}
+
+      {reviewingGoal ? (
+        <p className="mb-2 text-[11px] text-muted-foreground">
+          Checking that reply against your goal…
+        </p>
+      ) : null}
+
+      {goalCheck ? (
+        <div className="mb-2 rounded-md border border-warning/40 bg-warning/10 p-3">
+          <p className="text-[11px] font-semibold tracking-wide text-warning uppercase">
+            That reply may not reach your goal
+          </p>
+          {goalCheck.reason ? (
+            <p className="mt-1 text-xs text-foreground">{goalCheck.reason}</p>
+          ) : null}
+          {goalCheck.suggestion ? (
+            <>
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                A follow-up you could send
+              </p>
+              <p className="mt-1 text-sm whitespace-pre-wrap text-foreground">
+                {goalCheck.suggestion}
+              </p>
+            </>
+          ) : null}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {goalCheck.suggestion ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setBody(goalCheck.suggestion ?? '')
+                  setGoalCheck(null)
+                  textarea.current?.focus()
+                }}
+                className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground"
+              >
+                Use this reply
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setGoalCheck(null)}
+              className="text-[11px] text-muted-foreground hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {goalError ? (
+        <p role="alert" className="mb-2 text-[11px] text-muted-foreground">
+          {goalError}
+        </p>
       ) : null}
 
       <SuggestedReply
@@ -1408,18 +1609,18 @@ function Composer({
         onChange={(event) => void addFiles(event.target.files)}
       />
 
-      <div className="mt-2 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           {/* Only offered when there is a choice: a single-account install
               should not see a one-option dropdown on every reply. */}
           {accounts.length > 1 ? (
-            <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            <label className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
               From
               <select
                 value={fromAccountId}
                 disabled={busy}
                 onChange={(event) => setFromAccountId(event.target.value)}
-                className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-foreground"
+                className="max-w-[11rem] rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-foreground sm:max-w-none"
               >
                 {accounts.map((account) => (
                   <option key={account.id} value={account.id}>
@@ -1441,7 +1642,9 @@ function Composer({
           >
             {readingFiles ? 'Adding…' : 'Attach files'}
           </button>
-          <span className="text-xs text-muted-foreground">
+          {/* A keyboard hint on a touch screen is noise, and it was what pushed
+              the send button off the row on a phone. */}
+          <span className="hidden text-xs text-muted-foreground sm:inline">
             Enter to send · Shift+Enter for a new line
           </span>
         </div>
@@ -1653,9 +1856,11 @@ export function ConversationView({
   onSuggestContactContext,
   onSaveParsingProfile,
   onSend,
+  onReviewReply,
   onDraft,
   onReanalyse,
   onSetStateOverride,
+  onSetImportance,
   onSetDone,
   onMarkSenderUnreplyable,
 }: {
@@ -1676,6 +1881,10 @@ export function ConversationView({
   onSetStateOverride: (
     state: ConversationState | null,
   ) => Promise<{ error: string | null }>
+  /** Set the user's own importance score, or null to let the app decide. */
+  onSetImportance: (importance: number | null) => Promise<{
+    error: string | null
+  }>
   onSetDone: (done: boolean) => Promise<{ error: string | null }>
   /**
    * Add the thread's other party to the can't-reply list. Takes no arguments on
@@ -1695,6 +1904,11 @@ export function ConversationView({
     attachments: ReplyAttachmentUpload[],
     fromAccountId: string,
   ) => Promise<ActionFailure>
+  /** Judge the reply just sent against the thread's goal. */
+  onReviewReply: (body: string) => Promise<{
+    check: ReplyGoalCheck | null
+    error: string | null
+  }>
 }) {
   const bottom = useRef<HTMLDivElement>(null)
   const [mediaOpen, setMediaOpen] = useState(false)
@@ -1829,73 +2043,105 @@ export function ConversationView({
       (p) => !detail.ownerEmails.includes(p.email.toLowerCase()),
     ) ?? detail.participants[0]
 
+  // The overview only exists when there is contact context or media behind it,
+  // which is also what decides whether the mobile control is offered.
+  const hasOverview = mediaAttachments.length > 0 || Boolean(detail.senderEmail)
+
   return (
     <div className="flex h-dvh flex-col">
-      <header className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
-        <div className="flex min-w-0 gap-3">
-          <Avatar contact={senderContact} className="mt-0.5 size-9 text-xs" />
-          <div className="min-w-0">
-            <h1 className="truncate text-lg font-semibold text-foreground">
+      <header className="border-b border-border px-4 py-3 sm:px-6 sm:py-4">
+        <div className="flex items-start gap-3">
+          <Avatar
+            contact={senderContact}
+            className="mt-0.5 size-8 text-[10px] sm:size-9 sm:text-xs"
+          />
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold text-foreground sm:text-lg">
               {detail.topic ?? detail.subject}
             </h1>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {detail.participants.map((p) => p.name ?? p.email).join(', ')}
             </p>
-            <ConversationDetailsEditor
-              topic={detail.topic}
-              goal={detail.goal}
-              onSave={onSaveDetails}
-            />
-            {detail.parsingProfile ? (
-              <ParsingProfileEditor
-                key={detail.parsingProfile.senderEmail}
-                profile={detail.parsingProfile}
-                onSave={onSaveParsingProfile}
+            {/*
+             * The state, the done mark and replyability were three chips in two
+             * rows; they are facts about the thread, not controls, so they read
+             * as one quiet line under the subject.
+             */}
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+              <StateBadge
+                state={detail.state}
+                label={detail.stateLabels[detail.state].name}
               />
+              {detail.done ? <span>{DONE_META.label}</span> : null}
+              {detail.replyable ? null : <span>no reply</span>}
+            </div>
+            {detail.goal ? (
+              <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
+                <span className="font-medium text-foreground">Goal</span>{' '}
+                {detail.goal}
+              </p>
             ) : null}
           </div>
+          {/*
+           * Promoted to the title row: on a phone the overview is the only way
+           * to reach the sender's context and their attachments, so it should be
+           * found without scanning a row of low-emphasis controls.
+           */}
+          {hasOverview ? (
+            <button
+              type="button"
+              aria-expanded={mediaOpen}
+              aria-controls="thread-media-overview-mobile"
+              onClick={() => setMediaOpen((open) => !open)}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[11px] font-medium text-foreground hover:bg-muted lg:hidden"
+            >
+              {mediaOpen ? (
+                <PanelRightClose className="size-3.5" />
+              ) : (
+                <PanelRightOpen className="size-3.5" />
+              )}
+              Overview
+              {mediaAttachments.length > 0
+                ? ` (${dedupedMedia ? mediaAttachments.length : detail.attachments.length})`
+                : ''}
+            </button>
+          ) : null}
         </div>
-        <div className="flex shrink-0 flex-col items-end gap-2">
-          <div className="flex items-center gap-2">
-            {!detail.replyable ? <NoReplyTag /> : null}
-            {detail.done ? <DoneTag /> : null}
-            <StateBadge
-              state={detail.state}
-              label={detail.stateLabels[detail.state].name}
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+          {/*
+           * Always offered, and it reads as a statement of where the thread is
+           * as well as a control: the picker shows the stored label, or
+           * Automatic when the app's own answer stands — including when a
+           * sender-level call of the user's is what put it there.
+           */}
+          <StateLabelPicker
+            current={detail.stateOverride}
+            labels={detail.stateLabels}
+            onSet={onSetStateOverride}
+          />
+          <ImportancePicker
+            current={detail.importanceOverride}
+            effective={detail.importance}
+            onSet={onSetImportance}
+          />
+          {/*
+           * Adding to the can't-reply list was Settings-only, which meant
+           * recognising a sender you already had open and then finding the
+           * address again somewhere else to type it. It is offered here too, and
+           * only while a reply box is still on screen: a sender who is already
+           * unanswerable has nothing left to add, which is why the control
+           * disappears rather than becoming an undo.
+           *
+           * Taking the mark back stays in Settings — one list, one place to
+           * manage it. This is a second way in, not a second place it is edited.
+           */}
+          {detail.replyable && detail.senderEmail ? (
+            <CantReplyButton
+              senderEmail={detail.senderEmail}
+              onMark={onMarkSenderUnreplyable}
             />
-          </div>
-          <div className="flex items-start gap-2">
-            {/*
-             * Always offered, and it reads as a statement of where the thread is
-             * as well as a control: the picker shows the stored label, or
-             * Automatic when the app's own answer stands — including when a
-             * sender-level call of the user's is what put it there.
-             */}
-            <StateLabelPicker
-              current={detail.stateOverride}
-              labels={detail.stateLabels}
-              onSet={onSetStateOverride}
-            />
-            {/*
-             * Adding to the can't-reply list was Settings-only, which meant
-             * recognising a sender you already had open and then finding the
-             * address again somewhere else to type it. It is offered here too, and
-             * only while a reply box is still on screen: a sender who is already
-             * unanswerable has nothing left to add, which is why the control
-             * disappears rather than becoming an undo.
-             *
-             * Taking the mark back stays in Settings — one list, one place to
-             * manage it. This is a second way in, not a second place it is edited.
-             */}
-            {detail.replyable && detail.senderEmail ? (
-              <CantReplyButton
-                senderEmail={detail.senderEmail}
-                onMark={onMarkSenderUnreplyable}
-              />
-            ) : null}
-            <DoneButton done={detail.done} onSet={onSetDone} />
-            <ReanalyseButton onReanalyse={onReanalyse} />
-          </div>
+          ) : null}
+          <DoneButton done={detail.done} onSet={onSetDone} />
         </div>
       </header>
 
@@ -1905,7 +2151,7 @@ export function ConversationView({
        * groups" is the difference in a sentence.
        */}
       {detail.done ? (
-        <p className="border-y border-border bg-success/5 px-6 py-2 text-xs text-muted-foreground">
+        <p className="border-y border-border bg-success/5 px-4 py-2 text-xs text-muted-foreground sm:px-6">
           <span className="font-medium text-success">{DONE_META.label}</span> —{' '}
           {DONE_META.detail}{' '}
           {/*
@@ -1923,8 +2169,42 @@ export function ConversationView({
         </p>
       ) : null}
 
+      {/*
+       * Topic, goal and the parsing/reply-style settings used to live in the
+       * header, which put three paragraphs and a link before the first message.
+       * They are one click away rather than always on screen.
+       */}
+      <details className="group border-b border-border px-4 py-2 sm:px-6">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+          <ChevronRight
+            aria-hidden="true"
+            className="size-3 transition-transform group-open:rotate-90"
+          />
+          Thread details
+        </summary>
+        <div className="pt-1 pb-2">
+          <ConversationDetailsEditor
+            topic={detail.topic}
+            goal={detail.goal}
+            onSave={onSaveDetails}
+          />
+          {detail.parsingProfile ? (
+            <ParsingProfileEditor
+              key={detail.parsingProfile.senderEmail}
+              profile={detail.parsingProfile}
+              onSave={onSaveParsingProfile}
+            />
+          ) : null}
+          {/* Behind the disclosure, below a rule: the one control here that
+              overwrites a decision rather than describing one. */}
+          <div className="mt-3 border-t border-border pt-3">
+            <ReanalyseButton onReanalyse={onReanalyse} />
+          </div>
+        </div>
+      </details>
+
       <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 space-y-1 overflow-y-auto px-6 py-6">
+        <div className="min-w-0 flex-1 space-y-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
           {detail.messages.map((message) => {
             const day = new Date(message.sentAt).toDateString()
             const showDay = day !== lastDay
@@ -1981,11 +2261,11 @@ export function ConversationView({
                 >
                   <div
                     className={cn(
-                      'flex items-baseline gap-2 text-xs text-muted-foreground',
+                      'flex max-w-full items-baseline gap-2 text-xs text-muted-foreground',
                       mine && 'flex-row-reverse',
                     )}
                   >
-                    <span className="font-medium text-foreground">
+                    <span className="min-w-0 truncate font-medium text-foreground">
                       {speaker}
                     </span>
                     <time dateTime={message.sentAt}>
@@ -2001,7 +2281,7 @@ export function ConversationView({
                   <StrippedParts message={message} />
 
                   {files.length > 0 ? (
-                    <ul className="flex max-w-[80%] flex-wrap gap-2">
+                    <ul className="flex max-w-full flex-wrap gap-2 sm:max-w-[80%]">
                       {files.map((file) => (
                         <li key={file.providerAttachmentId}>
                           {/* A link rather than a button: the bytes are served from
@@ -2102,26 +2382,6 @@ export function ConversationView({
         ) : null}
       </div>
 
-      {mediaAttachments.length > 0 || detail.senderEmail ? (
-        <button
-          type="button"
-          aria-expanded={mediaOpen}
-          aria-controls="thread-media-overview-mobile"
-          onClick={() => setMediaOpen((open) => !open)}
-          className="fixed top-1/2 right-4 z-30 flex -translate-y-1/2 items-center gap-2 rounded-full border border-border bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg transition-colors hover:bg-muted lg:hidden"
-        >
-          {mediaOpen ? (
-            <PanelRightClose className="size-4" />
-          ) : (
-            <PanelRightOpen className="size-4" />
-          )}
-          Overview
-          {mediaAttachments.length > 0
-            ? ` (${dedupedMedia ? mediaAttachments.length : detail.attachments.length})`
-            : ''}
-        </button>
-      ) : null}
-
       {detail.replyable ? (
         <Composer
           accounts={detail.replyAccounts}
@@ -2129,6 +2389,7 @@ export function ConversationView({
           suggest={detail.suggestReply}
           onDraft={onDraft}
           onSend={onSend}
+          onReviewReply={onReviewReply}
         />
       ) : (
         <div className="border-t border-border bg-muted/30 px-6 py-3 text-center text-xs text-muted-foreground">

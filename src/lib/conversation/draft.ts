@@ -117,11 +117,7 @@ const MAX_INSTRUCTIONS_CHARS = 500
  * missing button.
  */
 export type DraftSkipReason =
-  | 'no-model'
-  | 'unreplyable'
-  | 'already-answered'
-  | 'no-reply-needed'
-  | 'not-important-enough'
+  'no-model' | 'unreplyable' | 'already-answered' | 'not-important-enough'
 
 export type DraftEligibility =
   | { eligible: true; reason: null; detail: null }
@@ -130,11 +126,12 @@ export type DraftEligibility =
 /**
  * Should a draft be generated for this conversation?
  *
- * The spec's four conditions — a reply is required, importance clears a
- * threshold, the conversation is actionable enough, and a draft would be useful
- * — plus the two the app has learned that the spec does not name: a sender a
- * reply cannot reach has nobody to answer, and a thread where the user spoke
- * last has nothing to answer.
+ * A draft no longer waits for the newest message to ask for something. The
+ * user's goal is the reason to write, and a reply that only moves a thread
+ * forward — a nudge, a confirmation, a question of their own — is exactly what a
+ * goal needs. What remains is whether there is a model to write it, a person a
+ * reply can reach, whether the user already spoke last, and whether the thread
+ * matters enough to spend a call on.
  *
  * Order matters, because only the first failure is reported. The model comes
  * first (with no key the feature is simply off, and no thread-level fact
@@ -152,8 +149,6 @@ export function replyDraftEligibility(input: {
   replyable: boolean
   /** The user spoke last, so the ball is in the other court. */
   awaitingReply: boolean
-  /** The decision layer read a request in the newest message. */
-  requiresReply: boolean
   /** 1–10, as the decision layer scored it. */
   importance: number
   /** The user's threshold, from Settings. */
@@ -180,14 +175,6 @@ export function replyDraftEligibility(input: {
       eligible: false,
       reason: 'already-answered',
       detail: 'You sent the last message, so there is nothing to answer.',
-    }
-  }
-
-  if (!input.requiresReply) {
-    return {
-      eligible: false,
-      reason: 'no-reply-needed',
-      detail: 'Nothing in the last message asks for a reply.',
     }
   }
 

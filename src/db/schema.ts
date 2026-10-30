@@ -280,6 +280,27 @@ export const conversations = sqliteTable(
     }),
 
     /**
+     * The user's own score for this thread, 1–10, or null when the decision
+     * layer's number stands.
+     *
+     * Stored beside `importance` rather than overwriting it: the score is a
+     * decision the model re-derives on every re-decide, and the user's answer has
+     * to survive that. Effective importance is this when it is current, and the
+     * decision otherwise.
+     */
+    importanceOverride: integer('importance_override'),
+    /**
+     * The thread's last activity when the score was set.
+     *
+     * The same rule as `stateOverrideMessageAt`: the score was a judgement about
+     * the mail that existed then, so a newer message voids it and the thread is
+     * scored again rather than staying at an answer nobody re-read.
+     */
+    importanceOverrideMessageAt: integer('importance_override_message_at', {
+      mode: 'timestamp_ms',
+    }),
+
+    /**
      * The sent time of the newest message the user has seen in this thread.
      *
      * The per-message "viewed" state, stored as one high-water mark rather than a
@@ -779,6 +800,17 @@ export const appSettings = sqliteTable(
     suggestReplyMinImportance: integer('suggest_reply_min_importance')
       .notNull()
       .default(6),
+    /**
+     * Whether a reply the user sends is checked against the thread's goal.
+     *
+     * On by default: the goal is the reason a reply exists, and the check is what
+     * says whether it did what it was for. It is a setting because it is one
+     * extra model call per send, which is a cost the user should be able to
+     * decline without losing drafts or topics.
+     */
+    goalCheckEnabled: integer('goal_check_enabled', { mode: 'boolean' })
+      .notNull()
+      .default(true),
     /**
      * Whether avatars may be fetched from Gravatar.
      *

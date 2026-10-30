@@ -162,6 +162,20 @@
       "when": 1792935078786,
       "tag": "0022_lovely_susan_delgado",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1793402683750,
+      "tag": "0023_free_nightcrawler",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1793403533933,
+      "tag": "0024_tricky_jigsaw",
+      "breakpoints": true
     }
   ]
 }

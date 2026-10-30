@@ -15,6 +15,7 @@ import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
 import { useEffect } from 'react'
 
 import { Inbox } from '#/components/inbox'
+import type { MailPreview } from '#/components/inbox'
 import { getSession } from '#/lib/auth/index.ts'
 import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
@@ -22,8 +23,15 @@ import {
   listOpenFormsForUser,
   markFormShown,
 } from '#/lib/forms/repository.ts'
-import { loadInbox } from '#/lib/gmail/service.ts'
+import {
+  applyUserStateOverride,
+  loadConversation,
+  loadInbox,
+  setConversationDone,
+} from '#/lib/gmail/service.ts'
 import type { ConversationSummary } from '#/lib/gmail/service.ts'
+import { CONVERSATION_STATES } from '#/db/schema.ts'
+import type { ConversationState } from '#/db/schema.ts'
 
 /**
  * How often an open tab re-checks the inbox.
@@ -57,6 +65,91 @@ const fetchInbox = createServerFn({ method: 'GET' }).handler(async () => {
 })
 
 /**
+ * One thread's newest message, for the list's preview column.
+ *
+ * Deliberately a smaller payload than the conversation route's loader: the panel
+ * only draws the last message and a few facts about the thread, and this is
+ * fetched as the pointer moves, so it has to stay cheap to send.
+ */
+const fetchPreview = createServerFn({ method: 'GET' })
+  .validator((data: { providerThreadId: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{ preview: MailPreview | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { preview: null, error: 'You are not signed in.' }
+
+      try {
+        const detail = await loadConversation(
+          session.userId,
+          data.providerThreadId,
+        )
+        if (!detail) return { preview: null, error: null }
+
+        // The newest message is what a glance needs; the two before it give the
+        // thread enough context to judge, without shipping the whole thing.
+        const recent = detail.messages.slice(-3)
+        const contact = detail.contactContext
+        const files = detail.attachments.filter(
+          (attachment) => !attachment.isInline,
+        )
+
+        return {
+          preview: {
+            providerThreadId: detail.providerThreadId,
+            subject: detail.subject,
+            topic: detail.topic,
+            goal: detail.goal,
+            state: detail.state,
+            done: detail.done,
+            accountEmail: detail.accountEmail,
+            participants: detail.participants.map((participant) => ({
+              name: participant.name,
+              email: participant.email,
+              initials: participant.initials,
+              avatarUrl: participant.avatarUrl,
+            })),
+            messages: recent.map((message, index) => ({
+              from: message.from.name ?? message.from.email,
+              sentAt: message.sentAt,
+              isFromOwner: message.isFromOwner,
+              // The newest gets room to be read; the older ones only have to
+              // remind. Both are capped so a pointer moving down the list does
+              // not pull whole newsletters over the wire.
+              body: message.body
+                .replace(/\n{3,}/g, '\n\n')
+                .trim()
+                .slice(0, index === recent.length - 1 ? 1400 : 350),
+            })),
+            messageCount: detail.messages.length,
+            attachmentCount: files.length,
+            attachments: files.slice(0, 6).map((attachment) => ({
+              filename: attachment.filename,
+              sizeBytes: attachment.sizeBytes,
+            })),
+            replyable: detail.replyable,
+            importance: detail.importance,
+            senderImportance: detail.senderImportance,
+            contact: contact
+              ? {
+                  roleCompany: contact.roleCompany || null,
+                  relationship: contact.relationship || null,
+                  topics: contact.topics || null,
+                  currentWork: contact.currentWork || null,
+                }
+              : null,
+          },
+          error: null,
+        }
+      } catch (error) {
+        console.error('[preview] failed:', error)
+        return { preview: null, error: 'Could not load that preview.' }
+      }
+    },
+  )
+
+/**
  * Rebuild the inbox from Gmail on demand.
  *
  * The escape hatch for the failure incremental sync cannot fix on its own: a
@@ -85,6 +178,188 @@ const resyncInbox = createServerFn({ method: 'POST' }).handler(
     }
   },
 )
+
+/**
+ * Mark a thread done, or take the mark back, from the inbox itself.
+ *
+ * The same call the conversation view makes, exposed here so a row's menu can
+ * triage without opening the thread. No Gmail call and no AI call — the mark is
+ * the user's own answer about whether they handled it.
+ */
+const setDoneAction = createServerFn({ method: 'POST' })
+  .validator((data: { providerThreadId: string; done: boolean }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.done !== 'boolean') {
+      return { error: 'Done has to be true or false.' }
+    }
+
+    try {
+      await setConversationDone(
+        session.userId,
+        data.providerThreadId,
+        data.done,
+      )
+      return { error: null }
+    } catch (error) {
+      console.error('[done] marking the thread failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not update this conversation.',
+      }
+    }
+  })
+
+/**
+ * Label a thread from the inbox, or hand it back to the app.
+ *
+ * `state: null` clears the stored label and lets the decision layer file the
+ * thread again. Validated here rather than trusted: the value is written to the
+ * column every section groups by.
+ */
+const setStateOverrideAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { providerThreadId: string; state: ConversationState | null }) =>
+      data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (data.state !== null && !CONVERSATION_STATES.includes(data.state)) {
+      return { error: 'That is not a state a conversation can be in.' }
+    }
+
+    try {
+      await applyUserStateOverride(
+        session.userId,
+        data.providerThreadId,
+        data.state,
+      )
+      return { error: null }
+    } catch (error) {
+      console.error('[state] override failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not update this conversation.',
+      }
+    }
+  })
+
+/**
+ * A selection is chosen in the browser, so it arrives as untrusted input.
+ *
+ * Deduplicated and trimmed here rather than in the two actions below: both need
+ * the same answer to "is this a selection at all", and a repeated id would
+ * otherwise run the same write twice.
+ */
+const MAX_BATCH_THREADS = 200
+
+function cleanThreadIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+
+  const ids = value
+    .filter((id): id is string => typeof id === 'string')
+    .map((id) => id.trim())
+    .filter(Boolean)
+
+  return [...new Set(ids)]
+}
+
+/**
+ * Mark many threads done, or take the mark back, in one request.
+ *
+ * One server call rather than a loop in the browser: each write is independent,
+ * so a failure is counted instead of aborting the rest, and the list refreshes
+ * once at the end. No provider call and no AI call — this is the user's own mark.
+ */
+const setDoneBatchAction = createServerFn({ method: 'POST' })
+  .validator((data: { providerThreadIds: string[]; done: boolean }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.done !== 'boolean') {
+      return { error: 'Done has to be true or false.' }
+    }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    for (const providerThreadId of ids) {
+      try {
+        await setConversationDone(session.userId, providerThreadId, data.done)
+      } catch (error) {
+        failed += 1
+        console.error('[done] batch item failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? 'None of the selected conversations could be updated.'
+          : `${failed} of ${ids.length} conversations could not be updated.`,
+    }
+  })
+
+/** Relabel many threads, or hand them all back with `state: null`. */
+const setStateBatchAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { providerThreadIds: string[]; state: ConversationState | null }) =>
+      data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (data.state !== null && !CONVERSATION_STATES.includes(data.state)) {
+      return { error: 'That is not a state a conversation can be in.' }
+    }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    for (const providerThreadId of ids) {
+      try {
+        await applyUserStateOverride(
+          session.userId,
+          providerThreadId,
+          data.state,
+        )
+      } catch (error) {
+        failed += 1
+        console.error('[state] batch item failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? 'None of the selected conversations could be updated.'
+          : `${failed} of ${ids.length} conversations could not be updated.`,
+    }
+  })
 
 /**
  * Search the mail this user's mailboxes have already synced.
@@ -241,6 +516,37 @@ function Home() {
         return result
       }}
       onSearch={(query) => searchInbox({ data: { query } })}
+      onPreview={(providerThreadId) =>
+        fetchPreview({ data: { providerThreadId } })
+      }
+      onSetDone={async (providerThreadId, done) => {
+        const result = await setDoneAction({
+          data: { providerThreadId, done },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSetState={async (providerThreadId, state) => {
+        const result = await setStateOverrideAction({
+          data: { providerThreadId, state },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSetDoneMany={async (providerThreadIds, done) => {
+        const result = await setDoneBatchAction({
+          data: { providerThreadIds, done },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSetStateMany={async (providerThreadIds, state) => {
+        const result = await setStateBatchAction({
+          data: { providerThreadIds, state },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
     />
   )
 }

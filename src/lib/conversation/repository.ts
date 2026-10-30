@@ -25,6 +25,7 @@ import type {
   ConversationAttachment,
   ConversationMessage,
   DoneMark,
+  ImportanceOverride,
   ParsingPreferences,
   StateOverride,
 } from './model.ts'
@@ -311,6 +312,10 @@ export async function saveConversation(
           // currently means.
           stateOverride: conversation.stateOverride?.state ?? null,
           stateOverrideMessageAt: conversation.stateOverride?.messageAt ?? null,
+          importanceOverride:
+            conversation.importanceOverride?.importance ?? null,
+          importanceOverrideMessageAt:
+            conversation.importanceOverride?.messageAt ?? null,
           // Written from the conversation for the same reason, and "read" is as
           // user-owned as "done": `decideAndSave` and `refreshThread` put the
           // stored pair back on the object before saving, so a rebuild from Gmail
@@ -331,6 +336,10 @@ export async function saveConversation(
             stateOverride: conversation.stateOverride?.state ?? null,
             stateOverrideMessageAt:
               conversation.stateOverride?.messageAt ?? null,
+            importanceOverride:
+              conversation.importanceOverride?.importance ?? null,
+            importanceOverrideMessageAt:
+              conversation.importanceOverride?.messageAt ?? null,
             seenAt: conversation.seenAt,
             doneAt: conversation.done?.doneAt ?? null,
             doneMessageAt: conversation.done?.messageAt ?? null,
@@ -1234,6 +1243,12 @@ async function rowToConversation(
           messageAt: row.stateOverrideMessageAt ?? row.lastMessageAt,
         }
       : null,
+    importanceOverride: row.importanceOverride
+      ? {
+          importance: row.importanceOverride,
+          messageAt: row.importanceOverrideMessageAt ?? row.lastMessageAt,
+        }
+      : null,
     seenAt: row.seenAt,
     // Not clamped to `lastMessageAt` here: a mark older than the newest message is
     // a thread that came back, and the reader has to see it as not done. The
@@ -1280,6 +1295,37 @@ export async function setStateOverride(
 }
 
 /**
+ * Store the user's own score for a conversation, or clear it.
+ *
+ * `importance` is written alongside the override because every reader of the list
+ * sorts and displays by that column: a score that only lived in the override would
+ * make the user's number wait for a re-decide to appear. Clearing leaves the
+ * column alone — the caller re-decides, which is what can put the model's number
+ * back.
+ */
+export async function setImportanceOverride(
+  accountId: string,
+  providerThreadId: string,
+  override: ImportanceOverride | null,
+): Promise<void> {
+  const id = conversationId(accountId, providerThreadId)
+
+  await withWriteLock(async () => {
+    await db
+      .update(conversations)
+      .set({
+        importanceOverride: override?.importance ?? null,
+        importanceOverrideMessageAt: override?.messageAt ?? null,
+        ...(override ? { importance: override.importance } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
+  })
+}
+
+/**
  * Everything about a conversation that belongs to the user rather than to Gmail.
  *
  * One read for all three, because all three exist for the same reason and are
@@ -1290,6 +1336,7 @@ export async function setStateOverride(
  */
 export type StoredUserFields = {
   stateOverride: StateOverride | null
+  importanceOverride: ImportanceOverride | null
   seenAt: Date | null
   done: DoneMark | null
 }
@@ -1309,6 +1356,8 @@ export async function getStoredUserFields(
     .select({
       stateOverride: conversations.stateOverride,
       stateOverrideMessageAt: conversations.stateOverrideMessageAt,
+      importanceOverride: conversations.importanceOverride,
+      importanceOverrideMessageAt: conversations.importanceOverrideMessageAt,
       seenAt: conversations.seenAt,
       doneAt: conversations.doneAt,
       doneMessageAt: conversations.doneMessageAt,
@@ -1319,13 +1368,25 @@ export async function getStoredUserFields(
     .limit(1)
 
   const found = rows.at(0)
-  if (!found) return { stateOverride: null, seenAt: null, done: null }
+  if (!found)
+    return {
+      stateOverride: null,
+      importanceOverride: null,
+      seenAt: null,
+      done: null,
+    }
 
   return {
     stateOverride: found.stateOverride
       ? {
           state: found.stateOverride,
           messageAt: found.stateOverrideMessageAt ?? found.lastMessageAt,
+        }
+      : null,
+    importanceOverride: found.importanceOverride
+      ? {
+          importance: found.importanceOverride,
+          messageAt: found.importanceOverrideMessageAt ?? found.lastMessageAt,
         }
       : null,
     seenAt: found.seenAt,

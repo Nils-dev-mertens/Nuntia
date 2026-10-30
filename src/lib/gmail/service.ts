@@ -35,6 +35,7 @@ import {
 import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
   activeDone,
+  activeImportanceOverride,
   activeStateOverride,
   backfillDerivedFields,
   DERIVED_VERSION,
@@ -57,6 +58,7 @@ import {
   setAttachmentLocalPath,
   setReplyableForSender,
   setSenderReplyable,
+  setImportanceOverride,
   setStateOverride,
   mergeAccountConversations,
   reparseStoredMessages,
@@ -83,7 +85,10 @@ import {
 import type { ContactContext } from '#/lib/contacts/context.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
-import { listOrganizationRules, listStateLabels } from '#/lib/organization/store.ts'
+import {
+  listOrganizationRules,
+  listStateLabels,
+} from '#/lib/organization/store.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
 import { matchOrganizationRule } from '#/lib/organization/matching.ts'
 import type { OrganizationRule } from '#/lib/organization/matching.ts'
@@ -307,6 +312,8 @@ export type ConversationDetail = {
    * made none. Non-null is what the view offers "Restore" for.
    */
   stateOverride: ConversationState | null
+  /** The user's own score, or null when the decision layer's stands. */
+  importanceOverride: number | null
   /**
    * The other party is a sender the user has filed away before, so a one-way
    * notice from them is ranked low without being asked. Drives the same
@@ -504,7 +511,6 @@ export async function loadConversation(
     modelConfigured: drafting.drafter !== null,
     replyable: conversation.replyable,
     awaitingReply: conversation.awaitingReply,
-    requiresReply: conversation.requiresReply,
     importance: conversation.importance,
     minImportance: drafting.minImportance,
   })
@@ -534,6 +540,7 @@ export async function loadConversation(
     topic: conversation.topic,
     goal: conversation.goal,
     stateOverride: activeStateOverride(conversation),
+    importanceOverride: activeImportanceOverride(conversation),
     seenAt: conversation.seenAt?.toISOString() ?? null,
     done: activeDone(conversation) !== null,
     ignoredSender: senderEmail ? ignoredSenders.has(senderEmail) : false,
@@ -896,7 +903,6 @@ export async function draftReply(
     modelConfigured: drafter !== null,
     replyable: detail.replyable,
     awaitingReply: detail.awaitingReply,
-    requiresReply: detail.requiresReply,
     importance: detail.importance,
     minImportance,
   })
@@ -937,6 +943,74 @@ export async function draftReply(
     const reason = error instanceof Error ? error.message : String(error)
     await reportAiFailure(drafter.name, error, 'failed to draft a reply')
     return { draft: null, error: `Could not draft a reply. ${reason}` }
+  }
+}
+
+/** What a goal check has to say about a reply the user already sent. */
+export type ReplyGoalCheck = {
+  /** What the reply is missing, in the user's terms. */
+  reason: string | null
+  /** A replacement body, when the model wrote one. */
+  suggestion: string | null
+}
+
+/**
+ * Judge a reply the user just sent against the thread's goal.
+ *
+ * Null when there is nothing to judge: a thread without a goal has no standard to
+ * miss, and an install without an LLM has nobody to ask. Best-effort by design —
+ * this runs after a send that already succeeded, so a failure here is reported as
+ * advice that could not be produced, never as a failed send.
+ */
+export async function reviewSentReply(
+  userId: string,
+  providerThreadId: string,
+  sentBody: string,
+): Promise<{ check: ReplyGoalCheck | null; error: string | null }> {
+  const detail = await loadConversation(userId, providerThreadId)
+  if (!detail?.goal) return { check: null, error: null }
+
+  const { reviewer } = await loadReplyDrafter(userId)
+  if (!reviewer) return { check: null, error: null }
+
+  const owners = new Set(
+    detail.ownerEmails.map((email) => email.trim().toLowerCase()),
+  )
+  const incoming = [...detail.messages]
+    .reverse()
+    .find((message) => !owners.has(message.from.email.trim().toLowerCase()))
+
+  try {
+    const verdict = await reviewer.review({
+      goal: detail.goal,
+      topic: detail.topic,
+      incoming: incoming?.body ?? null,
+      sentReply: sentBody,
+    })
+
+    if (!verdict) {
+      return {
+        check: null,
+        error: 'Could not check that reply against your goal.',
+      }
+    }
+    if (verdict.meetsGoal) return { check: null, error: null }
+
+    return {
+      check: { reason: verdict.reason, suggestion: verdict.suggestion },
+      error: null,
+    }
+  } catch (error) {
+    console.error('[goal] checking the sent reply failed:', error)
+    await reportAiFailure(
+      reviewer.name,
+      error,
+      'failed to check a reply against the goal',
+    )
+    return {
+      check: null,
+      error: 'Could not check that reply against your goal.',
+    }
   }
 }
 
@@ -1116,6 +1190,39 @@ export async function applyUserStateOverride(
   if (sender && state === 'low-priority') {
     await recordSenderSignal(accountId, sender, 'ignored')
   }
+}
+
+/**
+ * Set the user's own importance score for a conversation, or hand it back.
+ *
+ * Stored against the thread as the *merged* view has it, because that is what the
+ * user was looking at when they picked, and it is the same clock a later sync
+ * compares against. Handing it back re-runs the decision layer, which is the only
+ * thing that can say what the score would have been without them.
+ *
+ * Nothing else changes: importance is not the user's answer about whether a
+ * thread is handled, and it does not move the label.
+ */
+export async function applyUserImportanceOverride(
+  userId: string,
+  providerThreadId: string,
+  importance: number | null,
+): Promise<void> {
+  const { merged, accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+
+  if (importance === null) {
+    await setImportanceOverride(accountId, conversation.providerThreadId, null)
+    await decideAndSave(accountId, conversation, { userId })
+    return
+  }
+
+  await setImportanceOverride(accountId, conversation.providerThreadId, {
+    importance,
+    messageAt: merged.conversation.lastMessageAt,
+  })
 }
 
 /**
@@ -1503,12 +1610,10 @@ function toSummary(
     unseen: unseenMessages(conversation).length > 0,
     done: activeDone(conversation) !== null,
     preview: previewOf(conversation),
-    senderImportance:
-      contactImportance.get(otherPartyOf(conversation)) ?? null,
+    senderImportance: contactImportance.get(otherPartyOf(conversation)) ?? null,
     organizationGroup: matchedRule
       ? { id: matchedRule.id, name: matchedRule.name }
       : null,
-
   }
 }
 
@@ -1720,11 +1825,13 @@ export async function loadInbox(
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
   const { counts, doneCount } = partitionByState(matched)
-  const [organizationRules, contactImportance, stateLabels] = await Promise.all([
-    listOrganizationRules(userId),
-    listContactImportanceByEmail(userId),
-    listStateLabels(userId),
-  ])
+  const [organizationRules, contactImportance, stateLabels] = await Promise.all(
+    [
+      listOrganizationRules(userId),
+      listContactImportanceByEmail(userId),
+      listStateLabels(userId),
+    ],
+  )
 
   // The list is grouped by state in the UI, but ordering within a group is by
   // activity, and the union is not sorted by construction.

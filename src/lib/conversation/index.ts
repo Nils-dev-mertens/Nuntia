@@ -16,6 +16,7 @@ export type {
 
 export {
   activeDone,
+  activeImportanceOverride,
   activeStateOverride,
   buildConversation,
   cleanMessage,
@@ -30,7 +31,7 @@ export {
   toParticipant,
   unseenMessages,
 } from './model.ts'
-export type { ReplyStyle, StateOverride } from './model.ts'
+export type { ImportanceOverride, ReplyStyle, StateOverride } from './model.ts'
 
 export { getLastOwnMessageStyle } from './repository.ts'
 export {
@@ -49,6 +50,9 @@ export type {
   ReplyDraftMessage,
   ReplyDraftRequest,
 } from './draft.ts'
+
+export { buildGoalReviewPrompt, parseGoalVerdict } from './goal.ts'
+export type { GoalReviewer, GoalReviewRequest, GoalVerdict } from './goal.ts'
 
 export type {
   Decision,
@@ -100,6 +104,7 @@ export {
   setReplyableForSender,
   setSenderReplyable,
   listUnreplyableSenders,
+  setImportanceOverride,
   setStateOverride,
   setTopic,
 } from './repository.ts'

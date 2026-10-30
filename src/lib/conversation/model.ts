@@ -125,6 +125,31 @@ export function activeStateOverride(
 }
 
 /**
+ * The user's own score for a thread, and the activity it was made against.
+ *
+ * The same shape and the same rule as `StateOverride`: a score is a judgement
+ * about the mail that existed when it was set, so newer mail voids it rather than
+ * leaving a thread ranked by an answer nobody re-read.
+ */
+export type ImportanceOverride = {
+  /** 1–10, as the user chose it. */
+  importance: number
+  messageAt: Date
+}
+
+/** The live score, or null when the decision layer's number stands. */
+export function activeImportanceOverride(
+  conversation: Pick<Conversation, 'importanceOverride' | 'lastMessageAt'>,
+): number | null {
+  const override = conversation.importanceOverride
+  if (!override) return null
+
+  return conversation.lastMessageAt.getTime() <= override.messageAt.getTime()
+    ? override.importance
+    : null
+}
+
+/**
  * When the user marked this thread done, or null when it is not (or no longer)
  * done.
  *
@@ -305,6 +330,16 @@ export type Conversation = {
    * `activeStateOverride` for what makes a call current.
    */
   stateOverride: StateOverride | null
+
+  /**
+   * The user's own score for this thread, or null when the decision layer's
+   * stands.
+   *
+   * The same rule as `stateOverride`: theirs outranks the pipeline, and a score
+   * the thread has outrun stops applying rather than ranking it forever. See
+   * `activeImportanceOverride`.
+   */
+  importanceOverride: ImportanceOverride | null
 
   /**
    * Sent time of the newest message the user has seen, or null when they have
@@ -737,6 +772,7 @@ export function buildConversation(
     // has no access to the user's calls, and assuming the call away here would
     // let a sync overwrite one.
     stateOverride: null,
+    importanceOverride: null,
     // Same reason, and it covers reading as well as saying "done": a rebuild from
     // Gmail knows nothing about either, and defaulting `seenAt` to now would make
     // every rebuilt thread silently look read.

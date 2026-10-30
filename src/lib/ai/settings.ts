@@ -43,6 +43,13 @@ export type AiSettingsSummary = {
    * with the number it was compared against.
    */
   suggestReplyMinImportance: number
+  /**
+   * Whether a sent reply is judged against the thread's goal.
+   *
+   * Part of the summary so the settings form shows the stored answer rather than
+   * re-deriving it from "an LLM is configured".
+   */
+  goalCheckEnabled: boolean
 }
 
 export type AiSettingsInput = {
@@ -56,6 +63,8 @@ export type AiSettingsInput = {
   jevApiKey?: string | null
   llmApiKey?: string | null
   suggestReplyMinImportance: number
+  /** Omitted leaves the stored answer alone; new rows default to on. */
+  goalCheckEnabled?: boolean
 }
 
 /** Everything needed to build the pipeline, with keys decrypted in memory. */
@@ -64,6 +73,8 @@ export type AiPipelineConfig = {
   llm: { provider: LlmProvider; apiKey: string; model: string } | null
   /** Same row, same read: the reply draft threshold travels with the keys. */
   suggestReplyMinImportance: number
+  /** Omitted means on, so an older settings row keeps the check enabled. */
+  goalCheckEnabled?: boolean
 }
 
 /**
@@ -120,6 +131,9 @@ export async function getAiSettings(
     suggestReplyMinImportance: normaliseMinImportance(
       row?.suggestReplyMinImportance,
     ),
+    // A row written before the column existed reads as on, which is the default
+    // the migration itself wrote.
+    goalCheckEnabled: row?.goalCheckEnabled ?? true,
   }
 }
 
@@ -133,6 +147,7 @@ export async function getAiPipelineConfig(
       jev: null,
       llm: null,
       suggestReplyMinImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+      goalCheckEnabled: true,
     }
   }
 
@@ -144,6 +159,7 @@ export async function getAiPipelineConfig(
     suggestReplyMinImportance: normaliseMinImportance(
       row.suggestReplyMinImportance,
     ),
+    goalCheckEnabled: row.goalCheckEnabled,
     jev: jevKey
       ? { apiKey: jevKey, model: row.jevModel?.trim() || 'jev-latest' }
       : null,
@@ -192,6 +208,8 @@ export async function saveAiSettings(
     suggestReplyMinImportance: normaliseMinImportance(
       input.suggestReplyMinImportance,
     ),
+    goalCheckEnabled:
+      input.goalCheckEnabled ?? current?.goalCheckEnabled ?? true,
     llmApiKeyEncrypted: applyKey(
       current?.llmApiKeyEncrypted ?? null,
       input.llmApiKey,

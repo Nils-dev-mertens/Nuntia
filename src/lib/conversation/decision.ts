@@ -28,7 +28,11 @@
 import type { Conversation, ConversationMessage } from './model.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
-import { activeStateOverride, deriveState } from './model.ts'
+import {
+  activeImportanceOverride,
+  activeStateOverride,
+  deriveState,
+} from './model.ts'
 
 // Imported by path rather than through `#/lib/ai/index.ts`: the index pulls in
 // Jev, the providers and the settings table, and this file must not drag the
@@ -444,6 +448,10 @@ export function applyDecision(
   decision: Decision,
 ): Conversation {
   const override = activeStateOverride(conversation)
+  // The score is the user's for the same reason, and it is cleared on the same
+  // terms: one the thread has outrun is dropped rather than left on the row, so
+  // the next reader cannot mistake an expired judgement for a current one.
+  const importanceOverride = activeImportanceOverride(conversation)
 
   return {
     ...conversation,
@@ -451,7 +459,9 @@ export function applyDecision(
     stateOverride: override ? conversation.stateOverride : null,
     awaitingReply: decision.awaitingReply,
     replyable: decision.replyable,
-    importance: decision.importance,
+    importance: importanceOverride ?? decision.importance,
+    importanceOverride:
+      importanceOverride === null ? null : conversation.importanceOverride,
     urgency: decision.urgency,
     requiresReply: decision.requiresReply,
     // Only fill the topic if the user has not set one.

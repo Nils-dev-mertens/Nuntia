@@ -1,0 +1,1 @@
+ALTER TABLE `app_settings` ADD `goal_check_enabled` integer DEFAULT true NOT NULL;

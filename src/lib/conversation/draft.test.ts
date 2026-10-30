@@ -10,16 +10,15 @@ import type { ReplyDraftRequest } from './draft.ts'
 /**
  * The gate.
  *
- * Every condition the spec names, plus the two the app learned, and the order
- * they are reported in — because only one reason is shown, and "no LLM key" is
- * the wrong thing to tell someone whose thread simply does not ask for anything.
+ * What is left once "the message asks for something" stopped being a condition,
+ * and the order the reasons are reported in — because only one is shown, and "no
+ * LLM key" is the wrong thing to tell someone whose thread is simply unreachable.
  */
 describe('replyDraftEligibility', () => {
   const ok = {
     modelConfigured: true,
     replyable: true,
     awaitingReply: false,
-    requiresReply: true,
     importance: 8,
     minImportance: 6,
   }
@@ -51,7 +50,6 @@ describe('replyDraftEligibility', () => {
       // Every thread-level condition failing at once: the key is still the answer.
       replyable: false,
       awaitingReply: true,
-      requiresReply: false,
       importance: 1,
     })
 
@@ -74,15 +72,13 @@ describe('replyDraftEligibility', () => {
     expect(result.reason).toBe('already-answered')
   })
 
-  test('mail that asks for nothing is left alone however important it is', () => {
-    const result = replyDraftEligibility({
-      ...ok,
-      requiresReply: false,
-      importance: 10,
-    })
-    expect(result.eligible).toBe(false)
-    if (result.eligible) return
-    expect(result.reason).toBe('no-reply-needed')
+  test('a thread that asks for nothing still qualifies', () => {
+    // The goal is the reason to write, not a request in the newest message: a
+    // reply that only nudges the conversation forward is what a goal often
+    // needs, and it used to be refused for exactly that reason.
+    const result = replyDraftEligibility({ ...ok, importance: 10 })
+    expect(result.eligible).toBe(true)
+    expect(result.reason).toBeNull()
   })
 })
 

@@ -24,10 +24,12 @@ import {
 } from '#/lib/conversation/index.ts'
 import type {
   DecisionPipeline,
+  GoalReviewer,
   ReplyDrafter,
 } from '#/lib/conversation/index.ts'
 
 import { replyDrafterFromConfig } from './draft.ts'
+import { goalReviewerFromConfig } from './goal.ts'
 import { JevDecisionModel } from './jev.ts'
 import { LlmTopicGenerator } from './llm.ts'
 import { getAiPipelineConfig } from './settings.ts'
@@ -36,6 +38,7 @@ import type { AiPipelineConfig } from './settings.ts'
 export { JevDecisionModel } from './jev.ts'
 export type { JevConfig } from './jev.ts'
 export { LlmReplyDrafter, replyDrafterFromConfig } from './draft.ts'
+export { LlmGoalReviewer, goalReviewerFromConfig } from './goal.ts'
 export {
   completeLlm,
   DEFAULT_LLM_MODELS,
@@ -107,6 +110,11 @@ export type ReplyDrafting = {
    * that would fail.
    */
   drafter: ReplyDrafter | null
+  /**
+   * Null when no LLM is stored: the same key that writes drafts judges the one
+   * the user sent, so the two features are on or off together.
+   */
+  reviewer: GoalReviewer | null
   /** 1–10, from the same row. */
   minImportance: number
 }
@@ -125,12 +133,19 @@ export async function loadReplyDrafter(userId: string): Promise<ReplyDrafting> {
     const config = await getAiPipelineConfig(userId)
     return {
       drafter: replyDrafterFromConfig(config.llm),
+      // Off is a real answer, not a missing one: the check costs a model call
+      // per send, and switching it off must leave drafts and topics untouched.
+      reviewer:
+        config.goalCheckEnabled === false
+          ? null
+          : goalReviewerFromConfig(config.llm),
       minImportance: config.suggestReplyMinImportance,
     }
   } catch (error) {
     console.error('[ai] could not load the reply drafter:', error)
     return {
       drafter: null,
+      reviewer: null,
       minImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
     }
   }

@@ -16,6 +16,7 @@ import { getAiPipelineConfig } from '#/lib/ai/settings.ts'
 import { suggestContactContext } from '#/lib/contacts/context-ai.ts'
 import type { ContactContextSource } from '#/lib/contacts/context-ai.ts'
 import {
+  applyUserImportanceOverride,
   applyUserStateOverride,
   describeActionFailure,
   draftReply,
@@ -23,11 +24,16 @@ import {
   markConversationSeen,
   markThreadSenderUnreplyable,
   reanalyseConversation,
+  reviewSentReply,
   setConversationDone,
 } from '#/lib/gmail/service.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import type { ConversationState } from '#/db/schema.ts'
-import type { ActionFailure, ReplyDraftOutcome } from '#/lib/gmail/service.ts'
+import type {
+  ActionFailure,
+  ReplyDraftOutcome,
+  ReplyGoalCheck,
+} from '#/lib/gmail/service.ts'
 import {
   refreshThread,
   requireConversationByThreadId,
@@ -52,7 +58,10 @@ import {
   normaliseContactContextTextFields,
   saveContactContext,
 } from '#/lib/contacts/context.ts'
-import type { ContactContextFields, ContactContextTextFields } from '#/lib/contacts/context.ts'
+import type {
+  ContactContextFields,
+  ContactContextTextFields,
+} from '#/lib/contacts/context.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
 
 /**
@@ -292,11 +301,11 @@ const suggestContactContextAction = createServerFn({ method: 'POST' })
           }
         }
 
-      const { conversation } = await requireConversationByThreadId(
-        session.userId,
-        data.providerThreadId,
-      )
-      const owners = new Set(
+        const { conversation } = await requireConversationByThreadId(
+          session.userId,
+          data.providerThreadId,
+        )
+        const owners = new Set(
           (await listAccounts(session.userId)).map((account) =>
             account.email.trim().toLowerCase(),
           ),
@@ -681,6 +690,71 @@ const draftReplyAction = createServerFn({ method: 'POST' })
     )
   })
 
+/** Set the user's own score for this thread, or hand it back to the app. */
+const setImportanceAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { providerThreadId: string; importance: number | null }) => data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (
+      data.importance !== null &&
+      (!Number.isInteger(data.importance) ||
+        data.importance < 1 ||
+        data.importance > 10)
+    ) {
+      return { error: 'Importance has to be a whole number from 1 to 10.' }
+    }
+
+    try {
+      await applyUserImportanceOverride(
+        session.userId,
+        data.providerThreadId,
+        data.importance,
+      )
+      return { error: null }
+    } catch (error) {
+      console.error('[importance] overriding the score failed:', error)
+      return {
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Could not update this conversation.',
+      }
+    }
+  })
+
+/**
+ * Judge a reply the user just sent against the thread's goal.
+ *
+ * Separate from the send on purpose: Gmail has already accepted the message by
+ * the time this runs, so a slow or failing model must not turn a delivered reply
+ * into an error in the composer. The check is advice; the send's result is the
+ * truth about whether anything was sent.
+ */
+const reviewReplyAction = createServerFn({ method: 'POST' })
+  .validator((data: { providerThreadId: string; body: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{ check: ReplyGoalCheck | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { check: null, error: 'You are not signed in.' }
+
+      if (typeof data.body !== 'string' || data.body.trim().length === 0) {
+        return { check: null, error: 'There is no reply to check.' }
+      }
+
+      return await reviewSentReply(
+        session.userId,
+        data.providerThreadId,
+        data.body.trim(),
+      )
+    },
+  )
+
 /**
  * Record that the user has opened this thread, so it stops reading as new mail.
  *
@@ -816,6 +890,13 @@ function ConversationRoute() {
         if (!saved.error) await router.invalidate()
         return saved
       }}
+      onSetImportance={async (importance) => {
+        const saved = await setImportanceAction({
+          data: { providerThreadId: detail.providerThreadId, importance },
+        })
+        if (!saved.error) await router.invalidate()
+        return saved
+      }}
       onDraft={async (instructions: string | null) =>
         draftReplyAction({
           data: { providerThreadId: detail.providerThreadId, instructions },
@@ -856,6 +937,11 @@ function ConversationRoute() {
 
         return sent
       }}
+      onReviewReply={async (body) =>
+        reviewReplyAction({
+          data: { providerThreadId: detail.providerThreadId, body },
+        })
+      }
     />
   )
 }

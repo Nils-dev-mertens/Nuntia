@@ -64,6 +64,7 @@ function conversation(
     // supply a stored call, reading or Done mark, and every other case means
     // "none".
     stateOverride: overrides.stateOverride ?? null,
+    importanceOverride: overrides.importanceOverride ?? null,
     seenAt: overrides.seenAt ?? null,
     done: overrides.done ?? null,
   }

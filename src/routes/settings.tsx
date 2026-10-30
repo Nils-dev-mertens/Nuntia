@@ -32,10 +32,7 @@ import {
   listSessions,
   revokeAllSessions,
 } from '#/lib/auth/index.ts'
-import {
-  getAiSettings,
-  saveAiSettings,
-} from '#/lib/ai/index.ts'
+import { getAiSettings, saveAiSettings } from '#/lib/ai/index.ts'
 import type { AiSettingsSummary, LlmProvider } from '#/lib/ai/index.ts'
 import {
   addUnreplyableSender,
@@ -316,20 +313,27 @@ const saveParsingDefaultsAction = createServerFn({ method: 'POST' })
 
 const saveOrganizationRulesAction = createServerFn({ method: 'POST' })
   .inputValidator((data: unknown) => data)
-  .handler(async ({ data }): Promise<{ rules: OrganizationRule[] | null; error: string | null }> => {
-    const session = await getSession()
-    if (!session) return { rules: null, error: 'You are not signed in.' }
+  .handler(
+    async ({
+      data,
+    }): Promise<{ rules: OrganizationRule[] | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { rules: null, error: 'You are not signed in.' }
 
-    try {
-      const rules = await saveOrganizationRules(session.userId, data)
-      return rules
-        ? { rules, error: null }
-        : { rules: null, error: 'Organization rules are invalid or exceed the limit.' }
-    } catch (error) {
-      console.error('[settings] saving organization rules failed:', error)
-      return { rules: null, error: 'Could not save organization rules.' }
-    }
-  })
+      try {
+        const rules = await saveOrganizationRules(session.userId, data)
+        return rules
+          ? { rules, error: null }
+          : {
+              rules: null,
+              error: 'Organization rules are invalid or exceed the limit.',
+            }
+      } catch (error) {
+        console.error('[settings] saving organization rules failed:', error)
+        return { rules: null, error: 'Could not save organization rules.' }
+      }
+    },
+  )
 
 const saveStateLabelsAction = createServerFn({ method: 'POST' })
   .inputValidator((data: unknown) => data)
@@ -472,6 +476,8 @@ type SaveInput = {
   llmModel: string | null
   /** Importance at or above which a reply draft is offered, 1–10. */
   suggestReplyMinImportance: number
+  /** Whether a sent reply is checked against the thread's goal. */
+  goalCheckEnabled: boolean
   /** `null` means "leave the stored key unchanged". */
   jevApiKey: string | null
   clearJevKey: boolean
@@ -492,6 +498,10 @@ function validateSave(data: SaveInput): string | null {
     threshold > REPLY_DRAFT_MIN_IMPORTANCE_MAX
   ) {
     return `Importance must be a whole number between ${REPLY_DRAFT_MIN_IMPORTANCE_MIN} and ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}.`
+  }
+
+  if (typeof data.goalCheckEnabled !== 'boolean') {
+    return 'The goal check setting has to be on or off.'
   }
 
   const fields: Array<[string, string | null, number]> = [
@@ -534,6 +544,7 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
           : null,
         llmModel: blankToNull(data.llmModel),
         suggestReplyMinImportance: data.suggestReplyMinImportance,
+        goalCheckEnabled: data.goalCheckEnabled,
         // `undefined` keeps the stored key; `''` clears it; a value replaces it.
         jevApiKey: data.clearJevKey
           ? ''
@@ -592,11 +603,7 @@ type SignedInSettings = Extract<
  * shows both: the name in the heading and badge, the meaning under the heading,
  * so a section explains why a thread is in it instead of only naming it.
  */
-function StateLabelsEditor({
-  initialLabels,
-}: {
-  initialLabels: StateLabels
-}) {
+function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
   const router = useRouter()
   const [labels, setLabels] = useState(initialLabels)
   const [busy, setBusy] = useState(false)
@@ -645,7 +652,7 @@ function StateLabelsEditor({
     'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
 
   return (
-    <section className="mt-6 rounded-lg border border-border bg-card p-4">
+    <section className="rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold text-foreground">Label meanings</h2>
       <p className="mt-1 text-xs text-muted-foreground">
         Every thread is filed under one of these four labels. Rename one, or
@@ -783,18 +790,19 @@ function OrganizationRulesEditor({
     }
   }
 
-  const fieldLabels: Record<(typeof ORGANIZATION_RULE_FIELDS)[number], string> = {
-    'sender-email': 'Sender email is',
-    'sender-domain': 'Sender domain is',
-    'subject-contains': 'Subject contains',
-    'topic-contains': 'Topic contains',
-    'state-is': 'Label is',
-  }
+  const fieldLabels: Record<(typeof ORGANIZATION_RULE_FIELDS)[number], string> =
+    {
+      'sender-email': 'Sender email is',
+      'sender-domain': 'Sender domain is',
+      'subject-contains': 'Subject contains',
+      'topic-contains': 'Topic contains',
+      'state-is': 'Label is',
+    }
   const inputClass =
     'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
 
   return (
-    <section className="mt-6 rounded-lg border border-border bg-card p-4">
+    <section className="rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold text-foreground">Custom labels</h2>
       <p className="mt-1 text-xs text-muted-foreground">
         Add labels of your own and the rule that files matching conversations
@@ -807,10 +815,7 @@ function OrganizationRulesEditor({
       {rules.length > 0 ? (
         <ol className="mt-3 space-y-2">
           {rules.map((rule, index) => (
-            <li
-              key={rule.id}
-              className="rounded-md border border-border p-3"
-            >
+            <li key={rule.id} className="rounded-md border border-border p-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-medium text-muted-foreground">
                   {index + 1}.
@@ -953,8 +958,8 @@ function OrganizationRulesEditor({
         </ol>
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">
-          No custom labels yet. Add one to file matching conversations
-          somewhere of their own.
+          No custom labels yet. Add one to file matching conversations somewhere
+          of their own.
         </p>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -990,8 +995,16 @@ function OrganizationRulesEditor({
           {rules.length}/{ORGANIZATION_RULE_LIMITS.count} labels
         </span>
       </div>
-      {error ? <p role="alert" className="mt-2 text-xs text-destructive">{error}</p> : null}
-      {message ? <p role="status" className="mt-2 text-xs text-muted-foreground">{message}</p> : null}
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {message ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {message}
+        </p>
+      ) : null}
     </section>
   )
 }
@@ -1041,6 +1054,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   // the server refuses anything that is not a whole 1–10.
   const [minImportance, setMinImportance] = useState(
     String(settings.suggestReplyMinImportance),
+  )
+  const [goalCheckEnabled, setGoalCheckEnabled] = useState(
+    settings.goalCheckEnabled,
   )
 
   const [busy, setBusy] = useState(false)
@@ -1333,6 +1349,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           llmProvider,
           llmModel: llmModel.trim() || null,
           suggestReplyMinImportance: Number(minImportance),
+          goalCheckEnabled,
           jevApiKey: jevApiKey.trim() || null,
           clearJevKey,
           llmApiKey: llmApiKey.trim() || null,
@@ -1351,7 +1368,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
       setClearJevKey(false)
       setClearLlmKey(false)
       setMessage(
-        'Saved. New decisions and topics apply from the next sync; the draft threshold applies to the next draft you ask for.',
+        'Saved. New decisions and topics apply from the next sync; the draft threshold applies to the next draft you ask for, and the goal check to the next reply you send.',
       )
       await router.invalidate()
     } catch {
@@ -1366,7 +1383,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   const statusClass = 'mt-1 text-[11px] text-muted-foreground'
 
   return (
-    <div className="mx-auto max-w-2xl p-8">
+    <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]">
       <div className="flex items-baseline justify-between gap-4">
         <h1 className="text-2xl font-bold">Settings</h1>
         <Link
@@ -1377,636 +1394,686 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
         </Link>
       </div>
 
-      <section className="mt-6 rounded-lg border border-border bg-card p-4">
-        <h2 className="text-sm font-semibold text-foreground">Account</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Signed in as{' '}
-          <span className="text-foreground">
-            {viewer.name ? `${viewer.name} — ` : ''}
-            {viewer.email}
-          </span>
-          . Your mailboxes, keys and sender marks belong to this account alone.
-        </p>
+      {/*
+       * A 12-column bento rather than a narrow strip. Each row pairs cards at
+       * 5/7 instead of 6/6: the wider slot goes to whichever card carries the
+       * lists and forms, so neither side ends up mostly empty.
+       */}
+      <div className="mt-6 grid gap-5 lg:grid-cols-2 xl:grid-cols-12 xl:items-start">
+        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-5">
+          <h2 className="text-sm font-semibold text-foreground">Account</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Signed in as{' '}
+            <span className="text-foreground">
+              {viewer.name ? `${viewer.name} — ` : ''}
+              {viewer.email}
+            </span>
+            . Your mailboxes, keys and sender marks belong to this account
+            alone.
+          </p>
 
-        <h3 className="mt-4 text-xs font-medium text-foreground">
-          Signed-in devices
-        </h3>
-        <p className="mt-0.5 text-[11px] text-muted-foreground">
-          One row per browser that signed in. Signing out here ends this
-          browser's session only, so a phone left signed in can be cut off
-          without disturbing this laptop.
-        </p>
+          <h3 className="mt-4 text-xs font-medium text-foreground">
+            Signed-in devices
+          </h3>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            One row per browser that signed in. Signing out here ends this
+            browser's session only, so a phone left signed in can be cut off
+            without disturbing this laptop.
+          </p>
 
-        <ul className="mt-2 space-y-1">
-          {devices.map((device) => (
-            <li
-              key={device.id}
-              className="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground"
-            >
-              <span className="min-w-0 truncate" title={device.userAgent ?? ''}>
-                {device.userAgent ?? 'Unknown device'}
-              </span>
-              <span className="shrink-0">
-                {device.current ? 'this device — ' : ''}
-                {/* UTC and stable: this renders on the server too, and a
+          <ul className="mt-2 space-y-1">
+            {devices.map((device) => (
+              <li
+                key={device.id}
+                className="flex items-baseline justify-between gap-3 text-[11px] text-muted-foreground"
+              >
+                <span
+                  className="min-w-0 truncate"
+                  title={device.userAgent ?? ''}
+                >
+                  {device.userAgent ?? 'Unknown device'}
+                </span>
+                <span className="shrink-0">
+                  {device.current ? 'this device — ' : ''}
+                  {/* UTC and stable: this renders on the server too, and a
                     locale-formatted time would differ between the two. */}
-                {device.lastSeenAt.slice(0, 16).replace('T', ' ')} UTC
-              </span>
-            </li>
-          ))}
-        </ul>
+                  {device.lastSeenAt.slice(0, 16).replace('T', ' ')} UTC
+                </span>
+              </li>
+            ))}
+          </ul>
 
-        <div className="mt-3 flex flex-wrap gap-2 text-xs">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void signOut(false)}
-            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
-          >
-            Sign out
-          </button>
-          <button
-            type="button"
-            disabled={busy || devices.length <= 1}
-            onClick={() => void signOut(true)}
-            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
-          >
-            Sign out everywhere else
-          </button>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void signOut(false)}
+              className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+            >
+              Sign out
+            </button>
+            <button
+              type="button"
+              disabled={busy || devices.length <= 1}
+              onClick={() => void signOut(true)}
+              className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+            >
+              Sign out everywhere else
+            </button>
+          </div>
+
+          <label className="mt-4 flex items-start gap-2 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={gravatar}
+              disabled={busy}
+              onChange={(event) => void toggleGravatar(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="text-foreground">
+                Load avatars from Gravatar
+              </span>{' '}
+              — contacts always get initials; this sends an MD5 of each sender's
+              address to gravatar.com. Leave it off to keep addresses on this
+              machine.
+            </span>
+          </label>
+
+          {accountError ? (
+            <p
+              role="alert"
+              className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              {accountError}
+            </p>
+          ) : null}
+          {accountMessage ? (
+            <p
+              role="status"
+              className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+            >
+              {accountMessage}
+            </p>
+          ) : null}
+        </section>
+
+        <section className="space-y-4 rounded-lg border border-border bg-card p-4 xl:col-span-7">
+          <h2 className="text-sm font-semibold text-foreground">
+            Parsing defaults
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            These defaults apply to new messages in each mailbox. Saving also
+            re-parses stored messages locally, including their original text and
+            HTML where available. Sender-specific overrides remain in each
+            conversation.
+          </p>
+          {accounts.map((account) => {
+            const draft = parsingDrafts[account.id] ?? {
+              ...account.parsingDefaults,
+              greeting: account.defaultReplyGreeting,
+              signature: account.defaultReplySignature,
+            }
+            const toggle = (key: keyof ParsingPreferences, label: string) => (
+              <label className="flex items-center gap-2 text-xs text-foreground">
+                <input
+                  type="checkbox"
+                  checked={draft[key]}
+                  disabled={parsingBusy !== null}
+                  onChange={(event) =>
+                    setParsingDrafts((current) => ({
+                      ...current,
+                      [account.id]: {
+                        ...(current[account.id] ?? draft),
+                        [key]: event.target.checked,
+                      },
+                    }))
+                  }
+                />
+                Strip {label}
+              </label>
+            )
+            return (
+              <div
+                key={account.id}
+                className="rounded-md border border-border p-3"
+              >
+                <h3 className="text-xs font-medium text-foreground">
+                  {account.email} ·{' '}
+                  {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
+                </h3>
+                <div className="mt-3 space-y-2">
+                  {toggle('stripQuotedHistory', 'quoted history')}
+                  {toggle('stripGreeting', 'greetings')}
+                  {toggle('stripSignature', 'signatures')}
+                  <Field label="Default reply greeting">
+                    <input
+                      value={draft.greeting}
+                      maxLength={200}
+                      disabled={parsingBusy !== null}
+                      onChange={(event) =>
+                        setParsingDrafts((current) => ({
+                          ...current,
+                          [account.id]: {
+                            ...(current[account.id] ?? draft),
+                            greeting: event.target.value,
+                          },
+                        }))
+                      }
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field label="Default reply signature">
+                    <textarea
+                      value={draft.signature}
+                      maxLength={1000}
+                      rows={2}
+                      disabled={parsingBusy !== null}
+                      onChange={(event) =>
+                        setParsingDrafts((current) => ({
+                          ...current,
+                          [account.id]: {
+                            ...(current[account.id] ?? draft),
+                            signature: event.target.value,
+                          },
+                        }))
+                      }
+                      className={inputClass}
+                    />
+                  </Field>
+                  <button
+                    type="button"
+                    disabled={parsingBusy !== null}
+                    onClick={() => void saveMailboxParsing(account.id)}
+                    className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                  >
+                    {parsingBusy === account.id
+                      ? 'Saving & re-parsing…'
+                      : 'Save parsing defaults'}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+          {accounts.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Connect a mailbox to set its parsing defaults.
+            </p>
+          ) : null}
+          {parsingError ? (
+            <p role="alert" className="text-xs text-destructive">
+              {parsingError}
+            </p>
+          ) : null}
+          {parsingMessage ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              {parsingMessage}
+            </p>
+          ) : null}
+        </section>
+
+        <div className="xl:col-span-5">
+          <StateLabelsEditor initialLabels={initialStateLabels} />
         </div>
 
-        <label className="mt-4 flex items-start gap-2 text-[11px] text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={gravatar}
-            disabled={busy}
-            onChange={(event) => void toggleGravatar(event.target.checked)}
-            className="mt-0.5"
+        <div className="xl:col-span-7">
+          <OrganizationRulesEditor
+            initialRules={initialOrganizationRules}
+            stateLabels={initialStateLabels}
           />
-          <span>
-            <span className="text-foreground">Load avatars from Gravatar</span>{' '}
-            — contacts always get initials; this sends an MD5 of each sender's
-            address to gravatar.com. Leave it off to keep addresses on this
-            machine.
-          </span>
-        </label>
+        </div>
+      </div>
 
-        {accountError ? (
-          <p
-            role="alert"
-            className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {accountError}
-          </p>
-        ) : null}
-        {accountMessage ? (
-          <p
-            role="status"
-            className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-          >
-            {accountMessage}
-          </p>
-        ) : null}
-      </section>
-
-      <section className="mt-6 space-y-4 rounded-lg border border-border bg-card p-4">
-        <h2 className="text-sm font-semibold text-foreground">
-          Parsing defaults
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          These defaults apply to new messages in each mailbox. Saving also
-          re-parses stored messages locally, including their original text and
-          HTML where available. Sender-specific overrides remain in each
-          conversation.
-        </p>
-        {accounts.map((account) => {
-          const draft = parsingDrafts[account.id] ?? {
-            ...account.parsingDefaults,
-            greeting: account.defaultReplyGreeting,
-            signature: account.defaultReplySignature,
-          }
-          const toggle = (key: keyof ParsingPreferences, label: string) => (
-            <label className="flex items-center gap-2 text-xs text-foreground">
-              <input
-                type="checkbox"
-                checked={draft[key]}
-                disabled={parsingBusy !== null}
-                onChange={(event) =>
-                  setParsingDrafts((current) => ({
-                    ...current,
-                    [account.id]: {
-                      ...(current[account.id] ?? draft),
-                      [key]: event.target.checked,
-                    },
-                  }))
-                }
-              />
-              Strip {label}
-            </label>
-          )
-          return (
-            <div
-              key={account.id}
-              className="rounded-md border border-border p-3"
-            >
-              <h3 className="text-xs font-medium text-foreground">
-                {account.email} ·{' '}
-                {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
-              </h3>
-              <div className="mt-3 space-y-2">
-                {toggle('stripQuotedHistory', 'quoted history')}
-                {toggle('stripGreeting', 'greetings')}
-                {toggle('stripSignature', 'signatures')}
-                <Field label="Default reply greeting">
-                  <input
-                    value={draft.greeting}
-                    maxLength={200}
-                    disabled={parsingBusy !== null}
-                    onChange={(event) =>
-                      setParsingDrafts((current) => ({
-                        ...current,
-                        [account.id]: {
-                          ...(current[account.id] ?? draft),
-                          greeting: event.target.value,
-                        },
-                      }))
-                    }
-                    className={inputClass}
-                  />
-                </Field>
-                <Field label="Default reply signature">
-                  <textarea
-                    value={draft.signature}
-                    maxLength={1000}
-                    rows={2}
-                    disabled={parsingBusy !== null}
-                    onChange={(event) =>
-                      setParsingDrafts((current) => ({
-                        ...current,
-                        [account.id]: {
-                          ...(current[account.id] ?? draft),
-                          signature: event.target.value,
-                        },
-                      }))
-                    }
-                    className={inputClass}
-                  />
-                </Field>
-                <button
-                  type="button"
-                  disabled={parsingBusy !== null}
-                  onClick={() => void saveMailboxParsing(account.id)}
-                  className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
-                >
-                  {parsingBusy === account.id
-                    ? 'Saving & re-parsing…'
-                    : 'Save parsing defaults'}
-                </button>
-              </div>
-            </div>
-          )
-        })}
-        {accounts.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            Connect a mailbox to set its parsing defaults.
-          </p>
-        ) : null}
-        {parsingError ? (
-          <p role="alert" className="text-xs text-destructive">
-            {parsingError}
-          </p>
-        ) : null}
-        {parsingMessage ? (
-          <p role="status" className="text-xs text-muted-foreground">
-            {parsingMessage}
-          </p>
-        ) : null}
-      </section>
-
-      <StateLabelsEditor initialLabels={initialStateLabels} />
-
-      <OrganizationRulesEditor
-        initialRules={initialOrganizationRules}
-        stateLabels={initialStateLabels}
-      />
-
-      <p className="mt-6 text-sm text-muted-foreground">
-        Both AI services are optional. Without them Nuntia classifies with rules
-        only and conversations have no topic. Each person connects their own
-        keys — there is no shared key for the install — and they are encrypted
-        at rest.
-      </p>
-
-      <form onSubmit={(event) => void submit(event)} className="mt-6 space-y-8">
-        <section className="rounded-lg border border-border bg-card p-4">
-          <h2 className="text-sm font-semibold text-foreground">
-            Decision model — Jev
-          </h2>
+      <section className="mt-8 rounded-lg border border-border bg-card">
+        <div className="border-b border-border p-4">
+          <h2 className="text-sm font-semibold text-foreground">AI services</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Rates importance and urgency, and fills in the state when the rules
-            cannot decide it.
+            Both are optional. Without them Nuntia classifies with rules only
+            and conversations have no topic. Each person connects their own keys
+            — there is no shared key for the install — and they are encrypted at
+            rest.
           </p>
-          <p className={statusClass}>
-            {settings.jevConfigured
-              ? 'A key is stored. Enter a new one to replace it.'
-              : 'Not connected yet — add a key below.'}
-          </p>
+        </div>
 
-          <div className="mt-3 space-y-3">
-            <Field label="Jev API key">
-              <input
-                type="password"
-                value={jevApiKey}
-                disabled={clearJevKey}
-                placeholder={settings.jevConfigured ? '••••••••' : 'ts-...'}
-                onChange={(event) => setJevApiKey(event.target.value)}
-                autoComplete="off"
-                className={inputClass}
-              />
-            </Field>
-            <Field label="Model" hint="Defaults to jev-latest.">
-              <input
-                value={jevModel}
-                placeholder="jev-latest"
-                onChange={(event) => setJevModel(event.target.value)}
-                className={inputClass}
-              />
-            </Field>
-            {settings.jevConfigured ? (
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={clearJevKey}
-                  onChange={(event) => setClearJevKey(event.target.checked)}
-                />
-                Remove the stored Jev key
-              </label>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="rounded-lg border border-border bg-card p-4">
-          <h2 className="text-sm font-semibold text-foreground">
-            Topics and drafts — LLM
-          </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Writes a short topic label for each conversation, and drafts a reply
-            on the ones that ask for one and clear the threshold below. A draft
-            is always text in the composer to review — the app never sends it.
-          </p>
-          <p className={statusClass}>
-            {settings.llmConfigured
-              ? 'A key is stored. Enter a new one to replace it.'
-              : 'Not connected yet — add a key below.'}
-          </p>
-
-          <div className="mt-3 space-y-3">
-            <Field label="Provider">
-              <select
-                value={llmProvider}
-                onChange={(event) =>
-                  setLlmProvider(event.target.value as '' | LlmProvider)
-                }
-                className={inputClass}
-              >
-                {PROVIDERS.map((provider) => (
-                  <option key={provider.value} value={provider.value}>
-                    {provider.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="API key">
-              <input
-                type="password"
-                value={llmApiKey}
-                disabled={clearLlmKey || llmProvider === ''}
-                placeholder={settings.llmConfigured ? '••••••••' : 'sk-...'}
-                onChange={(event) => setLlmApiKey(event.target.value)}
-                autoComplete="off"
-                className={inputClass}
-              />
-            </Field>
-            <Field
-              label="Model"
-              hint="Leave blank to use the provider default."
-            >
-              <input
-                value={llmModel}
-                placeholder="gemini-2.5-flash"
-                disabled={llmProvider === ''}
-                onChange={(event) => setLlmModel(event.target.value)}
-                className={inputClass}
-              />
-            </Field>
-            <Field
-              label="Draft a reply from importance"
-              hint={`${REPLY_DRAFT_MIN_IMPORTANCE_MIN} to ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}. Every draft is one API call, so the routine mail below this is left alone.`}
-            >
-              <input
-                type="number"
-                min={REPLY_DRAFT_MIN_IMPORTANCE_MIN}
-                max={REPLY_DRAFT_MIN_IMPORTANCE_MAX}
-                step={1}
-                value={minImportance}
-                onChange={(event) => setMinImportance(event.target.value)}
-                className={inputClass}
-              />
-            </Field>
-            {settings.llmConfigured ? (
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={clearLlmKey}
-                  onChange={(event) => setClearLlmKey(event.target.checked)}
-                />
-                Remove the stored LLM key
-              </label>
-            ) : null}
-          </div>
-        </section>
-
-        {error ? (
-          <p
-            role="alert"
-            className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {error}
-          </p>
-        ) : null}
-        {message ? (
-          <p
-            role="status"
-            className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-          >
-            {message}
-          </p>
-        ) : null}
-
-        <button
-          type="submit"
-          disabled={busy}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+        <form
+          onSubmit={(event) => void submit(event)}
+          className="grid xl:grid-cols-12"
         >
-          {busy ? 'Saving…' : 'Save settings'}
-        </button>
-      </form>
-
-      <section className="mt-8 rounded-lg border border-border bg-card p-4">
-        <h2 className="text-sm font-semibold text-foreground">
-          Can&rsquo;t reply to
-        </h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Senders whose mail has no one to answer: a company writing from an
-          ordinary address with view-only content, a receipt nobody reads. Add
-          an address here — one mailbox at a time — and it keeps the reply box
-          hidden on every thread from that sender, including the ones already
-          stored and the ones that arrive later. The state is left alone, so the
-          mail is still listed where it was. The deterministic markers (
-          <code>noreply@</code> and friends) are handled on their own and are
-          not listed here, because there is nothing to take back.
-        </p>
-
-        {suggestions.length > 0 ? (
-          <div className="mt-4">
-            <p className="text-xs font-medium text-foreground">
-              Senders you have received from
+          <section className="p-4 xl:col-span-5 xl:border-r xl:border-border">
+            <h3 className="text-sm font-semibold text-foreground">
+              Decision model — Jev
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Rates importance and urgency, and fills in the state when the
+              rules cannot decide it.
             </p>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">
-              The most recent senders this mailbox still shows a reply box for.
-              One click marks them, and the reply box then goes from their
-              threads — including the ones already stored.
+            <p className={statusClass}>
+              {settings.jevConfigured
+                ? 'A key is stored. Enter a new one to replace it.'
+                : 'Not connected yet — add a key below.'}
             </p>
-            <ul className="mt-2 space-y-1.5">
-              {suggestions.map((sender) => (
+
+            <div className="mt-3 space-y-3">
+              <Field label="Jev API key">
+                <input
+                  type="password"
+                  value={jevApiKey}
+                  disabled={clearJevKey}
+                  placeholder={settings.jevConfigured ? '••••••••' : 'ts-...'}
+                  onChange={(event) => setJevApiKey(event.target.value)}
+                  autoComplete="off"
+                  className={inputClass}
+                />
+              </Field>
+              <Field label="Model" hint="Defaults to jev-latest.">
+                <input
+                  value={jevModel}
+                  placeholder="jev-latest"
+                  onChange={(event) => setJevModel(event.target.value)}
+                  className={inputClass}
+                />
+              </Field>
+              {settings.jevConfigured ? (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={clearJevKey}
+                    onChange={(event) => setClearJevKey(event.target.checked)}
+                  />
+                  Remove the stored Jev key
+                </label>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="border-t border-border p-4 xl:col-span-7 xl:border-t-0">
+            <h3 className="text-sm font-semibold text-foreground">
+              Topics and drafts — LLM
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Writes a short topic label for each conversation, and drafts a
+              reply on every replyable thread that clears the threshold below —
+              whether or not the newest message asks for one. A draft is always
+              text in the composer to review — the app never sends it.
+            </p>
+            <p className={statusClass}>
+              {settings.llmConfigured
+                ? 'A key is stored. Enter a new one to replace it.'
+                : 'Not connected yet — add a key below.'}
+            </p>
+
+            <div className="mt-3 space-y-3">
+              <Field label="Provider">
+                <select
+                  value={llmProvider}
+                  onChange={(event) =>
+                    setLlmProvider(event.target.value as '' | LlmProvider)
+                  }
+                  className={inputClass}
+                >
+                  {PROVIDERS.map((provider) => (
+                    <option key={provider.value} value={provider.value}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="API key">
+                <input
+                  type="password"
+                  value={llmApiKey}
+                  disabled={clearLlmKey || llmProvider === ''}
+                  placeholder={settings.llmConfigured ? '••••••••' : 'sk-...'}
+                  onChange={(event) => setLlmApiKey(event.target.value)}
+                  autoComplete="off"
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label="Model"
+                hint="Leave blank to use the provider default."
+              >
+                <input
+                  value={llmModel}
+                  placeholder="gemini-2.5-flash"
+                  disabled={llmProvider === ''}
+                  onChange={(event) => setLlmModel(event.target.value)}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label="Draft a reply from importance"
+                hint={`${REPLY_DRAFT_MIN_IMPORTANCE_MIN} to ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}. Every draft is one API call, so the routine mail below this is left alone.`}
+              >
+                <input
+                  type="number"
+                  min={REPLY_DRAFT_MIN_IMPORTANCE_MIN}
+                  max={REPLY_DRAFT_MIN_IMPORTANCE_MAX}
+                  step={1}
+                  value={minImportance}
+                  onChange={(event) => setMinImportance(event.target.value)}
+                  className={inputClass}
+                />
+              </Field>
+              <label className="flex items-start gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={goalCheckEnabled}
+                  onChange={(event) =>
+                    setGoalCheckEnabled(event.target.checked)
+                  }
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium text-foreground">
+                    Check each reply against its goal
+                  </span>
+                  <span className="mt-0.5 block">
+                    After you send, one extra call asks whether the reply moves
+                    the thread toward its goal, and offers a follow-up when it
+                    does not. Turning it off costs no drafts or topics.
+                  </span>
+                </span>
+              </label>
+              {settings.llmConfigured ? (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={clearLlmKey}
+                    onChange={(event) => setClearLlmKey(event.target.checked)}
+                  />
+                  Remove the stored LLM key
+                </label>
+              ) : null}
+            </div>
+          </section>
+
+          <div className="col-span-full space-y-3 border-t border-border p-4">
+            {error ? (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {error}
+              </p>
+            ) : null}
+            {message ? (
+              <p
+                role="status"
+                className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+              >
+                {message}
+              </p>
+            ) : null}
+
+            <button
+              type="submit"
+              disabled={busy}
+              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            >
+              {busy ? 'Saving…' : 'Save settings'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <div className="mt-4 grid gap-5 lg:grid-cols-2 xl:grid-cols-12 xl:items-start">
+        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-7">
+          <h2 className="text-sm font-semibold text-foreground">
+            Can&rsquo;t reply to
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Senders whose mail has no one to answer: a company writing from an
+            ordinary address with view-only content, a receipt nobody reads. Add
+            an address here — one mailbox at a time — and it keeps the reply box
+            hidden on every thread from that sender, including the ones already
+            stored and the ones that arrive later. The state is left alone, so
+            the mail is still listed where it was. The deterministic markers (
+            <code>noreply@</code> and friends) are handled on their own and are
+            not listed here, because there is nothing to take back.
+          </p>
+
+          {suggestions.length > 0 ? (
+            <div className="mt-4">
+              <p className="text-xs font-medium text-foreground">
+                Senders you have received from
+              </p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                The most recent senders this mailbox still shows a reply box
+                for. One click marks them, and the reply box then goes from
+                their threads — including the ones already stored.
+              </p>
+              <ul className="mt-2 space-y-1.5">
+                {suggestions.map((sender) => (
+                  <li
+                    key={`${sender.accountId}:${sender.email}`}
+                    className="flex items-center justify-between gap-3 text-xs"
+                  >
+                    <span className="min-w-0 truncate">
+                      {sender.name ? (
+                        <>
+                          <span className="text-foreground">{sender.name}</span>{' '}
+                          <span className="text-muted-foreground">
+                            {sender.email}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-foreground">{sender.email}</span>
+                      )}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() =>
+                        void addSenderAddress(sender.accountId, sender.email)
+                      }
+                      title={`Hide the reply box on every thread from ${sender.email}`}
+                      className="shrink-0 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+                    >
+                      Can’t reply
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {accounts.length === 0 ? null : (
+            <form
+              onSubmit={(event) => void addSender(event)}
+              className="mt-3 flex flex-wrap items-center gap-2"
+            >
+              {suggestions.length > 0 ? (
+                <span className="w-full text-[11px] text-muted-foreground">
+                  Or name an address you have not received from yet:
+                </span>
+              ) : null}
+              {accounts.length > 1 ? (
+                <select
+                  value={senderAccount}
+                  onChange={(event) => setSenderAccount(event.target.value)}
+                  disabled={busy}
+                  aria-label="Mailbox"
+                  className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
+                >
+                  {accounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.email}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <input
+                type="email"
+                value={senderInput}
+                onChange={(event) => setSenderInput(event.target.value)}
+                disabled={busy}
+                placeholder="updates@example.com"
+                aria-label="Sender address"
+                className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/60 disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={busy || senderInput.trim() === ''}
+                className="shrink-0 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+              >
+                {busy ? 'Adding…' : 'Add'}
+              </button>
+            </form>
+          )}
+
+          {unreplyableSenders.length === 0 ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              {accounts.length === 0
+                ? 'Connect a mailbox to manage this list.'
+                : 'Nothing marked. Add an address above.'}
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-2">
+              {unreplyableSenders.map((entry) => (
                 <li
-                  key={`${sender.accountId}:${sender.email}`}
+                  key={`${entry.accountId}:${entry.senderEmail}`}
                   className="flex items-center justify-between gap-3 text-xs"
                 >
-                  <span className="min-w-0 truncate">
-                    {sender.name ? (
-                      <>
-                        <span className="text-foreground">{sender.name}</span>{' '}
-                        <span className="text-muted-foreground">
-                          {sender.email}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-foreground">{sender.email}</span>
-                    )}
+                  <span className="min-w-0 truncate text-foreground">
+                    {entry.senderEmail}
+                    <span className="ml-2 text-muted-foreground">
+                      {entry.accountId}
+                    </span>
                   </span>
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() =>
-                      void addSenderAddress(sender.accountId, sender.email)
+                      void allowReplies(entry.accountId, entry.senderEmail)
                     }
-                    title={`Hide the reply box on every thread from ${sender.email}`}
                     className="shrink-0 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
                   >
-                    Can’t reply
+                    Allow replies
                   </button>
                 </li>
               ))}
             </ul>
-          </div>
-        ) : null}
+          )}
 
-        {accounts.length === 0 ? null : (
-          <form
-            onSubmit={(event) => void addSender(event)}
-            className="mt-3 flex flex-wrap items-center gap-2"
-          >
-            {suggestions.length > 0 ? (
-              <span className="w-full text-[11px] text-muted-foreground">
-                Or name an address you have not received from yet:
-              </span>
-            ) : null}
-            {accounts.length > 1 ? (
-              <select
-                value={senderAccount}
-                onChange={(event) => setSenderAccount(event.target.value)}
-                disabled={busy}
-                aria-label="Mailbox"
-                className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground disabled:opacity-50"
-              >
-                {accounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.email}
-                  </option>
-                ))}
-              </select>
-            ) : null}
-            <input
-              type="email"
-              value={senderInput}
-              onChange={(event) => setSenderInput(event.target.value)}
-              disabled={busy}
-              placeholder="updates@example.com"
-              aria-label="Sender address"
-              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/60 disabled:opacity-50"
-            />
-            <button
-              type="submit"
-              disabled={busy || senderInput.trim() === ''}
-              className="shrink-0 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+          {senderError ? (
+            <p
+              role="alert"
+              className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
             >
-              {busy ? 'Adding…' : 'Add'}
-            </button>
-          </form>
-        )}
+              {senderError}
+            </p>
+          ) : null}
+          {senderMessage ? (
+            <p
+              role="status"
+              className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+            >
+              {senderMessage}
+            </p>
+          ) : null}
+        </section>
 
-        {unreplyableSenders.length === 0 ? (
-          <p className="mt-3 text-xs text-muted-foreground">
-            {accounts.length === 0
-              ? 'Connect a mailbox to manage this list.'
-              : 'Nothing marked. Add an address above.'}
+        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-5">
+          <h2 className="text-sm font-semibold text-foreground">
+            Connected mailboxes
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Deleting a mailbox removes the conversations and attachments stored
+            on this machine. Nothing is deleted from Gmail — connect it again
+            and it syncs fresh. Useful when mail was stored by an older version
+            and you want to see what the current one makes of it.
           </p>
-        ) : (
+
           <ul className="mt-3 space-y-2">
-            {unreplyableSenders.map((entry) => (
+            {accounts.map((account) => (
               <li
-                key={`${entry.accountId}:${entry.senderEmail}`}
+                key={account.id}
                 className="flex items-center justify-between gap-3 text-xs"
               >
-                <span className="min-w-0 truncate text-foreground">
-                  {entry.senderEmail}
-                  <span className="ml-2 text-muted-foreground">
-                    {entry.accountId}
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-foreground">
+                    {account.email}
+                  </span>
+                  <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
                   </span>
                 </span>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() =>
-                    void allowReplies(entry.accountId, entry.senderEmail)
-                  }
-                  className="shrink-0 rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
-                >
-                  Allow replies
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
 
-        {senderError ? (
-          <p
-            role="alert"
-            className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {senderError}
-          </p>
-        ) : null}
-        {senderMessage ? (
-          <p
-            role="status"
-            className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-          >
-            {senderMessage}
-          </p>
-        ) : null}
-      </section>
-
-      <section className="mt-8 rounded-lg border border-border bg-card p-4">
-        <h2 className="text-sm font-semibold text-foreground">
-          Connected mailboxes
-        </h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Deleting a mailbox removes the conversations and attachments stored on
-          this machine. Nothing is deleted from Gmail — connect it again and it
-          syncs fresh. Useful when mail was stored by an older version and you
-          want to see what the current one makes of it.
-        </p>
-
-        <ul className="mt-3 space-y-2">
-          {accounts.map((account) => (
-            <li
-              key={account.id}
-              className="flex items-center justify-between gap-3 text-xs"
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-foreground">
-                  {account.email}
-                </span>
-                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
-                </span>
-              </span>
-
-              {pendingDelete === account.id ? (
-                <span className="flex shrink-0 items-center gap-2">
+                {pendingDelete === account.id ? (
+                  <span className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void removeMailbox(account.id)}
+                      className="rounded-md border border-destructive bg-destructive/10 px-2 py-1 font-medium text-destructive disabled:opacity-50"
+                    >
+                      {busy ? 'Deleting…' : 'Delete everything'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setPendingDelete(null)}
+                      className="rounded-md border border-border px-2 py-1 font-medium text-muted-foreground disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
                   <button
                     type="button"
                     disabled={busy}
                     onClick={() => void removeMailbox(account.id)}
-                    className="rounded-md border border-destructive bg-destructive/10 px-2 py-1 font-medium text-destructive disabled:opacity-50"
+                    className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
                   >
-                    {busy ? 'Deleting…' : 'Delete everything'}
+                    Delete stored mail
                   </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => setPendingDelete(null)}
-                    className="rounded-md border border-border px-2 py-1 font-medium text-muted-foreground disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void removeMailbox(account.id)}
-                  className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
-                >
-                  Delete stored mail
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
+                )}
+              </li>
+            ))}
+          </ul>
 
-        <div className="mt-3 flex flex-wrap gap-2 text-xs">
-          <a
-            href="/auth/google"
-            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
-          >
-            Add Gmail
-          </a>
-          <a
-            href="/auth/microsoft"
-            className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
-          >
-            Add Outlook
-          </a>
-        </div>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            <a
+              href="/auth/google"
+              className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
+            >
+              Add Gmail
+            </a>
+            <a
+              href="/auth/microsoft"
+              className="inline-flex h-8 items-center rounded-md border border-border bg-background px-3 font-medium text-foreground hover:border-foreground/25"
+            >
+              Add Outlook
+            </a>
+          </div>
 
-        {mailboxError ? (
-          <p
-            role="alert"
-            className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {mailboxError}
+          {mailboxError ? (
+            <p
+              role="alert"
+              className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              {mailboxError}
+            </p>
+          ) : null}
+          {mailboxMessage ? (
+            <p
+              role="status"
+              className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+            >
+              {mailboxMessage}
+            </p>
+          ) : null}
+
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            To add a mailbox,{' '}
+            <a href="/auth/google" className="text-primary hover:underline">
+              connect Gmail
+            </a>
+            .
           </p>
-        ) : null}
-        {mailboxMessage ? (
-          <p
-            role="status"
-            className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-          >
-            {mailboxMessage}
-          </p>
-        ) : null}
-
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          To add a mailbox,{' '}
-          <a href="/auth/google" className="text-primary hover:underline">
-            connect Gmail
-          </a>
-          .
-        </p>
-      </section>
+        </section>
+      </div>
     </div>
   )
 }

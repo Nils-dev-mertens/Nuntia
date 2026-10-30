@@ -29,6 +29,7 @@ import type {
 } from './model.ts'
 import {
   activeDone,
+  activeImportanceOverride,
   activeStateOverride,
   dedupeParticipants,
   deriveState,
@@ -441,6 +442,18 @@ function rebuildConversation(
       lastMessageAt,
     })
 
+  // The user's score follows the same rule as their label: the union's newest
+  // message is the clock, so a message from another mailbox that the owning row
+  // never saw outruns the score too.
+  const importanceOverride =
+    decided.importanceOverride &&
+    activeImportanceOverride({
+      importanceOverride: decided.importanceOverride,
+      lastMessageAt,
+    }) !== null
+      ? decided.importanceOverride
+      : null
+
   // A no-reply verdict is carried for the same reason `state` and the scores are:
   // it came from the user's own mark on the sender, or from Jev reading the
   // thread, and the union is a second mailbox's copy of the same mail rather than
@@ -521,7 +534,7 @@ function rebuildConversation(
     state: ccOnly ? 'low-priority' : (override ?? derived.state),
     awaitingReply: ccOnly ? false : derived.awaitingReply,
     requiresReply: ccOnly ? false : derived.requiresReply,
-    importance: derived.importance,
+    importance: importanceOverride?.importance ?? derived.importance,
     urgency: ccOnly ? 2 : derived.urgency,
     intent: derived.intent,
 
@@ -539,6 +552,7 @@ function rebuildConversation(
     // past it, so a reader of the merged row sees the same call (or the same
     // absence of one) the owning row holds.
     stateOverride: override ? decided.stateOverride : null,
+    importanceOverride,
     seenAt,
     done,
   }
