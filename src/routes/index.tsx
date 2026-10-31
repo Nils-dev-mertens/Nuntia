@@ -28,8 +28,13 @@ import {
   loadConversation,
   loadInbox,
   setConversationDone,
+  setConversationOrganizationGroup,
+  setConversationUnread,
 } from '#/lib/gmail/service.ts'
 import type { ConversationSummary } from '#/lib/gmail/service.ts'
+import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
+import { listOrganizationRules } from '#/lib/organization/store.ts'
+import { savePreferences } from '#/lib/settings/preferences.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import type { ConversationState } from '#/db/schema.ts'
 
@@ -271,6 +276,149 @@ function cleanThreadIds(value: unknown): string[] {
 
   return [...new Set(ids)]
 }
+
+/**
+ * Mark threads read or unread from the inbox's row menu.
+ *
+ * Unlike Done and the labels this is not local state: the read flag belongs to
+ * the mailbox, so Gmail is written first and the row is only changed once it
+ * agreed. A whole selection arrives as one request, with each thread counted
+ * separately so one bad row does not abandon the rest.
+ */
+const setUnreadAction = createServerFn({ method: 'POST' })
+  .validator((data: { providerThreadIds: string[]; unread: boolean }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.unread !== 'boolean') {
+      return { error: 'Unread has to be true or false.' }
+    }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    let reason: string | null = null
+    for (const providerThreadId of ids) {
+      try {
+        await setConversationUnread(
+          session.userId,
+          providerThreadId,
+          data.unread,
+        )
+      } catch (error) {
+        failed += 1
+        reason = error instanceof Error ? error.message : null
+        console.error('[unread] batch item failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? (reason ?? 'None of the selected conversations could be updated.')
+          : `${failed} of ${ids.length} conversations could not be updated.`,
+    }
+  })
+
+/**
+ * Move threads into one of the user's custom labels, or hand them back to the
+ * rules with `groupId: null`.
+ *
+ * Local only: a custom label is Nuntia's own filing and Gmail knows nothing
+ * about it, so there is no provider to write to. The label id comes from the
+ * browser and is checked against the user's own rules in the service.
+ */
+const setOrganizationGroupAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { providerThreadIds: string[]; groupId: string | null }) => data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (data.groupId !== null && typeof data.groupId !== 'string') {
+      return { error: 'That is not a label.' }
+    }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    let reason: string | null = null
+    for (const providerThreadId of ids) {
+      try {
+        await setConversationOrganizationGroup(
+          session.userId,
+          providerThreadId,
+          data.groupId,
+        )
+      } catch (error) {
+        failed += 1
+        reason = error instanceof Error ? error.message : null
+        console.error('[label] move failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? (reason ?? 'None of the selected conversations could be moved.')
+          : `${failed} of ${ids.length} conversations could not be moved.`,
+    }
+  })
+
+/**
+ * Save the user's inbox section order after a drag.
+ *
+ * The order arrives as tokens from the browser, so it is made valid here against
+ * the labels the user has now — unknown tokens dropped, duplicates collapsed,
+ * missing sections appended — before it is stored. That keeps a deleted label
+ * from leaving a gap and a newly created one from being invisible.
+ */
+const saveInboxOrderAction = createServerFn({ method: 'POST' })
+  .validator((data: { order: string[] }) => data)
+  .handler(
+    async ({ data }): Promise<{ error: string | null; order?: string[] }> => {
+      const session = await getSession()
+      if (!session) return { error: 'You are not signed in.' }
+
+      if (!Array.isArray(data.order)) {
+        return { error: 'That is not a section order.' }
+      }
+
+      try {
+        const rules = await listOrganizationRules(session.userId)
+        const order = resolveInboxOrder(
+          data.order,
+          rules.filter((rule) => rule.enabled).map((rule) => rule.id),
+        )
+        await savePreferences(session.userId, { inboxOrder: order })
+        return { error: null, order }
+      } catch (error) {
+        console.error('[inbox order] saving failed:', error)
+        return {
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not save the new order.',
+        }
+      }
+    },
+  )
 
 /**
  * Mark many threads done, or take the mark back, in one request.
@@ -544,6 +692,25 @@ function Home() {
         const result = await setStateBatchAction({
           data: { providerThreadIds, state },
         })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSetUnread={async (providerThreadIds, unread) => {
+        const result = await setUnreadAction({
+          data: { providerThreadIds, unread },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onSetOrganizationGroup={async (providerThreadIds, groupId) => {
+        const result = await setOrganizationGroupAction({
+          data: { providerThreadIds, groupId },
+        })
+        if (!result.error) await router.invalidate()
+        return result
+      }}
+      onReorderSections={async (order) => {
+        const result = await saveInboxOrderAction({ data: { order } })
         if (!result.error) await router.invalidate()
         return result
       }}

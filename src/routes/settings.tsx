@@ -807,10 +807,13 @@ function OrganizationRulesEditor({
       <p className="mt-1 text-xs text-muted-foreground">
         Add labels of your own and the rule that files matching conversations
         into each one. Rules run from top to bottom; the first enabled match
-        wins. Each label has a name and a meaning the inbox shows under it.
-        Unmatched threads stay in their four label groups, and Done threads stay
-        in Done. Rules only change where a thread is listed, never its state or
-        AI classification.
+        wins. Each label has a name and a meaning the inbox shows under it. In
+        the inbox, drag a label by its handle to put it anywhere between the
+        four AI groups — or collapse it to keep the page short. A thread can
+        also be moved to a different label (or back to the rules) from its
+        right-click menu. Unlabelled threads stay in their four groups, and Done
+        threads stay in Done. Labels only change where a thread is listed, never
+        its state or AI classification.
       </p>
       {rules.length > 0 ? (
         <ol className="mt-3 space-y-2">

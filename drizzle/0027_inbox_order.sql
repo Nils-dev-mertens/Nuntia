@@ -1,0 +1,1 @@
+ALTER TABLE `app_settings` ADD `inbox_order` text;

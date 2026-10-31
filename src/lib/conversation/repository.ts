@@ -312,6 +312,7 @@ export async function saveConversation(
           // currently means.
           stateOverride: conversation.stateOverride?.state ?? null,
           stateOverrideMessageAt: conversation.stateOverride?.messageAt ?? null,
+          organizationGroupId: conversation.organizationGroupId,
           importanceOverride:
             conversation.importanceOverride?.importance ?? null,
           importanceOverrideMessageAt:
@@ -321,6 +322,7 @@ export async function saveConversation(
           // stored pair back on the object before saving, so a rebuild from Gmail
           // cannot un-read or un-finish a thread.
           seenAt: conversation.seenAt,
+          unread: conversation.unread ?? null,
           doneAt: conversation.done?.doneAt ?? null,
           doneMessageAt: conversation.done?.messageAt ?? null,
           decidedAt: now,
@@ -336,11 +338,13 @@ export async function saveConversation(
             stateOverride: conversation.stateOverride?.state ?? null,
             stateOverrideMessageAt:
               conversation.stateOverride?.messageAt ?? null,
+            organizationGroupId: conversation.organizationGroupId,
             importanceOverride:
               conversation.importanceOverride?.importance ?? null,
             importanceOverrideMessageAt:
               conversation.importanceOverride?.messageAt ?? null,
             seenAt: conversation.seenAt,
+            unread: conversation.unread ?? null,
             doneAt: conversation.done?.doneAt ?? null,
             doneMessageAt: conversation.done?.messageAt ?? null,
             isAutomated: conversation.isAutomated,
@@ -1237,6 +1241,7 @@ async function rowToConversation(
     // from before this column existed. `lastMessageAt` is the honest stand-in
     // for "when they said it" there, and it keeps the call live rather than
     // silently discarding it.
+    organizationGroupId: row.organizationGroupId ?? null,
     stateOverride: row.stateOverride
       ? {
           state: row.stateOverride,
@@ -1250,6 +1255,9 @@ async function rowToConversation(
         }
       : null,
     seenAt: row.seenAt,
+    // Null on a row written before the column existed; the callers that draw an
+    // unread mark fall back to `seenAt` then, so an upgrade reads as before.
+    unread: row.unread ?? null,
     // Not clamped to `lastMessageAt` here: a mark older than the newest message is
     // a thread that came back, and the reader has to see it as not done. The
     // clamping is `activeDone`'s job, so a caller that wants the raw stored mark
@@ -1288,6 +1296,31 @@ export async function setStateOverride(
         ...(override ? { state: override.state } : {}),
         updatedAt: new Date(),
       })
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
+  })
+}
+
+/**
+ * File a conversation under one of the user's custom labels, or hand it back to
+ * the rules with `null`.
+ *
+ * Only the column changes. The state, the Done mark and what has been read are
+ * untouched: moving a thread between labels is a filing decision, not a claim
+ * about what the mail needs.
+ */
+export async function setOrganizationGroup(
+  accountId: string,
+  providerThreadId: string,
+  organizationGroupId: string | null,
+): Promise<void> {
+  const id = conversationId(accountId, providerThreadId)
+
+  await withWriteLock(async () => {
+    await db
+      .update(conversations)
+      .set({ organizationGroupId, updatedAt: new Date() })
       .where(
         and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
       )
@@ -1337,6 +1370,7 @@ export async function setImportanceOverride(
 export type StoredUserFields = {
   stateOverride: StateOverride | null
   importanceOverride: ImportanceOverride | null
+  organizationGroupId: string | null
   seenAt: Date | null
   done: DoneMark | null
 }
@@ -1358,6 +1392,7 @@ export async function getStoredUserFields(
       stateOverrideMessageAt: conversations.stateOverrideMessageAt,
       importanceOverride: conversations.importanceOverride,
       importanceOverrideMessageAt: conversations.importanceOverrideMessageAt,
+      organizationGroupId: conversations.organizationGroupId,
       seenAt: conversations.seenAt,
       doneAt: conversations.doneAt,
       doneMessageAt: conversations.doneMessageAt,
@@ -1372,6 +1407,7 @@ export async function getStoredUserFields(
     return {
       stateOverride: null,
       importanceOverride: null,
+      organizationGroupId: null,
       seenAt: null,
       done: null,
     }
@@ -1390,6 +1426,7 @@ export async function getStoredUserFields(
         }
       : null,
     seenAt: found.seenAt,
+    organizationGroupId: found.organizationGroupId ?? null,
     done: found.doneAt
       ? {
           doneAt: found.doneAt,
@@ -1448,6 +1485,36 @@ export async function markConversationSeen(
     await db
       .update(conversations)
       .set({ seenAt: seenThrough, updatedAt: new Date() })
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
+  })
+}
+
+/**
+ * Store the mailbox's read flag for a thread, and keep the local mark in step.
+ *
+ * The two move together on purpose: the inbox reads `unread`, while the
+ * conversation view draws its "new messages" divider from `seenAt`. Writing one
+ * without the other would put a dot above a thread whose divider says it is all
+ * read. Marking read sets the high-water mark to now; marking unread clears it,
+ * so reopening the thread shows the whole thing as unread again.
+ */
+export async function setConversationUnread(
+  accountId: string,
+  providerThreadId: string,
+  unread: boolean,
+): Promise<void> {
+  const id = conversationId(accountId, providerThreadId)
+
+  await withWriteLock(async () => {
+    await db
+      .update(conversations)
+      .set({
+        unread,
+        seenAt: unread ? null : new Date(),
+        updatedAt: new Date(),
+      })
       .where(
         and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
       )

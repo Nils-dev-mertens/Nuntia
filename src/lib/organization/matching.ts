@@ -66,7 +66,11 @@ export function partitionOrganizationGroups<T extends OrganizationGroupedItem>(
     else ungrouped.push(item)
   }
 
-  return { groups: groups.filter((group) => group.items.length > 0), ungrouped, done }
+  return {
+    groups: groups.filter((group) => group.items.length > 0),
+    ungrouped,
+    done,
+  }
 }
 
 export type OrganizationRuleFacts = {
@@ -164,6 +168,30 @@ export function normaliseOrganizationRules(
   }
 
   return rules
+}
+
+/**
+ * Which custom label a conversation belongs to.
+ *
+ * The user's own move wins, and the rules are the fallback: a thread filed by
+ * hand stays where it was put even when a rule that also matches it exists. An
+ * assignment to a label that has since been deleted or disabled is ignored rather
+ * than honoured, so the thread lands somewhere instead of disappearing from every
+ * section.
+ */
+export function resolveOrganizationGroup(
+  assignedId: string | null,
+  facts: OrganizationRuleFacts,
+  rules: OrganizationRule[],
+): OrganizationRule | null {
+  if (assignedId) {
+    const assigned = rules.find(
+      (rule) => rule.id === assignedId && rule.enabled,
+    )
+    if (assigned) return assigned
+  }
+
+  return matchOrganizationRule(facts, rules)
 }
 
 /** Return the first matching enabled rule; caller owns ordering. */

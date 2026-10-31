@@ -4,6 +4,7 @@ import {
   matchOrganizationRule,
   normaliseOrganizationRules,
   partitionOrganizationGroups,
+  resolveOrganizationGroup,
 } from './matching.ts'
 import type { OrganizationRule } from './matching.ts'
 
@@ -15,7 +16,8 @@ const FACTS = {
 }
 
 function rule(
-  overrides: Partial<OrganizationRule> & Pick<OrganizationRule, 'field' | 'value'>,
+  overrides: Partial<OrganizationRule> &
+    Pick<OrganizationRule, 'field' | 'value'>,
 ): OrganizationRule {
   return {
     id: 'rule-1',
@@ -48,10 +50,10 @@ describe('normaliseOrganizationRules', () => {
   })
 
   test('defaults a missing meaning to empty and rejects an over-long one', () => {
-    const withoutMeaning = rule({ field: 'sender-domain', value: 'acme.example' }) as unknown as Record<
-      string,
-      unknown
-    >
+    const withoutMeaning = rule({
+      field: 'sender-domain',
+      value: 'acme.example',
+    }) as unknown as Record<string, unknown>
     delete withoutMeaning.description
 
     expect(normaliseOrganizationRules([withoutMeaning])).toEqual([
@@ -82,7 +84,10 @@ describe('normaliseOrganizationRules', () => {
     ).toBeNull()
     expect(
       normaliseOrganizationRules([
-        { ...rule({ field: 'sender-domain', value: 'acme.example' }), field: 'regex' },
+        {
+          ...rule({ field: 'sender-domain', value: 'acme.example' }),
+          field: 'regex',
+        },
       ]),
     ).toBeNull()
   })
@@ -102,9 +107,22 @@ describe('matchOrganizationRule', () => {
   })
 
   test('uses the first enabled match and ignores unmatched or disabled rules', () => {
-    const disabled = rule({ id: 'disabled', field: 'subject-contains', value: 'invoice', enabled: false })
-    const first = rule({ id: 'first', field: 'sender-domain', value: 'acme.example' })
-    const later = rule({ id: 'later', field: 'state-is', value: 'needs-action' })
+    const disabled = rule({
+      id: 'disabled',
+      field: 'subject-contains',
+      value: 'invoice',
+      enabled: false,
+    })
+    const first = rule({
+      id: 'first',
+      field: 'sender-domain',
+      value: 'acme.example',
+    })
+    const later = rule({
+      id: 'later',
+      field: 'state-is',
+      value: 'needs-action',
+    })
 
     expect(matchOrganizationRule(FACTS, [disabled, first, later])).toBe(first)
     expect(matchOrganizationRule(FACTS, [disabled])).toBeNull()
@@ -113,9 +131,17 @@ describe('matchOrganizationRule', () => {
   test('groups a conversation once and keeps Done outside custom groups', () => {
     const groupedRule = rule({ field: 'sender-domain', value: 'acme.example' })
     const items = [
-      { id: 'one', done: false, organizationGroup: { id: groupedRule.id, name: groupedRule.name } },
+      {
+        id: 'one',
+        done: false,
+        organizationGroup: { id: groupedRule.id, name: groupedRule.name },
+      },
       { id: 'two', done: false, organizationGroup: null },
-      { id: 'three', done: true, organizationGroup: { id: groupedRule.id, name: groupedRule.name } },
+      {
+        id: 'three',
+        done: true,
+        organizationGroup: { id: groupedRule.id, name: groupedRule.name },
+      },
     ]
 
     expect(partitionOrganizationGroups(items, [groupedRule])).toEqual({
@@ -125,6 +151,33 @@ describe('matchOrganizationRule', () => {
       ungrouped: [items[1]],
       done: [items[2]],
     })
+  })
+
+  test('the label the user moved a thread into outranks a rule that also matches', () => {
+    const finance = rule({ field: 'sender-domain', value: 'acme.example' })
+    const clients = { ...finance, id: 'rule-clients', name: 'Clients' }
+
+    expect(
+      resolveOrganizationGroup(clients.id, FACTS, [finance, clients]),
+    ).toBe(clients)
+    expect(resolveOrganizationGroup(null, FACTS, [finance, clients])).toBe(
+      finance,
+    )
+  })
+
+  test('an assignment to a label that is gone falls back to the rules', () => {
+    const finance = rule({ field: 'sender-domain', value: 'acme.example' })
+
+    expect(resolveOrganizationGroup('deleted-label', FACTS, [finance])).toBe(
+      finance,
+    )
+    // Disabled is gone as far as filing is concerned: the thread goes back to
+    // the rules rather than into a section nobody can see.
+    expect(
+      resolveOrganizationGroup(finance.id, FACTS, [
+        { ...finance, enabled: false },
+      ]),
+    ).toBeNull()
   })
 
   test('does not match a suffix domain or an absent topic', () => {

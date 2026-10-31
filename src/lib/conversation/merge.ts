@@ -523,6 +523,16 @@ function rebuildConversation(
     return newest
   }, null)
 
+  // The mailbox's read flag unions the same way, and in the other direction: a
+  // thread is unread when *any* copy of it is, because Gmail's flag on either
+  // mailbox is still Gmail's answer about the same mail. Null only when no
+  // source could say, so the merged row keeps the local fallback.
+  const unread = cluster.reduce<boolean | null>((state, source) => {
+    const sourceUnread = source.conversation.unread
+    if (sourceUnread === null) return state
+    return sourceUnread === true ? true : (state ?? false)
+  }, null)
+
   return {
     id: owner.conversation.id,
     providerThreadId: owner.conversation.providerThreadId,
@@ -547,6 +557,9 @@ function rebuildConversation(
 
     topic,
     goal,
+    // Where the user filed it is theirs, so the owning row's answer is carried
+    // rather than recomputed from the union.
+    organizationGroupId: owner.conversation.organizationGroupId,
 
     // Carried rather than re-derived, and nulled here when the union has moved
     // past it, so a reader of the merged row sees the same call (or the same
@@ -554,6 +567,7 @@ function rebuildConversation(
     stateOverride: override ? decided.stateOverride : null,
     importanceOverride,
     seenAt,
+    unread,
     done,
   }
 }

@@ -26,6 +26,7 @@ import {
   reanalyseConversation,
   reviewSentReply,
   setConversationDone,
+  setConversationUnread,
 } from '#/lib/gmail/service.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import type { ConversationState } from '#/db/schema.ts'
@@ -775,11 +776,22 @@ const markSeenAction = createServerFn({ method: 'POST' })
         data.providerThreadId,
         data.seenThrough,
       )
-      return { error: null }
     } catch (error) {
       console.error('[seen] marking the thread read failed:', error)
       return { error: 'Could not record that this thread was opened.' }
     }
+
+    // Opening the thread is reading it, and the mailbox holds the same idea: its
+    // unread flag is cleared too, so the dot does not come back on the next sync.
+    // Best-effort — a failure only costs the two disagreeing until the next
+    // open, and it must not turn a read into a visible error.
+    try {
+      await setConversationUnread(session.userId, data.providerThreadId, false)
+    } catch (error) {
+      console.error('[seen] clearing the mailbox unread flag failed:', error)
+    }
+
+    return { error: null }
   })
 
 export const Route = createFileRoute('/conversations/$providerThreadId')({

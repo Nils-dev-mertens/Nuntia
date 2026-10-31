@@ -204,6 +204,21 @@ export function createGmailApiClient(
       }
     },
 
+    async setThreadUnread(threadId, unread) {
+      // `threads.modify` applies the label change to every message in the
+      // thread, which is exactly what Gmail's own mark-as-read does. Removing
+      // the label is read; adding it is unread.
+      await req(() =>
+        gmail.users.threads.modify({
+          userId: 'me',
+          id: threadId,
+          requestBody: unread
+            ? { addLabelIds: ['UNREAD'] }
+            : { removeLabelIds: ['UNREAD'] },
+        }),
+      )
+    },
+
     async listHistory({ startHistoryId, pageToken }) {
       const data = await req(() =>
         gmail.users.history.list({

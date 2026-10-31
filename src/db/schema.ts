@@ -260,6 +260,17 @@ export const conversations = sqliteTable(
       .notNull()
       .default(false),
     /**
+     * The user's own filing: the custom label they moved this thread into, or
+     * null when the rules still decide.
+     *
+     * Stored as the rule's id rather than its name, so renaming a label moves
+     * every thread with it. A label that has since been deleted or disabled
+     * stops matching here and the thread falls back to the rules — losing a label
+     * must not strand the conversation outside every section.
+     */
+    organizationGroupId: text('organization_group_id'),
+
+    /**
      * The user's own call on the state, or null when they have made none.
      *
      * The one derived-looking column a decision layer is not allowed to write.
@@ -314,6 +325,17 @@ export const conversations = sqliteTable(
      * mail can never be mistaken for having dealt with it.
      */
     seenAt: integer('seen_at', { mode: 'timestamp_ms' }),
+
+    /**
+     * The mailbox's own read flag for this thread: true while it still holds
+     * mail the provider counts as unread (Gmail's `UNREAD` label).
+     *
+     * Provider truth rather than user state, so it is rewritten by every sync —
+     * reading the mail in Gmail itself has to clear the dot here too. Null means
+     * the row was written before this column existed; the inbox falls back to
+     * `seen_at` there, so upgrading does not mark a whole mailbox read.
+     */
+    unread: integer('unread', { mode: 'boolean' }),
 
     /**
      * The user's own "done" mark: when they said this thread was handled, and the
@@ -821,6 +843,16 @@ export const appSettings = sqliteTable(
     useGravatar: integer('use_gravatar', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * The user's chosen inbox section order: a flat list of tokens, either
+     * `state:<state>` or `label:<rule id>`. Null until they arrange it.
+     *
+     * Stored here rather than as a position on the rules because the order spans
+     * both the four AI groups and the custom labels — a label sitting between two
+     * states cannot be expressed as a rule's position among rules. Done is never
+     * in the list: a finished thread is always last.
+     */
+    inboxOrder: text('inbox_order', { mode: 'json' }).$type<string[]>(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),

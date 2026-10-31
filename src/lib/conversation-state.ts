@@ -56,7 +56,8 @@ export const STATE_ORDER: ConversationState[] = [
 export const READ_META = {
   label: 'New',
   /** The dot's tooltip, and its accessible name. */
-  description: 'Mail you have not opened yet. Opening the thread clears it.',
+  description:
+    'Mail your mailbox still counts as unread. Opening the thread marks it read; the row menu can mark it unread again.',
 } as const
 
 export const DONE_META = {
@@ -78,8 +79,8 @@ export const DONE_GROUP = {
     'Handled by you, so no longer among the work below. The state each thread had is kept and shown faintly — new mail moves it back by itself.',
 } as const
 
-export function isConversationState(value: unknown): value is ConversationState {
-  return (
-    typeof value === 'string' && value in STATE_META
-  )
+export function isConversationState(
+  value: unknown,
+): value is ConversationState {
+  return typeof value === 'string' && value in STATE_META
 }

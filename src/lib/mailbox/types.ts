@@ -183,6 +183,15 @@ export interface MailboxClient {
   getEmailAddress: () => Promise<string>
 
   /**
+   * Set the mailbox's own read flag for a whole thread.
+   *
+   * Optional like the send methods: Gmail has a thread-level label change,
+   * while Graph has no thread object to address, so a provider that cannot
+   * express it says so by not implementing it rather than pretending.
+   */
+  setThreadUnread?: (threadId: string, unread: boolean) => Promise<void>
+
+  /**
    * Send a raw RFC 5322 message.
    *
    * Only the Gmail adapter implements this: Graph has no raw-MIME send that

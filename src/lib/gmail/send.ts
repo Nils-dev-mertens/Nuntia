@@ -276,7 +276,7 @@ export async function refreshThread(
     saveConversation,
   } = await import('#/lib/conversation/index.ts')
 
-  const { toParsedMessage, toThreadAttachmentRefs } =
+  const { isUnread, toParsedMessage, toThreadAttachmentRefs } =
     await import('#/lib/mailbox/message.ts')
 
   const profileContext = await getParsingProfileContext(accountId)
@@ -288,6 +288,10 @@ export async function refreshThread(
     // and since saving replaces the messages wholesale, the attachment rows
     // went with them and the chips vanished until a later sync restored them.
     attachments: toThreadAttachmentRefs(relevant, parsed),
+    // Read state from the labels, exactly as a sync reads it: the reply just sent
+    // is read, and anything the other side sent that Gmail still counts as
+    // unread keeps the thread unread.
+    unread: relevant.some(isUnread),
     ...profileContext,
   })
 

@@ -60,6 +60,8 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     stateOverride: overrides.stateOverride ?? null,
     importanceOverride: overrides.importanceOverride ?? null,
     seenAt: overrides.seenAt ?? null,
+    unread: overrides.unread ?? null,
+    organizationGroupId: overrides.organizationGroupId ?? null,
     done: overrides.done ?? null,
   }
 }

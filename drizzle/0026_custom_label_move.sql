@@ -1,0 +1,1 @@
+ALTER TABLE `conversations` ADD `organization_group_id` text;

@@ -48,6 +48,8 @@ import {
   replyDraftEligibility,
   resolveReplyStyle,
   setConversationDone as applyDoneMark,
+  setConversationUnread as applyUnreadMark,
+  setOrganizationGroup as applyOrganizationGroup,
   unseenMessages,
   listIgnoredSenders,
   listUnreplyableSenders,
@@ -90,7 +92,8 @@ import {
   listStateLabels,
 } from '#/lib/organization/store.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
-import { matchOrganizationRule } from '#/lib/organization/matching.ts'
+import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
+import { resolveOrganizationGroup } from '#/lib/organization/matching.ts'
 import type { OrganizationRule } from '#/lib/organization/matching.ts'
 import {
   downloadAttachment,
@@ -159,9 +162,13 @@ export type ConversationSummary = {
   importance: number
   urgency: number
   /**
-   * Incoming mail the user has not opened yet. Drives the unread dot, and it is
-   * the *only* thing that marks a row as new: a thread they have read but not
+   * Mail the mailbox still counts as unread. Drives the dot, and it is the
+   * *only* thing that marks a row as new: a thread they have read but not
    * answered is not new, and is not done either.
+   *
+   * Gmail's own flag when the thread has been synced since it was stored —
+   * reading the mail in Gmail clears it here too. Older rows fall back to what
+   * the user has opened in Nuntia, so an upgrade does not light up a mailbox.
    */
   unseen: boolean
   /** Their own Done mark is live for this thread. */
@@ -170,7 +177,10 @@ export type ConversationSummary = {
   preview: string | null
   /** User-authored contact importance rating, when the correspondent is rated. */
   senderImportance: number | null
-  /** Custom section assigned by the user's first matching organization rule. */
+  /**
+   * The custom label this thread is filed under: the label the user moved it
+   * into when they made a move, otherwise the first matching rule.
+   */
   organizationGroup: { id: string; name: string } | null
 }
 
@@ -191,6 +201,11 @@ export type InboxPayload =
       counts: Record<ConversationState, number>
       /** Ordered user-defined rules used to create custom inbox sections. */
       organizationRules: OrganizationRule[]
+      /**
+       * The user's section order: `state:<state>` and `label:<rule id>` tokens.
+       * Done is not in it — a finished thread is always the last section.
+       */
+      inboxOrder: string[]
       /**
        * The four state labels' names and meanings, as this user reads them.
        * Defaults where they never edited one; see `listStateLabels`.
@@ -822,6 +837,75 @@ export async function markConversationSeen(
     providerThreadId,
   )
   await applySeenMark(accountId, conversation.providerThreadId, at)
+}
+
+/**
+ * Mark a thread read or unread, at the mailbox and locally.
+ *
+ * The provider call comes first: if Gmail refuses, nothing local is written and
+ * the row keeps showing the truth the list had. That order is the point of the
+ * action — the two mailboxes stay in step, so reading the mail in Gmail later
+ * does not quietly undo the mark.
+ *
+ * Already in the asked-for state, the provider call is skipped and only the
+ * local mark is refreshed; otherwise every thread opened in Nuntia would cost a
+ * Gmail write on each visit.
+ */
+export async function setConversationUnread(
+  userId: string,
+  providerThreadId: string,
+  unread: boolean,
+): Promise<void> {
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+
+  if (conversation.unread !== unread) {
+    const client = await createMailboxClientFor(accountId)
+    if (!client || !client.setThreadUnread) {
+      throw new Error(
+        'This mailbox does not support marking mail read or unread.',
+      )
+    }
+
+    await client.setThreadUnread(conversation.providerThreadId, unread)
+  }
+
+  await applyUnreadMark(accountId, conversation.providerThreadId, unread)
+}
+
+/**
+ * File a thread under one of the user's custom labels, or hand it back to the
+ * rules with `null`.
+ *
+ * A local write: a custom label is Nuntia's own filing, not something Gmail
+ * knows about. The id arrives from the browser, so it is checked against the
+ * user's own rules here — an unknown label is refused rather than stored, or the
+ * thread would vanish from every section.
+ */
+export async function setConversationOrganizationGroup(
+  userId: string,
+  providerThreadId: string,
+  groupId: string | null,
+): Promise<void> {
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+
+  if (groupId !== null) {
+    const rules = await listOrganizationRules(userId)
+    if (!rules.some((rule) => rule.id === groupId && rule.enabled)) {
+      throw new Error('That label no longer exists.')
+    }
+  }
+
+  await applyOrganizationGroup(
+    accountId,
+    conversation.providerThreadId,
+    groupId,
+  )
 }
 
 /**
@@ -1574,7 +1658,10 @@ function toSummary(
 ): ConversationSummary {
   const conversation = merged.conversation
 
-  const matchedRule = matchOrganizationRule(
+  // The user's own move wins; the rules are the fallback, so a thread they filed
+  // by hand stays where they put it.
+  const matchedRule = resolveOrganizationGroup(
+    conversation.organizationGroupId,
     {
       senderEmail: otherPartyOf(conversation),
       subject: conversation.subject,
@@ -1607,7 +1694,7 @@ function toSummary(
     goal: conversation.goal,
     importance: conversation.importance,
     urgency: conversation.urgency,
-    unseen: unseenMessages(conversation).length > 0,
+    unseen: conversation.unread ?? unseenMessages(conversation).length > 0,
     done: activeDone(conversation) !== null,
     preview: previewOf(conversation),
     senderImportance: contactImportance.get(otherPartyOf(conversation)) ?? null,
@@ -1833,6 +1920,14 @@ export async function loadInbox(
     ],
   )
 
+  // The section order, made valid for the labels this user has now: a deleted
+  // label's token is dropped and a new one appended, so an old order can never
+  // hide a section.
+  const inboxOrder = resolveInboxOrder(
+    preferences.inboxOrder,
+    organizationRules.filter((rule) => rule.enabled).map((rule) => rule.id),
+  )
+
   // The list is grouped by state in the UI, but ordering within a group is by
   // activity, and the union is not sorted by construction.
   matched.sort(
@@ -1846,6 +1941,7 @@ export async function loadInbox(
     microsoftConfigured: isMicrosoftConfigured(),
     accounts,
     organizationRules,
+    inboxOrder,
     stateLabels,
     conversations: matched.map((row) =>
       toSummary(

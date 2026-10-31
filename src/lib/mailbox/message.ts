@@ -384,3 +384,13 @@ export function isDraft(message: ProviderMessage): boolean {
 export function isTrashed(message: ProviderMessage): boolean {
   return message.labelIds.includes('TRASHED')
 }
+
+/**
+ * True while the mailbox still counts this message as unread.
+ *
+ * Gmail reports read state as the presence of `UNREAD` on each message rather
+ * than on the thread, so a thread is unread when any of its messages carries it.
+ */
+export function isUnread(message: ProviderMessage): boolean {
+  return message.labelIds.includes('UNREAD')
+}

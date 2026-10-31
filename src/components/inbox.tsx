@@ -5,9 +5,9 @@
  * what needs doing comes first, and time is secondary.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
-import { Check } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, GripVertical } from 'lucide-react'
 
 import type { ConversationState } from '#/db/schema.ts'
 import type {
@@ -27,6 +27,7 @@ import { cn } from '#/lib/utils'
 import { Link } from '@tanstack/react-router'
 import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
+import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
 import { partitionOrganizationGroups } from '#/lib/organization/matching.ts'
 
 const MINUTE = 60_000
@@ -53,6 +54,8 @@ type InboxSection = {
   dotClass: string
   /** Done is a filing decision rather than a label, so its heading stays quiet. */
   muted?: boolean
+  /** A custom label, dropped into the order wherever the user wants it. */
+  custom?: boolean
 }
 
 /**
@@ -1222,6 +1225,9 @@ export function Inbox({
   onSetState,
   onSetDoneMany,
   onSetStateMany,
+  onSetUnread,
+  onSetOrganizationGroup,
+  onReorderSections,
   onPreview,
 }: {
   payload: InboxPayload
@@ -1274,6 +1280,29 @@ export function Inbox({
     providerThreadIds: string[],
     state: ConversationState | null,
   ) => Promise<{ error: string | null }>
+  /**
+   * Set the mailbox's own read flag for one or more threads.
+   *
+   * Optional like the rest: rendered in isolation there is no provider to
+   * write to. Offered only for Gmail rows, because Graph has no thread-level
+   * read flag to set — the item would be a control that cannot act.
+   */
+  onSetUnread?: (
+    providerThreadIds: string[],
+    unread: boolean,
+  ) => Promise<{ error: string | null }>
+  /**
+   * File threads under a custom label, or hand them back to the rules with
+   * `null`. Optional like the rest: rendered in isolation there is no server.
+   */
+  onSetOrganizationGroup?: (
+    providerThreadIds: string[],
+    groupId: string | null,
+  ) => Promise<{ error: string | null }>
+  /** Save the inbox section order after a drag; resolves with the stored order. */
+  onReorderSections?: (
+    order: string[],
+  ) => Promise<{ error: string | null; order?: string[] }>
 }) {
   // Hooks run before the signed-out early return, so the hook order is stable.
   const [resyncing, setResyncing] = useState(false)
@@ -1294,6 +1323,20 @@ export function Inbox({
   const [expandedSections, setExpandedSections] = useState<
     Record<string, boolean>
   >({})
+  // A custom label's rows are hidden until opened again. Kept per label rather
+  // than per section key so reordering the labels does not lose the choice.
+  const [collapsedLabels, setCollapsedLabels] = useState<
+    Record<string, boolean>
+  >({})
+  // The section order on screen. Seeded from the loader and replaced only by a
+  // completed drag, so a refused save can snap back to what was stored.
+  const [order, setOrder] = useState<string[]>(
+    payload.signedIn ? payload.inboxOrder : [],
+  )
+  const [dragKey, setDragKey] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
+  const [savingOrder, setSavingOrder] = useState(false)
+  const [orderError, setOrderError] = useState<string | null>(null)
   // The row the context menu belongs to, plus where it was opened. The
   // coordinates are viewport-based because the menu is `position: fixed`.
   const [menu, setMenu] = useState<{
@@ -1411,7 +1454,7 @@ export function Inbox({
   ) => {
     event.preventDefault()
     const width = 240
-    const height = 320
+    const height = 440
     setMenuError(null)
     setMenu({
       conversation,
@@ -1594,6 +1637,48 @@ export function Inbox({
     }
   }
 
+  /**
+   * Drop a label section at a new place in the order.
+   *
+   * `beforeKey` is the section it was dropped on, or null for the end of the
+   * list. The move is applied locally first so the list reorders under the
+   * pointer; a refused save puts the previous order back with the reason.
+   */
+  const dropSection = async (draggedKey: string, beforeKey: string | null) => {
+    if (!onReorderSections || savingOrder) return
+    if (beforeKey === draggedKey) return
+
+    const previous = order
+    const next = [...previous]
+    const from = next.indexOf(draggedKey)
+    if (from === -1) return
+    next.splice(from, 1)
+    // `done` is not in the token list: dropping on it means the end.
+    const to = beforeKey ? next.indexOf(beforeKey) : -1
+    next.splice(to === -1 ? next.length : to, 0, draggedKey)
+    if (next.join('|') === previous.join('|')) return
+
+    setOrder(next)
+    setSavingOrder(true)
+    setOrderError(null)
+    try {
+      const result = await onReorderSections(next)
+      if (result.error) {
+        setOrder(previous)
+        setOrderError(result.error)
+        return
+      }
+      if (result.order) setOrder(result.order)
+    } catch {
+      setOrder(previous)
+      setOrderError('Could not save the new order.')
+    } finally {
+      setSavingOrder(false)
+      setDragKey(null)
+      setDropTarget(null)
+    }
+  }
+
   // Bound to locals so the closures below keep the non-null narrowing.
   const doneMany = onSetDoneMany
   const stateMany = onSetStateMany
@@ -1741,6 +1826,14 @@ export function Inbox({
   const searchActive = searchQuery.length > 0
   const visibleConversations = searchResults?.conversations ?? conversations
   const stateLabels = payload.stateLabels
+  // Which provider each mailbox is: the read toggle is offered only where the
+  // provider can express a thread-level flag (Gmail), not on every row.
+  const providerByAccount = new Map(
+    accounts.map((account) => [account.id, account.provider]),
+  )
+  // Only enabled labels are places to move a thread *into*; a disabled rule
+  // cannot receive mail, so offering it would create a section nobody can see.
+  const customLabels = payload.organizationRules.filter((rule) => rule.enabled)
 
   // Counted from the rows being rendered rather than taken from the payload, so
   // the headings agree with a search's results rather than with the whole
@@ -1749,34 +1842,60 @@ export function Inbox({
     visibleConversations,
     payload.organizationRules,
   )
-  const stateCounts = Object.fromEntries(
-    STATE_ORDER.map((state) => [
-      state,
-      organizationGroups.ungrouped.filter(
-        (conversation) => conversation.state === state,
-      ).length,
-    ]),
-  ) as Record<ConversationState, number>
-  const visibleStates = STATE_ORDER.filter((state) => stateCounts[state] > 0)
   const done = organizationGroups.done
 
-  // One shape for every group, so the heading, the meaning, the cap and the
-  // filter behave the same whether the label is built in or the user's own.
-  const sections: InboxSection[] = [
-    ...organizationGroups.groups.map((group) => ({
-      key: `label:${group.id}`,
+  /** One section in the shape the list renders: heading, meaning, dot, rows. */
+  const stateSection = (
+    state: ConversationState,
+    items: ConversationSummary[],
+  ): InboxSection => ({
+    key: `state:${state}`,
+    title: stateLabels[state].name,
+    description: stateLabels[state].description || null,
+    dotClass: STATE_META[state].dotClass,
+    items,
+  })
+
+  // Every section is a peer: the user's order decides whether a custom label sits
+  // before Needs action, between it and Waiting for reply, or after Informational.
+  // A labelled thread is still listed only in its label — the label outranks the
+  // automatic group, which is what makes moving it mean something.
+  const sectionsByToken = new Map<string, InboxSection>()
+
+  for (const state of STATE_ORDER) {
+    const items = byState(organizationGroups.ungrouped, state).sort(
+      byImportance,
+    )
+    if (items.length === 0) continue
+    const section = stateSection(state, items)
+    sectionsByToken.set(section.key, section)
+  }
+
+  for (const group of organizationGroups.groups) {
+    const key = `label:${group.id}`
+    sectionsByToken.set(key, {
+      key,
       title: group.name,
       description: group.description || null,
       dotClass: 'bg-foreground/30',
       items: [...group.items].sort(byImportance),
-    })),
-    ...visibleStates.map((state) => ({
-      key: `state:${state}`,
-      title: stateLabels[state].name,
-      description: stateLabels[state].description || null,
-      dotClass: STATE_META[state].dotClass,
-      items: byState(organizationGroups.ungrouped, state).sort(byImportance),
-    })),
+      custom: true,
+    })
+  }
+
+  // The stored order is the user's arrangement. Anything in it with no rows — a
+  // label whose mail is all handled, a state with nothing in it — simply has
+  // nothing to render.
+  const orderedSections = resolveInboxOrder(
+    order,
+    customLabels.map((rule) => rule.id),
+  ).flatMap((token) => {
+    const section = sectionsByToken.get(token)
+    return section ? [section] : []
+  })
+
+  const sections: InboxSection[] = [
+    ...orderedSections,
     ...(done.length > 0
       ? [
           {
@@ -1819,6 +1938,35 @@ export function Inbox({
       : section.items.slice(0, SECTION_PAGE_SIZE)
     return items.map((conversation) => conversation.providerThreadId)
   })
+  const hasDoneSection = shownSections.some((section) => section.key === 'done')
+  const draggedSectionTitle =
+    sections.find((section) => section.key === dragKey)?.title ?? 'this label'
+
+  /**
+   * The strip shown while a label is being dragged: dropping here puts it at the
+   * end of the configurable order, which is just above Done.
+   */
+  const endDropZone = dragKey ? (
+    <div
+      onDragOver={(event) => {
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+        setDropTarget('__end__')
+      }}
+      onDrop={(event) => {
+        event.preventDefault()
+        void dropSection(dragKey, null)
+      }}
+      className={cn(
+        'rounded-lg border border-dashed px-3 py-3 text-center text-xs',
+        dropTarget === '__end__'
+          ? 'border-primary text-foreground'
+          : 'border-border text-muted-foreground',
+      )}
+    >
+      Drop here to put “{draggedSectionTitle}” at the end
+    </div>
+  ) : null
 
   return (
     <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]">
@@ -1836,7 +1984,7 @@ export function Inbox({
               aria-hidden="true"
               className="mr-1.5 inline-block size-2 rounded-full bg-primary align-middle"
             />
-            {READ_META.label} — mail you have not opened.{' '}
+            {READ_META.label} — mail you have not read.{' '}
             <span className="font-medium text-foreground">
               {DONE_META.label}
             </span>{' '}
@@ -2001,6 +2149,32 @@ export function Inbox({
                   : 'Mark as done'}
             </button>
           ) : null}
+          {/*
+           * Read state lives in the mailbox, not here, so this one talks to
+           * Gmail — and the wording follows the row rather than the app: "mark
+           * as read" is what Gmail itself would say.
+           */}
+          {onSetUnread &&
+          providerByAccount.get(menu.conversation.accountId) === 'google' ? (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={menuBusy}
+              onClick={() =>
+                void runMenuAction(
+                  (ids) => onSetUnread(ids, !menu.conversation.unseen),
+                  menuTargetIds,
+                )
+              }
+              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+            >
+              {menuTargetIds.length > 1
+                ? `Mark ${menuTargetIds.length} as ${menu.conversation.unseen ? 'read' : 'unread'}`
+                : menu.conversation.unseen
+                  ? 'Mark as read'
+                  : 'Mark as unread'}
+            </button>
+          ) : null}
           {onSetState || stateMany ? (
             <>
               <div className="my-1 h-px bg-border" />
@@ -2057,6 +2231,71 @@ export function Inbox({
                 {menuTargetIds.length > 1
                   ? 'Use automatic label for all'
                   : 'Use automatic label'}
+              </button>
+            </>
+          ) : null}
+          {/*
+           * Custom labels are the user's own sections, and this is how a thread
+           * moves between them. "Automatic" hands it back to the rules rather
+           * than to a particular label, which is the only way to undo a move on a
+           * thread a rule also matches.
+           */}
+          {onSetOrganizationGroup && customLabels.length > 0 ? (
+            <>
+              <div className="my-1 h-px bg-border" />
+              <p className="px-2.5 pt-1 pb-1 text-[11px] tracking-wide text-muted-foreground uppercase">
+                {menuTargetIds.length > 1
+                  ? `Move ${menuTargetIds.length} to label`
+                  : 'Move to label'}
+              </p>
+              {customLabels.map((label) => (
+                <button
+                  key={label.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={
+                    menu.conversation.organizationGroup?.id === label.id
+                  }
+                  disabled={menuBusy}
+                  onClick={() =>
+                    void runMenuAction(
+                      (ids) => onSetOrganizationGroup(ids, label.id),
+                      menuTargetIds,
+                    )
+                  }
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50',
+                    menu.conversation.organizationGroup?.id === label.id &&
+                      'font-semibold',
+                  )}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="size-1.5 shrink-0 rounded-full bg-foreground/30"
+                  />
+                  <span className="truncate">{label.name}</span>
+                  {menu.conversation.organizationGroup?.id === label.id ? (
+                    <span className="ml-auto text-[10px] text-muted-foreground">
+                      now
+                    </span>
+                  ) : null}
+                </button>
+              ))}
+              <button
+                type="button"
+                role="menuitem"
+                disabled={menuBusy}
+                onClick={() =>
+                  void runMenuAction(
+                    (ids) => onSetOrganizationGroup(ids, null),
+                    menuTargetIds,
+                  )
+                }
+                className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+              >
+                {menuTargetIds.length > 1
+                  ? 'Automatic for all (from rules)'
+                  : 'Automatic (from rules)'}
               </button>
             </>
           ) : null}
@@ -2356,6 +2595,12 @@ export function Inbox({
             </div>
           ) : null}
 
+          {orderError ? (
+            <p role="alert" className="mt-3 text-[11px] text-destructive">
+              {orderError}
+            </p>
+          ) : null}
+
           {sections.some((section) => !section.muted) ? (
             <p className="mt-3 text-[11px] text-muted-foreground">
               Sorted by importance, highest first, then newest.
@@ -2410,91 +2655,197 @@ export function Inbox({
               const shown = showsAll
                 ? section.items
                 : section.items.slice(0, SECTION_PAGE_SIZE)
+              // Only a custom label folds: the state sections are the page's
+              // spine, and hiding one of them would hide work silently.
+              const collapsed =
+                section.custom === true && collapsedLabels[section.key] === true
 
               return (
-                <section key={section.key}>
-                  <div className="mb-1 flex items-baseline justify-between gap-4">
-                    <h2
-                      className={cn(
-                        'text-sm font-semibold tracking-wide uppercase',
-                        section.muted
-                          ? 'text-muted-foreground'
-                          : 'text-foreground',
-                      )}
-                    >
-                      {section.title}
-                    </h2>
-                    <span className="text-xs text-muted-foreground">
-                      {section.items.length}
-                    </span>
-                  </div>
-                  {/* The label's meaning, in the user's words — the reason a
-                      section explains itself rather than only naming itself. */}
-                  {section.description ? (
-                    <p className="mb-3 text-xs text-muted-foreground">
-                      {section.description}
-                    </p>
-                  ) : (
-                    <div className="mb-3" />
-                  )}
-
-                  <ul className="space-y-3">
-                    {shown.map((conversation) =>
-                      // Same feed, same grouping — only the presentation differs.
-                      // A failed build is still `needs-action`; it just is not a
-                      // chat.
-                      conversation.isAutomated ? (
-                        <AutomatedRow
-                          key={conversation.id}
-                          conversation={conversation}
-                          showAccount={accounts.length > 1}
-                          onRowMenu={openRowMenu}
-                          onRowPreview={showPreview}
-                          active={preview?.id === conversation.providerThreadId}
-                          selectable={selectable}
-                          selected={selected.has(conversation.providerThreadId)}
-                          showSelector={showSelectors}
-                          onSelect={selectRow}
-                        />
-                      ) : (
-                        <ConversationRow
-                          key={conversation.id}
-                          conversation={conversation}
-                          stateLabel={stateLabels[conversation.state].name}
-                          showAccount={accounts.length > 1}
-                          onRowMenu={openRowMenu}
-                          onRowPreview={showPreview}
-                          active={preview?.id === conversation.providerThreadId}
-                          selectable={selectable}
-                          selected={selected.has(conversation.providerThreadId)}
-                          showSelector={showSelectors}
-                          onSelect={selectRow}
-                        />
-                      ),
+                <Fragment key={section.key}>
+                  {dragKey && section.key === 'done' ? endDropZone : null}
+                  <section
+                    onDragOver={(event) => {
+                      if (!dragKey || dragKey === section.key) return
+                      event.preventDefault()
+                      event.dataTransfer.dropEffect = 'move'
+                      setDropTarget(section.key)
+                    }}
+                    onDragLeave={(event) => {
+                      const next = event.relatedTarget as Node | null
+                      if (next && event.currentTarget.contains(next)) return
+                      setDropTarget((current) =>
+                        current === section.key ? null : current,
+                      )
+                    }}
+                    onDrop={(event) => {
+                      if (!dragKey) return
+                      event.preventDefault()
+                      void dropSection(dragKey, section.key)
+                    }}
+                    className={cn(
+                      dropTarget === section.key &&
+                        dragKey !== section.key &&
+                        'border-t-2 border-primary pt-2',
                     )}
-                  </ul>
+                  >
+                    <div className="mb-1 flex items-center justify-between gap-4">
+                      {section.custom ? (
+                        <div className="flex min-w-0 items-center gap-1">
+                          {onReorderSections ? (
+                            <span
+                              draggable
+                              onDragStart={(event) => {
+                                event.dataTransfer.effectAllowed = 'move'
+                                event.dataTransfer.setData(
+                                  'text/plain',
+                                  section.key,
+                                )
+                                setDragKey(section.key)
+                                setDropTarget(null)
+                                setOrderError(null)
+                              }}
+                              onDragEnd={() => {
+                                setDragKey(null)
+                                setDropTarget(null)
+                              }}
+                              title="Drag to reorder this label"
+                              aria-hidden="true"
+                              className={cn(
+                                'shrink-0 cursor-grab text-muted-foreground/70 hover:text-foreground active:cursor-grabbing',
+                                dragKey === section.key && 'text-foreground',
+                              )}
+                            >
+                              <GripVertical className="size-3.5" />
+                            </span>
+                          ) : null}
+                          <button
+                            type="button"
+                            aria-expanded={!collapsed}
+                            onClick={() =>
+                              setCollapsedLabels((current) => ({
+                                ...current,
+                                [section.key]: current[section.key] !== true,
+                              }))
+                            }
+                            className="flex min-w-0 items-center gap-1 text-xs font-semibold tracking-wide text-foreground/80 uppercase hover:text-foreground"
+                          >
+                            {collapsed ? (
+                              <ChevronRight
+                                aria-hidden="true"
+                                className="size-3.5 shrink-0"
+                              />
+                            ) : (
+                              <ChevronDown
+                                aria-hidden="true"
+                                className="size-3.5 shrink-0"
+                              />
+                            )}
+                            <span className="truncate">{section.title}</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <h2
+                          className={cn(
+                            'text-sm font-semibold tracking-wide uppercase',
+                            section.muted
+                              ? 'text-muted-foreground'
+                              : 'text-foreground',
+                          )}
+                        >
+                          {section.title}
+                        </h2>
+                      )}
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {savingOrder ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            Saving…
+                          </span>
+                        ) : null}
+                        <span className="text-xs text-muted-foreground tabular-nums">
+                          {section.items.length}
+                        </span>
+                      </div>
+                    </div>
+                    {/* The label's meaning, in the user's words — the reason a
+                      section explains itself rather than only naming itself. */}
+                    {collapsed ? null : section.description ? (
+                      <p className="mb-3 text-xs text-muted-foreground">
+                        {section.description}
+                      </p>
+                    ) : (
+                      <div className="mb-3" />
+                    )}
 
-                  {!isFiltered &&
-                  !searchActive &&
-                  section.items.length > SECTION_PAGE_SIZE ? (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setExpandedSections((current) => ({
-                          ...current,
-                          [section.key]: current[section.key] !== true,
-                        }))
-                      }
-                      className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
-                    >
-                      {expandedSections[section.key]
-                        ? 'Show fewer'
-                        : `Show all ${section.items.length}`}
-                    </button>
-                  ) : null}
-                </section>
+                    {collapsed ? null : (
+                      <ul className="space-y-3">
+                        {shown.map((conversation) =>
+                          // Same feed, same grouping — only the presentation differs.
+                          // A failed build is still `needs-action`; it just is not a
+                          // chat.
+                          conversation.isAutomated ? (
+                            <AutomatedRow
+                              key={conversation.id}
+                              conversation={conversation}
+                              showAccount={accounts.length > 1}
+                              onRowMenu={openRowMenu}
+                              onRowPreview={showPreview}
+                              active={
+                                preview?.id === conversation.providerThreadId
+                              }
+                              selectable={selectable}
+                              selected={selected.has(
+                                conversation.providerThreadId,
+                              )}
+                              showSelector={showSelectors}
+                              onSelect={selectRow}
+                            />
+                          ) : (
+                            <ConversationRow
+                              key={conversation.id}
+                              conversation={conversation}
+                              stateLabel={stateLabels[conversation.state].name}
+                              showAccount={accounts.length > 1}
+                              onRowMenu={openRowMenu}
+                              onRowPreview={showPreview}
+                              active={
+                                preview?.id === conversation.providerThreadId
+                              }
+                              selectable={selectable}
+                              selected={selected.has(
+                                conversation.providerThreadId,
+                              )}
+                              showSelector={showSelectors}
+                              onSelect={selectRow}
+                            />
+                          ),
+                        )}
+                      </ul>
+                    )}
+
+                    {!collapsed &&
+                    !isFiltered &&
+                    !searchActive &&
+                    section.items.length > SECTION_PAGE_SIZE ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedSections((current) => ({
+                            ...current,
+                            [section.key]: current[section.key] !== true,
+                          }))
+                        }
+                        className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
+                      >
+                        {expandedSections[section.key]
+                          ? 'Show fewer'
+                          : `Show all ${section.items.length}`}
+                      </button>
+                    ) : null}
+                  </section>
+                </Fragment>
               )
             })}
+            {dragKey && !hasDoneSection ? endDropZone : null}
           </div>
         </div>
 

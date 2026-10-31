@@ -14,6 +14,7 @@ import type { MailboxClient, ProviderMessage, ProviderThread } from './types.ts'
 import {
   isDraft,
   isTrashed,
+  isUnread,
   toParsedMessage,
   toThreadAttachmentRefs,
 } from '#/lib/mailbox/message.ts'
@@ -389,6 +390,9 @@ export async function syncThread(
       ownerEmail: accountId,
       providerThreadId: thread.id,
       attachments,
+      // The mailbox's own read flag: any message still carrying Gmail's `UNREAD`
+      // label makes the thread unread, which is how Gmail reports it too.
+      unread: messages.some(isUnread),
       ...profileContext,
     })
 

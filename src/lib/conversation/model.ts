@@ -332,6 +332,16 @@ export type Conversation = {
   stateOverride: StateOverride | null
 
   /**
+   * The custom label the user moved this thread into, or null when the rules
+   * still decide where it is filed. See `resolveOrganizationGroup`.
+   *
+   * Theirs rather than the rules', like `stateOverride`: a manual move has to
+   * outlive every sync and every re-decide, so it is stored on the row and put
+   * back on a rebuilt conversation by `getStoredUserFields`.
+   */
+  organizationGroupId: string | null
+
+  /**
    * The user's own score for this thread, or null when the decision layer's
    * stands.
    *
@@ -350,6 +360,18 @@ export type Conversation = {
    * state or the Done mark.
    */
   seenAt: Date | null
+
+  /**
+   * Whether the mailbox itself still counts this thread as unread — Gmail's
+   * `UNREAD` label. Refreshed from the provider on every sync, because the user
+   * may read the mail somewhere else.
+   *
+   * Null when the provider could not say (a row written before this column
+   * existed), and the inbox falls back to `seenAt` then. This is the mailbox's
+   * answer, not the user's: `setConversationUnread` moves it and `seenAt`
+   * together, so the dot and the conversation view's divider agree.
+   */
+  unread: boolean | null
 
   /**
    * The user's own "done" mark, or null when they have made none. See
@@ -392,6 +414,13 @@ export type BuildContext = {
    * be derived from `ParsedMessage.parts`. The Gmail adapter supplies these.
    */
   attachments?: AttachmentRef[]
+  /**
+   * The provider's read state for the thread, when the caller can tell.
+   *
+   * Supplied by sync from the message labels; omitted means "not known", which
+   * the inbox reads as "fall back to what the user has opened here".
+   */
+  unread?: boolean | null
   /** Account-wide parsing defaults, overridden for senders with a profile. */
   parsingDefaults?: Partial<ParsingPreferences>
   /** Per-sender overrides; omitted fields inherit account defaults. */
@@ -772,11 +801,17 @@ export function buildConversation(
     // has no access to the user's calls, and assuming the call away here would
     // let a sync overwrite one.
     stateOverride: null,
+    // Same reason: a rebuild knows no more about where the user filed this than
+    // it knows about their label. The stored row supplies it.
+    organizationGroupId: null,
     importanceOverride: null,
     // Same reason, and it covers reading as well as saying "done": a rebuild from
     // Gmail knows nothing about either, and defaulting `seenAt` to now would make
     // every rebuilt thread silently look read.
     seenAt: null,
+    // Provider truth, from the labels the caller handed over. Omitted by callers
+    // that rebuild a thread without them, which leaves the fallback in charge.
+    unread: context.unread ?? null,
     done: null,
   }
 }

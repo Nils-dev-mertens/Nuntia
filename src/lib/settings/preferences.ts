@@ -20,20 +20,33 @@ export type UserPreferences = {
    * a local-first client should not tell a third party who writes to them.
    */
   useGravatar: boolean
+  /**
+   * The user's inbox section order, as tokens; empty means "the default".
+   *
+   * Kept opaque here — `organization/inbox-order.ts` owns what a token means and
+   * which ones are current, so this module never has to know about labels.
+   */
+  inboxOrder: string[]
 }
 
-const DEFAULTS: UserPreferences = { useGravatar: false }
+const DEFAULTS: UserPreferences = { useGravatar: false, inboxOrder: [] }
 
 export async function getPreferences(userId: string): Promise<UserPreferences> {
   const row = await db.query.appSettings.findFirst({
     where: eq(appSettings.userId, userId.toLowerCase()),
   })
 
-  return row ? { useGravatar: row.useGravatar } : DEFAULTS
+  return row
+    ? { useGravatar: row.useGravatar, inboxOrder: row.inboxOrder ?? [] }
+    : DEFAULTS
 }
 
 /**
  * Update the preferences on the user's row, creating it when it does not exist.
+ *
+ * Partial on purpose: the inbox saves an order, Settings saves the avatar
+ * choice, and each must leave the other's column alone. A caller that passes
+ * neither writes nothing but the timestamp.
  *
  * The update is scoped to `user_id`, not the primary key: a row adopted from
  * before accounts existed still carries the old `id`, and updating *that* row is
@@ -41,27 +54,33 @@ export async function getPreferences(userId: string): Promise<UserPreferences> {
  */
 export async function savePreferences(
   userId: string,
-  input: UserPreferences,
+  input: Partial<UserPreferences>,
 ): Promise<void> {
   const owner = userId.toLowerCase()
   const now = new Date()
+
+  const patch = {
+    ...(input.useGravatar === undefined
+      ? {}
+      : { useGravatar: input.useGravatar }),
+    ...(input.inboxOrder === undefined ? {} : { inboxOrder: input.inboxOrder }),
+    updatedAt: now,
+  }
 
   const existing = await db.query.appSettings.findFirst({
     where: eq(appSettings.userId, owner),
   })
 
   if (existing) {
-    await db
-      .update(appSettings)
-      .set({ useGravatar: input.useGravatar, updatedAt: now })
-      .where(eq(appSettings.userId, owner))
+    await db.update(appSettings).set(patch).where(eq(appSettings.userId, owner))
     return
   }
 
   await db.insert(appSettings).values({
     id: owner,
     userId: owner,
-    useGravatar: input.useGravatar,
+    useGravatar: input.useGravatar ?? DEFAULTS.useGravatar,
+    inboxOrder: input.inboxOrder ?? null,
     updatedAt: now,
   })
 }

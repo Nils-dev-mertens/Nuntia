@@ -100,6 +100,8 @@ export {
   setAttachmentLocalPath,
   setConversationDetails,
   setConversationDone,
+  setConversationUnread,
+  setOrganizationGroup,
   setGoal,
   setReplyableForSender,
   setSenderReplyable,
