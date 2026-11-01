@@ -33,7 +33,7 @@ import {
 } from '#/lib/gmail/service.ts'
 import type { ConversationSummary } from '#/lib/gmail/service.ts'
 import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
-import { listOrganizationRules } from '#/lib/organization/store.ts'
+import { listOrganizationLabels } from '#/lib/organization/store.ts'
 import { savePreferences } from '#/lib/settings/preferences.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import type { ConversationState } from '#/db/schema.ts'
@@ -401,10 +401,10 @@ const saveInboxOrderAction = createServerFn({ method: 'POST' })
       }
 
       try {
-        const rules = await listOrganizationRules(session.userId)
+        const labels = await listOrganizationLabels(session.userId)
         const order = resolveInboxOrder(
           data.order,
-          rules.filter((rule) => rule.enabled).map((rule) => rule.id),
+          labels.filter((label) => label.enabled).map((label) => label.id),
         )
         await savePreferences(session.userId, { inboxOrder: order })
         return { error: null, order }

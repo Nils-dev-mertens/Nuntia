@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { OrganizationRule } from './matching.ts'
+import type { OrganizationLabel } from './matching.ts'
 import { defaultStateLabels } from './labels.ts'
 import type { StateLabels } from './labels.ts'
 
@@ -11,10 +11,21 @@ const originalDbUrl = process.env.DATABASE_URL
 process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 
 const { db, initDatabase } = await import('#/db/index.ts')
-const { accounts, CONVERSATION_STATES, organizationRules, stateLabels, users } =
-  await import('#/db/schema.ts')
-const { listOrganizationRules, saveOrganizationRules, listStateLabels, saveStateLabels } =
-  await import('./store.ts')
+const {
+  accounts,
+  CONVERSATION_STATES,
+  organizationLabels,
+  organizationRules,
+  stateLabels,
+  users,
+} = await import('#/db/schema.ts')
+const {
+  listMeaningLabels,
+  listOrganizationLabels,
+  saveOrganizationLabels,
+  listStateLabels,
+  saveStateLabels,
+} = await import('./store.ts')
 
 await initDatabase()
 
@@ -29,6 +40,7 @@ afterAll(() => {
 beforeEach(async () => {
   await db.delete(stateLabels)
   await db.delete(organizationRules)
+  await db.delete(organizationLabels)
   await db.delete(accounts)
   await db.delete(users)
   for (const email of ['alice@example.com', 'bob@example.com']) {
@@ -40,78 +52,114 @@ beforeEach(async () => {
   }
 })
 
-describe('organization rule persistence', () => {
-  test('persists rule order and isolates rules by signed-in user', async () => {
-    const rules = [
-      {
-        id: 'first',
-        name: 'Finance',
-        description: 'Invoices and payments',
-        field: 'sender-domain',
-        value: 'ACME.example',
-        enabled: true,
-      },
-      {
+function label(overrides: Partial<OrganizationLabel> = {}): OrganizationLabel {
+  return {
+    id: 'first',
+    name: 'Finance',
+    description: 'Invoices and payments',
+    enabled: true,
+    rules: [],
+    ...overrides,
+  }
+}
+
+describe('custom label persistence', () => {
+  test('persists order, conditions and isolation between users', async () => {
+    const labels: OrganizationLabel[] = [
+      label({
+        rules: [
+          { id: 'rule-a', field: 'sender-domain', value: 'ACME.example' },
+        ],
+      }),
+      label({
         id: 'second',
         name: 'Invoices',
         description: '',
-        field: 'subject-contains',
-        value: 'Invoice',
         enabled: false,
-      },
-    ] as const
+        rules: [{ id: 'rule-b', field: 'subject-contains', value: 'Invoice' }],
+      }),
+    ]
 
-    expect(await saveOrganizationRules('Alice@Example.com', [...rules])).toEqual([
-      { ...rules[0], value: 'acme.example' },
-      rules[1],
-    ])
-    expect(await listOrganizationRules('alice@example.com')).toEqual([
-      { ...rules[0], value: 'acme.example' },
-      rules[1],
-    ])
-    expect(await listOrganizationRules('bob@example.com')).toEqual([])
+    const expected: OrganizationLabel[] = [
+      label({
+        rules: [
+          { id: 'rule-a', field: 'sender-domain', value: 'acme.example' },
+        ],
+      }),
+      labels[1],
+    ]
+
+    expect(await saveOrganizationLabels('Alice@Example.com', labels)).toEqual(
+      expected,
+    )
+    expect(await listOrganizationLabels('alice@example.com')).toEqual(expected)
+    expect(await listOrganizationLabels('bob@example.com')).toEqual([])
   })
 
-  test('invalid replacement does not delete previously saved rules', async () => {
-    const valid: OrganizationRule[] = [
-      {
-        id: 'kept',
-        name: 'Work',
-        description: 'Things from work',
-        field: 'sender-domain',
-        value: 'example.com',
-        enabled: true,
-      },
-    ]
-    await saveOrganizationRules('alice@example.com', valid)
+  test('keeps every condition a label carries', async () => {
+    await saveOrganizationLabels('alice@example.com', [
+      label({
+        rules: [
+          { id: 'rule-a', field: 'sender-domain', value: 'stripe.example' },
+          { id: 'rule-b', field: 'subject-contains', value: 'invoice' },
+        ],
+      }),
+    ])
+
+    const [stored] = await listOrganizationLabels('alice@example.com')
+    expect(stored.rules.map((rule) => rule.field)).toEqual([
+      'sender-domain',
+      'subject-contains',
+    ])
+  })
+
+  test('invalid replacement does not delete previously saved labels', async () => {
+    const valid: OrganizationLabel[] = [label()]
+
+    await saveOrganizationLabels('alice@example.com', valid)
 
     expect(
-      await saveOrganizationRules('alice@example.com', [
-        { ...valid[0], field: 'invalid' } as unknown as OrganizationRule,
+      await saveOrganizationLabels('alice@example.com', [
+        {
+          ...valid[0],
+          rules: [{ id: 'r', field: 'invalid', value: 'x' }],
+        } as unknown as OrganizationLabel,
       ]),
     ).toBeNull()
-    expect(await listOrganizationRules('alice@example.com')).toEqual(valid)
+    expect(await listOrganizationLabels('alice@example.com')).toEqual(valid)
   })
 
-  test('an empty list clears only that user’s rules', async () => {
-    const rule = {
-      id: 'alice-rule',
-      name: 'Work',
-      description: '',
-      field: 'sender-domain',
-      value: 'example.com',
-      enabled: true,
-    }
-    await saveOrganizationRules('alice@example.com', [rule])
-    await saveOrganizationRules('bob@example.com', [
-      { ...rule, id: 'bob-rule', name: 'Personal' },
+  test('an empty list clears only that user’s labels', async () => {
+    await saveOrganizationLabels('alice@example.com', [label({ id: 'alice' })])
+    await saveOrganizationLabels('bob@example.com', [
+      label({ id: 'bob', name: 'Personal' }),
     ])
 
-    await saveOrganizationRules('alice@example.com', [])
-    expect(await listOrganizationRules('alice@example.com')).toEqual([])
-    expect((await listOrganizationRules('bob@example.com'))[0]?.name).toBe(
+    await saveOrganizationLabels('alice@example.com', [])
+    expect(await listOrganizationLabels('alice@example.com')).toEqual([])
+    expect((await listOrganizationLabels('bob@example.com'))[0]?.name).toBe(
       'Personal',
     )
+  })
+})
+
+describe('the labels the decision model may use', () => {
+  test('are the enabled ones that carry no condition', async () => {
+    await saveOrganizationLabels('alice@example.com', [
+      label({ id: 'by-meaning', description: 'Invoices I still have to pay.' }),      label({
+        id: 'by-rule',
+        name: 'Northwind',
+        description: 'A correspondent',
+        rules: [
+          { id: 'rule-a', field: 'sender-domain', value: 'northwind.example' },
+        ],
+      }),
+      label({ id: 'disabled', description: 'Off for now', enabled: false }),
+    ])
+
+    expect(
+      (await listMeaningLabels('alice@example.com')).map((entry) => entry.id),
+    ).toEqual(['by-meaning'])
   })
 })
 

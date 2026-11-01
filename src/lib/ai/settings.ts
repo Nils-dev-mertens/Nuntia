@@ -50,6 +50,15 @@ export type AiSettingsSummary = {
    * re-deriving it from "an LLM is configured".
    */
   goalCheckEnabled: boolean
+  /**
+   * Whether the app refreshes the thread's goal and the contact profile for the
+   * user.
+   *
+   * Part of the summary so the form shows the stored answer rather than
+   * inferring "on" from an LLM being configured: the key and the switch are two
+   * different decisions.
+   */
+  autoContextEnabled: boolean
 }
 
 export type AiSettingsInput = {
@@ -65,6 +74,8 @@ export type AiSettingsInput = {
   suggestReplyMinImportance: number
   /** Omitted leaves the stored answer alone; new rows default to on. */
   goalCheckEnabled?: boolean
+  /** Omitted leaves the stored answer alone; new rows default to off. */
+  autoContextEnabled?: boolean
 }
 
 /** Everything needed to build the pipeline, with keys decrypted in memory. */
@@ -75,6 +86,11 @@ export type AiPipelineConfig = {
   suggestReplyMinImportance: number
   /** Omitted means on, so an older settings row keeps the check enabled. */
   goalCheckEnabled?: boolean
+  /**
+   * Omitted means off. The updater writes user-owned fields, so a row written
+   * before this column existed must not start rewriting profiles unasked.
+   */
+  autoContextEnabled?: boolean
 }
 
 /**
@@ -134,6 +150,9 @@ export async function getAiSettings(
     // A row written before the column existed reads as on, which is the default
     // the migration itself wrote.
     goalCheckEnabled: row?.goalCheckEnabled ?? true,
+    // Off when absent: a row from before the column existed must not begin
+    // spending calls on a feature nobody turned on.
+    autoContextEnabled: row?.autoContextEnabled ?? false,
   }
 }
 
@@ -148,6 +167,7 @@ export async function getAiPipelineConfig(
       llm: null,
       suggestReplyMinImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
       goalCheckEnabled: true,
+      autoContextEnabled: false,
     }
   }
 
@@ -160,6 +180,7 @@ export async function getAiPipelineConfig(
       row.suggestReplyMinImportance,
     ),
     goalCheckEnabled: row.goalCheckEnabled,
+    autoContextEnabled: row.autoContextEnabled,
     jev: jevKey
       ? { apiKey: jevKey, model: row.jevModel?.trim() || 'jev-latest' }
       : null,
@@ -210,6 +231,8 @@ export async function saveAiSettings(
     ),
     goalCheckEnabled:
       input.goalCheckEnabled ?? current?.goalCheckEnabled ?? true,
+    autoContextEnabled:
+      input.autoContextEnabled ?? current?.autoContextEnabled ?? false,
     llmApiKeyEncrypted: applyKey(
       current?.llmApiKeyEncrypted ?? null,
       input.llmApiKey,

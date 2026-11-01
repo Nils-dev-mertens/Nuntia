@@ -6,6 +6,8 @@
  * knows both.
  */
 
+import { randomUUID } from 'node:crypto'
+
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
@@ -13,6 +15,7 @@ import { withWriteLock } from '#/lib/db/write-lock.ts'
 import {
   attachments,
   contacts,
+  contextRevisions,
   conversations,
   decisions,
   messages as messagesTable,
@@ -1279,6 +1282,12 @@ async function rowToConversation(
  * contradicts would show the thread exactly where the user just said it was not.
  * Clearing the call deliberately leaves the state alone — the caller re-decides,
  * which is the only thing that can say where the thread belongs now.
+ *
+ * Every correction is also written to `context_revisions`. Labels mean different
+ * things to different people, and "the user moved this out of Needs action" is
+ * the only evidence of what that label means to this one. The current row cannot
+ * supply it after the fact — once the call is overwritten or cleared, the value
+ * it replaced is gone — so it is recorded in the same transaction.
  */
 export async function setStateOverride(
   accountId: string,
@@ -1288,17 +1297,62 @@ export async function setStateOverride(
   const id = conversationId(accountId, providerThreadId)
 
   await withWriteLock(async () => {
-    await db
-      .update(conversations)
-      .set({
-        stateOverride: override?.state ?? null,
-        stateOverrideMessageAt: override?.messageAt ?? null,
-        ...(override ? { state: override.state } : {}),
-        updatedAt: new Date(),
+    await db.transaction(async (tx) => {
+      // Read before writing: the revision needs the value the call replaced, and
+      // the update is what destroys it. `at(0)` rather than destructuring,
+      // because the index form is typed `T` and hides the missing row from both
+      // the checker and `no-unnecessary-condition`.
+      const row = (
+        await tx
+          .select({
+            userId: accounts.userId,
+            state: conversations.state,
+            stateOverride: conversations.stateOverride,
+          })
+          .from(conversations)
+          .innerJoin(accounts, eq(accounts.id, conversations.accountId))
+          .where(
+            and(
+              eq(conversations.id, id),
+              eq(conversations.accountId, accountId),
+            ),
+          )
+      ).at(0)
+
+      await tx
+        .update(conversations)
+        .set({
+          stateOverride: override?.state ?? null,
+          stateOverrideMessageAt: override?.messageAt ?? null,
+          ...(override ? { state: override.state } : {}),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+        )
+
+      // A pick that agrees with where the thread already sits is not a
+      // correction and teaches nothing, so it writes no row. Handing a thread
+      // back (`nextValue: null`) is a correction: the call being removed is the
+      // previous value.
+      if (!row?.userId) return
+      const previousValue = (override ? row.state : row.stateOverride) ?? null
+      const nextValue = override?.state ?? null
+      if (previousValue === nextValue) return
+
+      await tx.insert(contextRevisions).values({
+        id: randomUUID(),
+        userId: row.userId,
+        scope: 'conversation',
+        target: id,
+        field: 'state',
+        previousValue,
+        nextValue,
+        source: 'user',
+        threadId: providerThreadId,
+        createdAt: new Date(),
       })
-      .where(
-        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
-      )
+    })
   })
 }
 

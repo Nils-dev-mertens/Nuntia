@@ -2,13 +2,13 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   HeuristicRuleClassifier,
-  NoTopicGenerator,
+  NoContextUpdater,
   PlaceholderDecisionModel,
 } from '#/lib/conversation/index.ts'
 
+import { LlmContextUpdater } from './context.ts'
 import { pipelineFromConfig } from './index.ts'
 import { JevDecisionModel } from './jev.ts'
-import { LlmTopicGenerator } from './llm.ts'
 
 describe('pipelineFromConfig', () => {
   test('with nothing configured the pipeline is rules-only', () => {
@@ -20,7 +20,7 @@ describe('pipelineFromConfig', () => {
 
     expect(pipeline.rules).toBeInstanceOf(HeuristicRuleClassifier)
     expect(pipeline.model).toBeInstanceOf(PlaceholderDecisionModel)
-    expect(pipeline.topics).toBeInstanceOf(NoTopicGenerator)
+    expect(pipeline.context).toBeInstanceOf(NoContextUpdater)
   })
 
   test('swaps in Jev and the LLM independently', () => {
@@ -30,7 +30,7 @@ describe('pipelineFromConfig', () => {
       suggestReplyMinImportance: 6,
     })
     expect(jevOnly.model).toBeInstanceOf(JevDecisionModel)
-    expect(jevOnly.topics).toBeInstanceOf(NoTopicGenerator)
+    expect(jevOnly.context).toBeInstanceOf(NoContextUpdater)
 
     const llmOnly = pipelineFromConfig({
       jev: null,
@@ -38,7 +38,7 @@ describe('pipelineFromConfig', () => {
       suggestReplyMinImportance: 6,
     })
     expect(llmOnly.model).toBeInstanceOf(PlaceholderDecisionModel)
-    expect(llmOnly.topics).toBeInstanceOf(LlmTopicGenerator)
+    expect(llmOnly.context).toBeInstanceOf(LlmContextUpdater)
 
     const both = pipelineFromConfig({
       jev: { apiKey: 'k', model: 'jev-latest' },
@@ -46,6 +46,6 @@ describe('pipelineFromConfig', () => {
       suggestReplyMinImportance: 6,
     })
     expect(both.model).toBeInstanceOf(JevDecisionModel)
-    expect(both.topics).toBeInstanceOf(LlmTopicGenerator)
+    expect(both.context).toBeInstanceOf(LlmContextUpdater)
   })
 })

@@ -18,7 +18,7 @@
 
 import {
   defaultDecisionPipeline,
-  NoTopicGenerator,
+  NoContextUpdater,
   PlaceholderDecisionModel,
   REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
 } from '#/lib/conversation/index.ts'
@@ -31,7 +31,7 @@ import type {
 import { replyDrafterFromConfig } from './draft.ts'
 import { goalReviewerFromConfig } from './goal.ts'
 import { JevDecisionModel } from './jev.ts'
-import { LlmTopicGenerator } from './llm.ts'
+import { LlmContextUpdater } from './context.ts'
 import { getAiPipelineConfig } from './settings.ts'
 import type { AiPipelineConfig } from './settings.ts'
 
@@ -39,12 +39,12 @@ export { JevDecisionModel } from './jev.ts'
 export type { JevConfig } from './jev.ts'
 export { LlmReplyDrafter, replyDrafterFromConfig } from './draft.ts'
 export { LlmGoalReviewer, goalReviewerFromConfig } from './goal.ts'
+export { LlmContextUpdater, parseContextUpdate } from './context.ts'
 export {
   completeLlm,
   DEFAULT_LLM_MODELS,
   isReasoningModel,
   LLM_PROVIDERS,
-  LlmTopicGenerator,
   sanitizeTopic,
 } from './llm.ts'
 export type { LlmConfig, LlmProvider } from './llm.ts'
@@ -78,9 +78,14 @@ export function pipelineFromConfig(config: AiPipelineConfig): DecisionPipeline {
     model: config.jev
       ? new JevDecisionModel(config.jev)
       : new PlaceholderDecisionModel(),
-    topics: config.llm
-      ? new LlmTopicGenerator(config.llm)
-      : new NoTopicGenerator(),
+    context: config.llm
+      ? new LlmContextUpdater(config.llm, {
+          // The switch, not the key, is what widens the prompt: a user who has
+          // an LLM configured but no interest in automatic context changes keeps
+          // the label-only call and its budget.
+          refresh: config.autoContextEnabled === true,
+        })
+      : new NoContextUpdater(),
   }
 }
 

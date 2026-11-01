@@ -55,6 +55,8 @@ export { buildGoalReviewPrompt, parseGoalVerdict } from './goal.ts'
 export type { GoalReviewer, GoalReviewRequest, GoalVerdict } from './goal.ts'
 
 export type {
+  ContextUpdate,
+  ContextUpdater,
   Decision,
   DecisionInput,
   DecisionModel,
@@ -62,14 +64,13 @@ export type {
   ModelVerdict,
   RuleClassifier,
   RuleFacts,
-  TopicGenerator,
 } from './decision.ts'
 export {
   applyDecision,
   decideConversation,
   defaultDecisionPipeline,
   HeuristicRuleClassifier,
-  NoTopicGenerator,
+  NoContextUpdater,
   PlaceholderDecisionModel,
 } from './decision.ts'
 

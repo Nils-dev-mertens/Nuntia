@@ -35,6 +35,11 @@ import {
 import { getAiSettings, saveAiSettings } from '#/lib/ai/index.ts'
 import type { AiSettingsSummary, LlmProvider } from '#/lib/ai/index.ts'
 import {
+  listRecentContextRevisions,
+  undoContextRevision,
+} from '#/lib/context/revisions.ts'
+import type { ContextRevisionView } from '#/lib/context/revisions.ts'
+import {
   addUnreplyableSender,
   forgetAccount,
   removeUnreplyableSender,
@@ -59,21 +64,28 @@ import {
 } from '#/lib/conversation/draft.ts'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
 import {
-  listOrganizationRules,
+  listOrganizationLabels,
   listStateLabels,
-  saveOrganizationRules,
+  saveOrganizationLabels,
   saveStateLabels,
 } from '#/lib/organization/store.ts'
-import type { OrganizationRule } from '#/lib/organization/matching.ts'
+import type {
+  OrganizationLabel,
+  OrganizationMatchRule,
+  OrganizationRuleField,
+} from '#/lib/organization/matching.ts'
 import {
   ORGANIZATION_RULE_FIELDS,
   ORGANIZATION_RULE_LIMITS,
 } from '#/lib/organization/matching.ts'
 import {
   STATE_LABEL_LIMITS,
+  STATE_MEANING_MIN_CORRECTIONS,
   defaultStateLabels,
 } from '#/lib/organization/labels.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
+import { proposeStateMeaning } from '#/lib/organization/state-meaning.ts'
+import type { StateMeaningProposal } from '#/lib/organization/state-meaning.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import { STATE_META, STATE_ORDER } from '#/lib/conversation-state.ts'
 
@@ -93,9 +105,11 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     | {
         signedIn: true
         settings: AiSettingsSummary
-        organizationRules: OrganizationRule[]
+        organizationLabels: OrganizationLabel[]
         /** The four state labels, with the user's wording applied. */
         stateLabels: StateLabels
+        /** Recent automatic context writes, newest first, with an Undo each. */
+        contextRevisions: ContextRevisionView[]
         /** Connected mailboxes, so they can be listed and cleared out. */
         accounts: Array<{
           id: string
@@ -193,8 +207,9 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
     return {
       signedIn: true,
       settings: await getAiSettings(session.userId),
-      organizationRules: await listOrganizationRules(session.userId),
+      organizationLabels: await listOrganizationLabels(session.userId),
       stateLabels: await listStateLabels(session.userId),
+      contextRevisions: await listRecentContextRevisions(session.userId),
       accounts: await Promise.all(
         accounts.map(async (account) => {
           const profile = await getParsingProfileContext(account.id)
@@ -311,19 +326,19 @@ const saveParsingDefaultsAction = createServerFn({ method: 'POST' })
     }
   })
 
-const saveOrganizationRulesAction = createServerFn({ method: 'POST' })
+const saveOrganizationLabelsAction = createServerFn({ method: 'POST' })
   .inputValidator((data: unknown) => data)
   .handler(
     async ({
       data,
-    }): Promise<{ rules: OrganizationRule[] | null; error: string | null }> => {
+    }): Promise<{ rules: OrganizationLabel[] | null; error: string | null }> => {
       const session = await getSession()
       if (!session) return { rules: null, error: 'You are not signed in.' }
 
       try {
-        const rules = await saveOrganizationRules(session.userId, data)
-        return rules
-          ? { rules, error: null }
+        const labels = await saveOrganizationLabels(session.userId, data)
+        return labels
+          ? { rules: labels, error: null }
           : {
               rules: null,
               error: 'Organization rules are invalid or exceed the limit.',
@@ -355,6 +370,37 @@ const saveStateLabelsAction = createServerFn({ method: 'POST' })
       }
     },
   )
+
+/**
+ * Draft a new meaning for the label the user corrects most.
+ *
+ * Returns the proposal rather than saving it: a meaning rewritten by a model
+ * that also classifies against it would drift and then confirm itself, so it is
+ * shown as a diff and only stored when the user says so.
+ */
+const proposeStateMeaningAction = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<{
+    proposal: StateMeaningProposal | null
+    reason: string | null
+    error: string | null
+  }> => {
+    const session = await getSession()
+    if (!session) {
+      return { proposal: null, reason: null, error: 'You are not signed in.' }
+    }
+
+    try {
+      return await proposeStateMeaning(session.userId)
+    } catch (error) {
+      console.error('[settings] drafting a label meaning failed:', error)
+      return {
+        proposal: null,
+        reason: null,
+        error: 'Could not draft a meaning. Please try again.',
+      }
+    }
+  },
+)
 
 const saveGravatarAction = createServerFn({ method: 'POST' })
   .validator((data: { useGravatar: boolean }) => data)
@@ -478,6 +524,8 @@ type SaveInput = {
   suggestReplyMinImportance: number
   /** Whether a sent reply is checked against the thread's goal. */
   goalCheckEnabled: boolean
+  /** Whether the app refreshes goals and contact profiles from the mail. */
+  autoContextEnabled: boolean
   /** `null` means "leave the stored key unchanged". */
   jevApiKey: string | null
   clearJevKey: boolean
@@ -502,6 +550,10 @@ function validateSave(data: SaveInput): string | null {
 
   if (typeof data.goalCheckEnabled !== 'boolean') {
     return 'The goal check setting has to be on or off.'
+  }
+
+  if (typeof data.autoContextEnabled !== 'boolean') {
+    return 'The automatic context setting has to be on or off.'
   }
 
   const fields: Array<[string, string | null, number]> = [
@@ -545,6 +597,7 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
         llmModel: blankToNull(data.llmModel),
         suggestReplyMinImportance: data.suggestReplyMinImportance,
         goalCheckEnabled: data.goalCheckEnabled,
+        autoContextEnabled: data.autoContextEnabled,
         // `undefined` keeps the stored key; `''` clears it; a value replaces it.
         jevApiKey: data.clearJevKey
           ? ''
@@ -557,6 +610,35 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
     } catch (error) {
       console.error('[settings] save failed:', error)
       return { error: 'Could not save the AI settings.' }
+    }
+  })
+
+/**
+ * Put a context value back.
+ *
+ * The browser sends the revision id and nothing else: the server reads what was
+ * replaced from the log and writes that, so a client cannot name a value to
+ * restore. Undo is a write like any other and records a revision of its own,
+ * which is what makes undoing twice ordinary rather than a special case.
+ */
+const undoContextRevisionAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: { revisionId: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.revisionId !== 'string' || !data.revisionId) {
+      return { error: 'That change could not be found.' }
+    }
+
+    try {
+      const undone = await undoContextRevision(session.userId, data.revisionId)
+      return undone
+        ? { error: null }
+        : { error: 'That change is already undone.' }
+    } catch (error) {
+      console.error('[settings] undo failed:', error)
+      return { error: 'Could not undo that change.' }
     }
   })
 
@@ -609,6 +691,53 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  // The draft and the reason there is none are separate: "not enough corrections
+  // yet" is an answer, not a failure, and must not look like one.
+  const [proposing, setProposing] = useState(false)
+  const [proposal, setProposal] = useState<StateMeaningProposal | null>(null)
+  const [proposalReason, setProposalReason] = useState<string | null>(null)
+
+  async function propose() {
+    if (busy || proposing) return
+    setProposing(true)
+    setError(null)
+    setMessage(null)
+    setProposalReason(null)
+    try {
+      const result = await proposeStateMeaningAction()
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+      setProposal(result.proposal)
+      setProposalReason(result.reason)
+    } catch {
+      setError('Could not draft a meaning. Please try again.')
+    } finally {
+      setProposing(false)
+    }
+  }
+
+  /**
+   * Approve the draft: put it in the form and save at once.
+   *
+   * Saving immediately rather than leaving it in the textarea is the point of the
+   * diff — an approved meaning that is only in unsaved form is one a page refresh
+   * throws away.
+   */
+  async function applyProposal() {
+    if (!proposal) return
+    const next: StateLabels = {
+      ...labels,
+      [proposal.state]: {
+        ...labels[proposal.state],
+        description: proposal.proposed,
+      },
+    }
+    setLabels(next)
+    setProposal(null)
+    await save(next)
+  }
 
   function update(
     state: keyof StateLabels,
@@ -621,7 +750,14 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
     setMessage(null)
   }
 
-  async function save() {
+  /**
+   * Save the given labels, defaulting to what is in the form.
+   *
+   * The parameter has one caller: approving a proposed meaning has to write the
+   * meaning it approved, not whatever React has committed to state by the time
+   * the save resolves.
+   */
+  async function save(next: StateLabels = labels) {
     if (busy) return
     setBusy(true)
     setError(null)
@@ -630,7 +766,7 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
       const result = await saveStateLabelsAction({
         data: CONVERSATION_STATES.map((state) => ({
           state,
-          ...labels[state],
+          ...next[state],
         })),
       })
       if (result.error || !result.labels) {
@@ -721,6 +857,62 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
           Use default wording
         </button>
       </div>
+
+      <div className="mt-3 rounded-md border border-border bg-muted/20 p-3">
+        <p className="text-[11px] font-medium text-foreground">
+          Rewrite a meaning from your corrections
+        </p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">
+          Moving a thread out of a label is the app getting it wrong. After{' '}
+          {STATE_MEANING_MIN_CORRECTIONS} of those on the same label, it can
+          draft what that label means to you — shown as a diff you approve, never
+          applied on its own. It proposes the meaning only, never the name.
+        </p>
+        <button
+          type="button"
+          disabled={busy || proposing}
+          onClick={() => void propose()}
+          className="mt-2 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          {proposing ? 'Drafting…' : 'Draft from my corrections'}
+        </button>
+
+        {proposal ? (
+          <div className="mt-2 space-y-1 text-[11px]">
+            <p className="font-medium text-foreground">{proposal.name}</p>
+            <p className="text-muted-foreground line-through">
+              {proposal.current || '(no meaning yet)'}
+            </p>
+            <p className="text-foreground">{proposal.proposed}</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void applyProposal()}
+                className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+              >
+                Use this meaning
+              </button>
+              <button
+                type="button"
+                onClick={() => setProposal(null)}
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground"
+              >
+                Dismiss
+              </button>
+              <span className="text-muted-foreground">
+                Drawn from {proposal.corrections} corrections.
+              </span>
+            </div>
+          </div>
+        ) : null}
+
+        {proposalReason ? (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {proposalReason}
+          </p>
+        ) : null}
+      </div>
       {error ? (
         <p role="alert" className="mt-2 text-xs text-destructive">
           {error}
@@ -736,21 +928,80 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
 }
 
 function OrganizationRulesEditor({
-  initialRules,
+  initialLabels,
   stateLabels,
 }: {
-  initialRules: OrganizationRule[]
+  initialLabels: OrganizationLabel[]
   stateLabels: StateLabels
 }) {
   const router = useRouter()
-  const [rules, setRules] = useState(initialRules)
+  const [rules, setRules] = useState(initialLabels)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
 
-  function updateRule(id: string, patch: Partial<OrganizationRule>) {
+  function updateRule(id: string, patch: Partial<OrganizationLabel>) {
     setRules((current) =>
       current.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule)),
+    )
+    setMessage(null)
+  }
+
+  /**
+   * The conditions on one label.
+   *
+   * They are alternatives, not a conjunction: the inbox files a thread as soon
+   * as any one of them matches, so a label can be "this sender *or* this subject"
+   * without being duplicated.
+   */
+  function updateMatch(
+    labelId: string,
+    matchId: string,
+    patch: Partial<OrganizationMatchRule>,
+  ) {
+    setRules((current) =>
+      current.map((label) =>
+        label.id === labelId
+          ? {
+              ...label,
+              rules: label.rules.map((match) =>
+                match.id === matchId ? { ...match, ...patch } : match,
+              ),
+            }
+          : label,
+      ),
+    )
+    setMessage(null)
+  }
+
+  function addMatch(labelId: string) {
+    setRules((current) =>
+      current.map((label) =>
+        label.id === labelId
+          ? {
+              ...label,
+              rules: [
+                ...label.rules,
+                {
+                  id: crypto.randomUUID(),
+                  field: 'sender-domain',
+                  value: '',
+                } satisfies OrganizationMatchRule,
+              ],
+            }
+          : label,
+      ),
+    )
+    setMessage(null)
+  }
+
+  function removeMatch(labelId: string, matchId: string) {
+    setRules((current) =>
+      current.map((label) =>
+        label.id === labelId
+          ? { ...label, rules: label.rules.filter((m) => m.id !== matchId) }
+          : label,
+      ),
     )
     setMessage(null)
   }
@@ -775,16 +1026,16 @@ function OrganizationRulesEditor({
     setError(null)
     setMessage(null)
     try {
-      const result = await saveOrganizationRulesAction({ data: rules })
+      const result = await saveOrganizationLabelsAction({ data: rules })
       if (result.error || !result.rules) {
-        setError(result.error ?? 'Could not save organization rules.')
+        setError(result.error ?? 'Could not save custom labels.')
         return
       }
       setRules(result.rules)
-      setMessage('Organization rules saved.')
+      setMessage('Custom labels saved.')
       await router.invalidate()
     } catch {
-      setError('Could not save organization rules.')
+      setError('Could not save custom labels.')
     } finally {
       setBusy(false)
     }
@@ -805,9 +1056,13 @@ function OrganizationRulesEditor({
     <section className="rounded-lg border border-border bg-card p-4">
       <h2 className="text-sm font-semibold text-foreground">Custom labels</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Add labels of your own and the rule that files matching conversations
-        into each one. Rules run from top to bottom; the first enabled match
-        wins. Each label has a name and a meaning the inbox shows under it. In
+        Add labels of your own, and the conditions that file matching
+        conversations into each one. A label may have any number of them and any
+        one is enough — so a section can be "this sender <em>or</em> this
+        subject" without being duplicated. Labels run from top to bottom and the
+        first enabled match wins. A label with no conditions is placed by the
+        decision model instead, from the meaning you write for it; the same
+        meaning is what the inbox shows under the heading. In
         the inbox, drag a label by its handle to put it anywhere between the
         four AI groups — or collapse it to keep the page short. A thread can
         also be moved to a different label (or back to the rules) from its
@@ -892,69 +1147,115 @@ function OrganizationRulesEditor({
                   className={`${inputClass} mt-1 block w-full resize-y`}
                 />
               </label>
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                <label className="text-[11px] text-muted-foreground">
-                  Match when
-                  <select
-                    aria-label={`Rule ${index + 1} match field`}
-                    value={rule.field}
-                    disabled={busy}
-                    onChange={(event) =>
-                      updateRule(rule.id, {
-                        field: event.target.value as OrganizationRule['field'],
-                        value:
-                          event.target.value === 'state-is'
-                            ? 'needs-action'
-                            : '',
-                      })
-                    }
-                    className={`${inputClass} mt-1 block w-full`}
-                  >
-                    {ORGANIZATION_RULE_FIELDS.map((field) => (
-                      <option key={field} value={field}>
-                        {fieldLabels[field]}
-                      </option>
+              <div className="mt-2 rounded-md border border-border/60 p-2">
+                <p className="text-[11px] font-medium text-muted-foreground">
+                  Chosen by
+                </p>
+                {rule.rules.length === 0 ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Its meaning. With no condition, the decision model reads the
+                    meaning above and files a thread here when the mail fits it.
+                  </p>
+                ) : (
+                  <ul className="mt-1 space-y-2">
+                    {rule.rules.map((match, matchIndex) => (
+                      <li
+                        key={match.id}
+                        className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]"
+                      >
+                        <label className="text-[11px] text-muted-foreground">
+                          When
+                          <select
+                            aria-label={`Label ${index + 1} condition ${matchIndex + 1} field`}
+                            value={match.field}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateMatch(rule.id, match.id, {
+                                field: event.target
+                                  .value as OrganizationRuleField,
+                                value:
+                                  event.target.value === 'state-is'
+                                    ? 'needs-action'
+                                    : '',
+                              })
+                            }
+                            className={`${inputClass} mt-1 block w-full`}
+                          >
+                            {ORGANIZATION_RULE_FIELDS.map((field) => (
+                              <option key={field} value={field}>
+                                {fieldLabels[field]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="text-[11px] text-muted-foreground">
+                          {match.field === 'state-is' ? 'State' : 'Value'}
+                          {match.field === 'state-is' ? (
+                            <select
+                              aria-label={`Label ${index + 1} condition ${matchIndex + 1} value`}
+                              value={match.value}
+                              disabled={busy}
+                              onChange={(event) =>
+                                updateMatch(rule.id, match.id, {
+                                  value: event.target.value,
+                                })
+                              }
+                              className={`${inputClass} mt-1 block w-full`}
+                            >
+                              {STATE_ORDER.map((state) => (
+                                <option key={state} value={state}>
+                                  {stateLabels[state].name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              aria-label={`Label ${index + 1} condition ${matchIndex + 1} value`}
+                              value={match.value}
+                              maxLength={ORGANIZATION_RULE_LIMITS.value}
+                              disabled={busy}
+                              onChange={(event) =>
+                                updateMatch(rule.id, match.id, {
+                                  value: event.target.value,
+                                })
+                              }
+                              placeholder={
+                                match.field === 'sender-domain'
+                                  ? 'example.com'
+                                  : match.field === 'sender-email'
+                                    ? 'billing@example.com'
+                                    : 'Text to match'
+                              }
+                              className={`${inputClass} mt-1 block w-full`}
+                            />
+                          )}
+                        </label>
+                        <button
+                          type="button"
+                          aria-label={`Remove condition ${matchIndex + 1}`}
+                          disabled={busy}
+                          onClick={() => removeMatch(rule.id, match.id)}
+                          className="self-end rounded border border-border px-2 py-1 text-xs disabled:opacity-40"
+                        >
+                          Remove
+                        </button>
+                      </li>
                     ))}
-                  </select>
-                </label>
-                <label className="text-[11px] text-muted-foreground">
-                  {rule.field === 'state-is' ? 'State' : 'Value'}
-                  {rule.field === 'state-is' ? (
-                    <select
-                      aria-label={`Rule ${index + 1} match value`}
-                      value={rule.value}
-                      disabled={busy}
-                      onChange={(event) =>
-                        updateRule(rule.id, { value: event.target.value })
-                      }
-                      className={`${inputClass} mt-1 block w-full`}
-                    >
-                      {STATE_ORDER.map((state) => (
-                        <option key={state} value={state}>
-                          {stateLabels[state].name}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      aria-label={`Rule ${index + 1} match value`}
-                      value={rule.value}
-                      maxLength={200}
-                      disabled={busy}
-                      onChange={(event) =>
-                        updateRule(rule.id, { value: event.target.value })
-                      }
-                      placeholder={
-                        rule.field === 'sender-domain'
-                          ? 'example.com'
-                          : rule.field === 'sender-email'
-                            ? 'billing@example.com'
-                            : 'Text to match'
-                      }
-                      className={`${inputClass} mt-1 block w-full`}
-                    />
-                  )}
-                </label>
+                  </ul>
+                )}
+                <button
+                  type="button"
+                  disabled={
+                    busy || rule.rules.length >= ORGANIZATION_RULE_LIMITS.rules
+                  }
+                  onClick={() => addMatch(rule.id)}
+                  className="mt-2 rounded border border-border px-2 py-1 text-xs font-medium text-foreground disabled:opacity-40"
+                >
+                  + Add condition
+                </button>
+                <span className="ml-2 text-[11px] text-muted-foreground">
+                  Any one matching is enough.
+                </span>
               </div>
             </li>
           ))}
@@ -976,9 +1277,8 @@ function OrganizationRulesEditor({
                 id: crypto.randomUUID(),
                 name: '',
                 description: '',
-                field: 'sender-domain',
-                value: '',
                 enabled: true,
+                rules: [],
               },
             ])
           }
@@ -1020,6 +1320,31 @@ function OrganizationRulesEditor({
  * now, so the only variable left is how many mailboxes the user has — and a user
  * with none still has an account, keys to set, and devices to sign out.
  */
+/**
+ * The field a revision names, in words a reader of this page would use.
+ *
+ * The log stores column names, because that is what the undo has to write back;
+ * `roleCompany` is not something to show a person.
+ */
+function contextRevisionLabel(field: string): string {
+  switch (field) {
+    case 'goal':
+      return 'Goal'
+    case 'topic':
+      return 'Topic'
+    case 'state':
+      return 'State'
+    case 'roleCompany':
+      return 'Role'
+    case 'relationship':
+      return 'Relationship'
+    case 'currentWork':
+      return 'Current work'
+    default:
+      return 'Topics'
+  }
+}
+
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -1029,8 +1354,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
 
   const {
     settings,
-    organizationRules: initialOrganizationRules,
+    organizationLabels: initialOrganizationLabels,
     stateLabels: initialStateLabels,
+    contextRevisions,
     accounts,
     unreplyableSenders,
     recentSenders,
@@ -1060,6 +1386,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   )
   const [goalCheckEnabled, setGoalCheckEnabled] = useState(
     settings.goalCheckEnabled,
+  )
+  const [autoContextEnabled, setAutoContextEnabled] = useState(
+    settings.autoContextEnabled,
   )
 
   const [busy, setBusy] = useState(false)
@@ -1338,6 +1667,27 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     }
   }
 
+  async function undoRevision(revisionId: string) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const undone = await undoContextRevisionAction({
+        data: { revisionId },
+      })
+      if (undone.error) {
+        setError(undone.error)
+        return
+      }
+      await router.invalidate()
+    } catch {
+      setError('Could not undo that change.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
@@ -1353,6 +1703,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           llmModel: llmModel.trim() || null,
           suggestReplyMinImportance: Number(minImportance),
           goalCheckEnabled,
+          autoContextEnabled,
           jevApiKey: jevApiKey.trim() || null,
           clearJevKey,
           llmApiKey: llmApiKey.trim() || null,
@@ -1398,12 +1749,16 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
       </div>
 
       {/*
-       * A 12-column bento rather than a narrow strip. Each row pairs cards at
-       * 5/7 instead of 6/6: the wider slot goes to whichever card carries the
-       * lists and forms, so neither side ends up mostly empty.
+       * One topic per card, every card the full width of the column.
+       *
+       * This used to be a 12-column bento, which put unrelated things beside each
+       * other — signed-in devices next to parsing defaults — and left the two
+       * halves of one topic (the four labels, then the custom ones) in different
+       * rows of different heights. Reading it meant tracking across two columns
+       * that had nothing to do with each other.
        */}
-      <div className="mt-6 grid gap-5 lg:grid-cols-2 xl:grid-cols-12 xl:items-start">
-        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-5">
+      <div className="mt-6 space-y-5">
+        <section className="rounded-lg border border-border bg-card p-4">
           <h2 className="text-sm font-semibold text-foreground">Account</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             Signed in as{' '}
@@ -1501,7 +1856,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           ) : null}
         </section>
 
-        <section className="space-y-4 rounded-lg border border-border bg-card p-4 xl:col-span-7">
+        <section className="space-y-4 rounded-lg border border-border bg-card p-4">
           <h2 className="text-sm font-semibold text-foreground">
             Parsing defaults
           </h2>
@@ -1615,19 +1970,20 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           ) : null}
         </section>
 
-        <div className="xl:col-span-5">
-          <StateLabelsEditor initialLabels={initialStateLabels} />
-        </div>
+        {/*
+         * The two halves of one topic, kept together: what the built-in four
+         * mean to you, then the labels of your own. They were in separate bento
+         * columns before, at 5/7, so the pair never read as a pair.
+         */}
+        <StateLabelsEditor initialLabels={initialStateLabels} />
 
-        <div className="xl:col-span-7">
-          <OrganizationRulesEditor
-            initialRules={initialOrganizationRules}
-            stateLabels={initialStateLabels}
-          />
-        </div>
+        <OrganizationRulesEditor
+          initialLabels={initialOrganizationLabels}
+          stateLabels={initialStateLabels}
+        />
       </div>
 
-      <section className="mt-8 rounded-lg border border-border bg-card">
+      <section className="mt-5 rounded-lg border border-border bg-card">
         <div className="border-b border-border p-4">
           <h2 className="text-sm font-semibold text-foreground">AI services</h2>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -1638,11 +1994,14 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           </p>
         </div>
 
-        <form
-          onSubmit={(event) => void submit(event)}
-          className="grid xl:grid-cols-12"
-        >
-          <section className="p-4 xl:col-span-5 xl:border-r xl:border-border">
+        {/*
+         * Stacked rather than split 5/7: the two services are one topic, but the
+         * LLM half now carries the draft threshold, the goal check, the context
+         * switch and the change log, which made a narrow column a long scroll
+         * beside a mostly empty one.
+         */}
+        <form onSubmit={(event) => void submit(event)} className="divide-y divide-border">
+          <section className="p-4">
             <h3 className="text-sm font-semibold text-foreground">
               Decision model — Jev
             </h3>
@@ -1689,7 +2048,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             </div>
           </section>
 
-          <section className="border-t border-border p-4 xl:col-span-7 xl:border-t-0">
+          <section className="p-4">
             <h3 className="text-sm font-semibold text-foreground">
               Topics and drafts — LLM
             </h3>
@@ -1778,6 +2137,76 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                   </span>
                 </span>
               </label>
+              <label className="flex items-start gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={autoContextEnabled}
+                  onChange={(event) =>
+                    setAutoContextEnabled(event.target.checked)
+                  }
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="font-medium text-foreground">
+                    Update the goal and contact profile automatically
+                  </span>
+                  <span className="mt-0.5 block">
+                    One extra call per thread that gains messages, so the goal
+                    and each correspondent&rsquo;s profile follow the mail
+                    instead of waiting to be filled in. It costs more tokens than
+                    a topic alone, so it is off unless you turn it on. Blank
+                    fields are never cleared, and every change appears under
+                    recent changes below with an Undo.
+                  </span>
+                </span>
+              </label>
+              {contextRevisions.length > 0 ? (
+                <div className="rounded-md border border-border bg-muted/20 p-3">
+                  <p className="text-xs font-medium text-foreground">
+                    Recent context changes
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    What the app changed, and what it replaced. Undo puts the old
+                    value back and keeps the change in this list.
+                  </p>
+                  <ul className="mt-2 space-y-1.5">
+                    {contextRevisions.map((revision) => (
+                      <li
+                        key={revision.id}
+                        className="flex items-start justify-between gap-3 text-[11px] text-muted-foreground"
+                      >
+                        <span className="min-w-0">
+                          <span className="font-medium text-foreground">
+                            {contextRevisionLabel(revision.field)}
+                          </span>{' '}
+                          {revision.previousValue ? (
+                            <>
+                              <span className="line-through">
+                                {revision.previousValue}
+                              </span>{' '}
+                              →{' '}
+                            </>
+                          ) : null}
+                          <span>{revision.nextValue ?? 'cleared'}</span>
+                          {revision.subject ? (
+                            <span className="block truncate opacity-80">
+                              {revision.subject}
+                            </span>
+                          ) : null}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={busy || revision.undone}
+                          onClick={() => void undoRevision(revision.id)}
+                          className="shrink-0 rounded border border-border px-2 py-0.5 font-medium text-foreground disabled:opacity-40"
+                        >
+                          {revision.undone ? 'Undone' : 'Undo'}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {settings.llmConfigured ? (
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <input
@@ -1791,7 +2220,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             </div>
           </section>
 
-          <div className="col-span-full space-y-3 border-t border-border p-4">
+          <div className="space-y-3 p-4">
             {error ? (
               <p
                 role="alert"
@@ -1820,8 +2249,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
         </form>
       </section>
 
-      <div className="mt-4 grid gap-5 lg:grid-cols-2 xl:grid-cols-12 xl:items-start">
-        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-7">
+      {/* Same rule below: two unrelated topics, so neither gets a half-width slot. */}
+      <div className="mt-5 space-y-5">
+        <section className="rounded-lg border border-border bg-card p-4">
           <h2 className="text-sm font-semibold text-foreground">
             Can&rsquo;t reply to
           </h2>
@@ -1977,7 +2407,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           ) : null}
         </section>
 
-        <section className="rounded-lg border border-border bg-card p-4 xl:col-span-5">
+        <section className="rounded-lg border border-border bg-card p-4">
           <h2 className="text-sm font-semibold text-foreground">
             Connected mailboxes
           </h2>

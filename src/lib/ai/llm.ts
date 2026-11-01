@@ -1,10 +1,11 @@
 /**
- * The LLM side: prose, not decisions.
+ * The LLM transport, plus `sanitizeTopic`.
  *
- * This is the `TopicGenerator` seam — the topic label — plus `completeLlm`, the
- * shared transport the reply drafter in `draft.ts` also uses. It is deliberately
- * *not* the decision layer: Jev makes decisions, an LLM writes text. See
- * `decision.ts`.
+ * This is deliberately the lowest layer: three providers behind one call, and a
+ * sanitiser for the only thing more than one feature asks a model to write. The
+ * two callers above it are `context.ts` — the topic label and the context
+ * updater — and `draft.ts`, the reply drafter. Neither is the decision layer:
+ * Jev makes decisions, an LLM writes text. See `decision.ts`.
  *
  * Three providers are supported behind one interface (Anthropic, OpenAI, Gemini),
  * each with a bring-your-own key. Adding a fourth means one more `complete`
@@ -13,8 +14,6 @@
  * Every provider call carries a `log` label, so a failure names the service and
  * the model in the AI log rather than only appearing in a terminal.
  */
-
-import type { DecisionInput, TopicGenerator } from '#/lib/conversation/index.ts'
 
 import { asRecord, isRecord, postJson } from './http.ts'
 import type { FetchLike } from './http.ts'
@@ -44,46 +43,6 @@ export type LlmConfig = {
 /** A topic is a label, not a sentence; cap it so a chatty model cannot flood the row. */
 const MAX_TOPIC_LENGTH = 80
 
-/** Completion budget for a label: a handful of tokens is plenty. */
-const MAX_TOPIC_TOKENS = 64
-
-/**
- * Completion budget for a reasoning model (o-series, gpt-5).
- *
- * Those models spend `max_completion_tokens` on hidden reasoning *before*
- * writing anything, so a label-sized budget is swallowed entirely by thinking
- * and the call fails with "max_tokens or model output limit was reached". The
- * budget has to cover the reasoning, not just the label.
- */
-const MAX_REASONING_TOPIC_TOKENS = 4_096
-
-/** How much of the thread the model sees. Enough to label, not enough to be slow. */
-const MAX_MESSAGES = 6
-const MAX_MESSAGE_CHARS = 1_200
-
-export class LlmTopicGenerator implements TopicGenerator {
-  readonly name: string
-  private readonly config: LlmConfig
-
-  constructor(config: LlmConfig) {
-    this.config = config
-    this.name = `llm:${config.provider}`
-  }
-
-  async generate(input: DecisionInput): Promise<string | null> {
-    const text = await completeLlm(
-      this.config,
-      topicPrompt(input),
-      // A label is a handful of tokens — except on a reasoning model, where the
-      // budget also has to pay for the hidden thinking that precedes it.
-      isReasoningModel(this.config.model)
-        ? MAX_REASONING_TOPIC_TOKENS
-        : MAX_TOPIC_TOKENS,
-    )
-    return sanitizeTopic(text)
-  }
-}
-
 /**
  * One prompt in, one completion out, for whichever provider is configured.
  *
@@ -106,28 +65,6 @@ export async function completeLlm(
       // Deliberately no output cap on this one — see `geminiComplete`.
       return geminiComplete(config, prompt)
   }
-}
-
-/** One prompt for all providers: a short label, nothing else. */
-function topicPrompt(input: DecisionInput): string {
-  const lines: string[] = []
-  if (input.goal) lines.push(`What the user wants: ${input.goal}`)
-
-  for (const message of input.messages.slice(-MAX_MESSAGES)) {
-    const who = message.isFromOwner
-      ? 'Me'
-      : (message.from.name ?? message.from.email)
-    lines.push(`${who}: ${message.body.slice(0, MAX_MESSAGE_CHARS)}`)
-  }
-
-  return [
-    'Write a short topic label (2 to 6 words) for this email thread.',
-    'Reply with the label only — no quotes, no trailing punctuation, no explanation.',
-    '',
-    `Subject: ${input.subject}`,
-    '',
-    lines.join('\n'),
-  ].join('\n')
 }
 
 async function anthropicComplete(
@@ -205,7 +142,7 @@ async function openaiComplete(
  *
  * Two differences matter here: they reject sampling parameters such as
  * `temperature`, and they spend `max_completion_tokens` on hidden reasoning
- * before producing any output. Both callers (the topic generator and the reply
+ * before producing any output. Both callers (the context updater and the reply
  * drafter) have to size their budget accordingly rather than for the text alone.
  */
 export function isReasoningModel(model: string): boolean {

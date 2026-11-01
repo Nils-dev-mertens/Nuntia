@@ -1,7 +1,11 @@
-import { asc, eq } from 'drizzle-orm'
+import { asc, eq, inArray } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
-import { organizationRules, stateLabels } from '#/db/schema.ts'
+import {
+  organizationLabels,
+  organizationRules,
+  stateLabels,
+} from '#/db/schema.ts'
 
 import {
   normaliseStateLabels,
@@ -9,56 +13,152 @@ import {
   stateLabelOverrides,
 } from './labels.ts'
 import type { StateLabel, StateLabels } from './labels.ts'
-import { normaliseOrganizationRules } from './matching.ts'
-import type { OrganizationRule } from './matching.ts'
+import { normaliseOrganizationLabels } from './matching.ts'
+import type {
+  MeaningLabel,
+  OrganizationLabel,
+  OrganizationMatchRule,
+} from './matching.ts'
 
-export async function listOrganizationRules(
+/**
+ * This user's labels, in their arranged order, each with its rules.
+ *
+ * Two queries rather than a join: the rules come back flat and are grouped here,
+ * which keeps a label with no rules a row with an empty array instead of a row
+ * that vanishes for want of a match.
+ */
+export async function listOrganizationLabels(
   userId: string,
-): Promise<OrganizationRule[]> {
+): Promise<OrganizationLabel[]> {
   const owner = userId.trim().toLowerCase()
   if (!owner) return []
 
-  const rows = await db.query.organizationRules.findMany({
-    where: eq(organizationRules.userId, owner),
-    orderBy: [asc(organizationRules.position), asc(organizationRules.createdAt)],
+  const labels = await db.query.organizationLabels.findMany({
+    where: eq(organizationLabels.userId, owner),
+    orderBy: [
+      asc(organizationLabels.position),
+      asc(organizationLabels.createdAt),
+    ],
+  })
+  if (labels.length === 0) return []
+
+  const rules = await db.query.organizationRules.findMany({
+    where: inArray(
+      organizationRules.labelId,
+      labels.map((label) => label.id),
+    ),
+    orderBy: [asc(organizationRules.position)],
   })
 
-  return rows.map(({ id, name, description, field, value, enabled }) => ({
-    id,
-    name,
-    description,
-    field,
-    value,
-    enabled,
+  const rulesByLabel = new Map<string, OrganizationMatchRule[]>()
+  for (const rule of rules) {
+    const list = rulesByLabel.get(rule.labelId) ?? []
+    list.push({ id: rule.id, field: rule.field, value: rule.value })
+    rulesByLabel.set(rule.labelId, list)
+  }
+
+  return labels.map((label) => ({
+    id: label.id,
+    name: label.name,
+    description: label.description,
+    enabled: label.enabled,
+    rules: rulesByLabel.get(label.id) ?? [],
   }))
 }
 
-/** Replace the user's ordered rules atomically; invalid input leaves storage intact. */
-export async function saveOrganizationRules(
+/**
+ * Replace the user's labels and every rule they carry, atomically.
+ *
+ * Delete-then-insert rather than a diff, the same as the rules list has always
+ * been: the form submits the whole set, so a label removed on screen has to be
+ * removed here, and a stale rule is worse than a rewritten one. Invalid input
+ * leaves storage untouched.
+ */
+export async function saveOrganizationLabels(
   userId: string,
   input: unknown,
-): Promise<OrganizationRule[] | null> {
+): Promise<OrganizationLabel[] | null> {
   const owner = userId.trim().toLowerCase()
-  const rules = normaliseOrganizationRules(input)
-  if (!owner || !rules) return null
+  const labels = normaliseOrganizationLabels(input)
+  if (!owner || !labels) return null
 
   const now = new Date()
   await db.transaction(async (tx) => {
-    await tx.delete(organizationRules).where(eq(organizationRules.userId, owner))
-    if (rules.length > 0) {
-      await tx.insert(organizationRules).values(
-        rules.map((rule, position) => ({
-          ...rule,
+    const existing = await tx
+      .select({ id: organizationLabels.id })
+      .from(organizationLabels)
+      .where(eq(organizationLabels.userId, owner))
+
+    // Explicit, even though the foreign key cascades: a test or a manual
+    // delete that ran without `PRAGMA foreign_keys` would otherwise leave rules
+    // pointing at labels that no longer exist.
+    if (existing.length > 0) {
+      await tx.delete(organizationRules).where(
+        inArray(
+          organizationRules.labelId,
+          existing.map((row) => row.id),
+        ),
+      )
+    }
+    await tx.delete(organizationLabels).where(
+      eq(organizationLabels.userId, owner),
+    )
+
+    if (labels.length > 0) {
+      await tx.insert(organizationLabels).values(
+        labels.map((label, position) => ({
+          id: label.id,
           userId: owner,
+          name: label.name,
+          description: label.description,
+          enabled: label.enabled,
           position,
           createdAt: now,
           updatedAt: now,
         })),
       )
     }
+
+    const rules = labels.flatMap((label) =>
+      label.rules.map((rule, position) => ({
+        id: rule.id,
+        labelId: label.id,
+        field: rule.field,
+        value: rule.value,
+        position,
+      })),
+    )
+    if (rules.length > 0) await tx.insert(organizationRules).values(rules)
   })
 
-  return rules
+  return labels
+}
+
+/**
+ * The labels the decision model may file threads into.
+ *
+ * Enabled, described, and carrying no rules at all — a label with a rule is
+ * already decided by that rule, and offering it to the model would set the two
+ * against each other. Read once per sync batch, like the state meanings, because
+ * the answer does not change inside one run.
+ */
+export async function listMeaningLabels(
+  userId: string,
+): Promise<MeaningLabel[]> {
+  const labels = await listOrganizationLabels(userId)
+
+  return labels
+    .filter(
+      (label) =>
+        label.enabled &&
+        label.rules.length === 0 &&
+        label.description.trim().length > 0,
+    )
+    .map(({ id, name, description }) => ({
+      id,
+      name,
+      description: description.trim(),
+    }))
 }
 
 /**

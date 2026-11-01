@@ -1,7 +1,7 @@
 /**
  * The generation layer's second job: a reply *draft*.
  *
- * `decision.ts` splits the AI by owner, and its third stage (`TopicGenerator`)
+ * `decision.ts` splits the AI by owner, and its third stage (`ContextUpdater`)
  * writes a label. This is the other piece of prose — a reply the user could
  * send — and it is deliberately kept out of the pipeline: the pipeline runs on
  * every sync, while a draft is generated on demand, for one conversation, only
@@ -66,7 +66,7 @@ export type ReplyDraftRequest = {
 /**
  * Stage 4 of the AI layer: prose, on demand.
  *
- * Separate from `TopicGenerator` because the two are called at different times
+ * Separate from `ContextUpdater` because the two are called at different times
  * for different reasons — a topic is derived once per sync, a draft only when
  * the user asks — and because a drafter that is not configured must be able to
  * answer "no draft" without the caller special-casing it.

@@ -1833,14 +1833,16 @@ export function Inbox({
   )
   // Only enabled labels are places to move a thread *into*; a disabled rule
   // cannot receive mail, so offering it would create a section nobody can see.
-  const customLabels = payload.organizationRules.filter((rule) => rule.enabled)
+  const customLabels = payload.organizationLabels.filter(
+    (label) => label.enabled,
+  )
 
   // Counted from the rows being rendered rather than taken from the payload, so
   // the headings agree with a search's results rather than with the whole
   // mailbox.
   const organizationGroups = partitionOrganizationGroups(
     visibleConversations,
-    payload.organizationRules,
+    payload.organizationLabels,
   )
   const done = organizationGroups.done
 
@@ -2274,6 +2276,14 @@ export function Inbox({
                     className="size-1.5 shrink-0 rounded-full bg-foreground/30"
                   />
                   <span className="truncate">{label.name}</span>
+                  {label.rules.length === 0 ? (
+                    <span
+                      className="shrink-0 text-[10px] text-muted-foreground"
+                      title="No conditions: the decision model files threads here from its meaning"
+                    >
+                      by meaning
+                    </span>
+                  ) : null}
                   {menu.conversation.organizationGroup?.id === label.id ? (
                     <span className="ml-auto text-[10px] text-muted-foreground">
                       now
@@ -2294,8 +2304,8 @@ export function Inbox({
                 className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
               >
                 {menuTargetIds.length > 1
-                  ? 'Automatic for all (from rules)'
-                  : 'Automatic (from rules)'}
+                  ? 'Automatic for all (rules, then the model)'
+                  : 'Automatic (rules, then the model)'}
               </button>
             </>
           ) : null}

@@ -40,8 +40,16 @@ import type {
 import { listAccounts, setCursor } from '#/lib/auth/accounts.ts'
 import { cursorKindFor } from './types.ts'
 import { loadDecisionPipeline } from '#/lib/ai/index.ts'
+import {
+  latestLabelSource,
+  writeAutoContextUpdate,
+} from '#/lib/context/revisions.ts'
 import { listContactDecisionContextByEmail } from '#/lib/contacts/context.ts'
 import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
+import { customStateMeanings } from '#/lib/organization/labels.ts'
+import type { StateDefinitions } from '#/lib/organization/labels.ts'
+import type { MeaningLabel } from '#/lib/organization/matching.ts'
+import { listMeaningLabels, listStateLabels } from '#/lib/organization/store.ts'
 
 /** Progress callback, so a long backfill can report what it is doing. */
 export type SyncProgress = (event: SyncEvent) => void
@@ -79,6 +87,42 @@ export type SenderFacts = {
   ignored: ReadonlySet<string>
   unreplyable: ReadonlySet<string>
   contactContext: ReadonlyMap<string, ContactDecisionContext>
+}
+
+/**
+ * The state meanings the user rewrote, read once for a batch.
+ *
+ * Four rows per person, so asking again per thread would be a query a backfill
+ * pays hundreds of times for an answer that does not change. Never throws, for
+ * the same reason `loadDecisionPipeline` does not: a label read that fails must
+ * cost personalisation, not the decision.
+ */
+async function loadStateDefinitions(
+  userId: string,
+): Promise<StateDefinitions> {
+  try {
+    return customStateMeanings(await listStateLabels(userId))
+  } catch (error) {
+    console.error('[decide] could not read the state labels:', reasonOf(error))
+    return {}
+  }
+}
+
+/**
+ * The user's labels that have no match rule, read once for a batch.
+ *
+ * Never throws, for the same reason the state meanings do not: a label read that
+ * fails must cost custom filing, not the decision.
+ */
+async function loadMeaningLabelsFor(
+  userId: string,
+): Promise<MeaningLabel[]> {
+  try {
+    return await listMeaningLabels(userId)
+  } catch (error) {
+    console.error('[decide] could not read the custom labels:', reasonOf(error))
+    return []
+  }
 }
 
 /** Read sender signals and user-authored contact ratings once for a batch. */
@@ -202,6 +246,15 @@ export async function decideAndSave(
      * them down rather than asking the same questions per thread.
      */
     senderFacts?: SenderFacts
+    /**
+     * The user's own state meanings, reused across a batch.
+     *
+     * Omitted means "read the labels now", which is what the single-thread
+     * callers want; a sync must not read the same four rows per thread.
+     */
+    stateDefinitions?: StateDefinitions
+    /** The user's meaning-matched labels, reused across a batch. */
+    meaningLabels?: MeaningLabel[]
   },
 ): Promise<{ decision: Decision; conversation: Conversation }> {
   // A thread rebuilt from Gmail carries no memory of the user's own calls — that
@@ -222,6 +275,10 @@ export async function decideAndSave(
 
   const senderFacts =
     opts.senderFacts ?? (await loadSenderFacts(accountId, opts.userId))
+  const stateDefinitions =
+    opts.stateDefinitions ?? (await loadStateDefinitions(opts.userId))
+  const meaningLabels =
+    opts.meaningLabels ?? (await loadMeaningLabelsFor(opts.userId))
   const otherParty = otherPartyOf(withCall)
 
   const decision = await decideConversation(
@@ -239,6 +296,11 @@ export async function decideAndSave(
       senderImportance:
         senderFacts.contactContext.get(otherParty)?.importance ?? null,
       senderContext: senderFacts.contactContext.get(otherParty) ?? null,
+      stateDefinitions,
+      meaningLabels,
+      // Machine mail is labelled, never profiled. The flag is already derived
+      // from the messages and stored on the row, so this asks nothing new.
+      skipContextRefresh: withCall.isAutomated,
     },
     opts.pipeline ?? (await loadDecisionPipeline(opts.userId)),
   )
@@ -246,6 +308,59 @@ export async function decideAndSave(
 
   await saveConversation(accountId, updated)
   await recordDecision(updated, decision)
+
+  // The goal and the contact profile are written here rather than in
+  // `applyDecision`, which is what keeps them user-owned: a decision cannot
+  // touch them, and the only thing that can is this explicit, revisioned write
+  // behind the user's own switch. A keyless install — or one that never turned
+  // the switch on — proposes nothing, so this is a no-op for it.
+  if (
+    decision.goal !== null ||
+    decision.contact !== null ||
+    decision.labelId !== null
+  ) {
+    const storedContact = senderFacts.contactContext.get(otherParty)
+    // A label the app filed is provisional and may be replaced by a better
+    // reading; one the user filed is not. The revision log is what tells them
+    // apart — both writers share one column — and it is only consulted when the
+    // model actually disagrees, so a batch does not pay for it per thread.
+    const currentLabel = withCall.organizationGroupId
+    const mayRelabel =
+      decision.labelId !== null &&
+      decision.labelId !== currentLabel &&
+      (currentLabel === null ||
+        (await latestLabelSource(opts.userId, updated.id)) !== 'user')
+    try {
+      await writeAutoContextUpdate({
+        userId: opts.userId,
+        conversationId: updated.id,
+        providerThreadId: updated.providerThreadId,
+        goal: { previous: withCall.goal, next: decision.goal },
+        label: mayRelabel
+          ? { previous: currentLabel, next: decision.labelId }
+          : null,
+        contact:
+          decision.contact && otherParty
+            ? {
+                email: otherParty,
+                previous: {
+                  roleCompany: storedContact?.roleCompany ?? '',
+                  relationship: storedContact?.relationship ?? '',
+                  topics: storedContact?.topics ?? '',
+                  currentWork: storedContact?.currentWork ?? '',
+                },
+                next: decision.contact,
+              }
+            : null,
+      })
+    } catch (error) {
+      // The decision is already stored; a failed refresh must not fail the sync.
+      console.error(
+        `[context] could not record the update for ${updated.providerThreadId}:`,
+        reasonOf(error),
+      )
+    }
+  }
 
   return { decision, conversation: updated }
 }
@@ -277,6 +392,8 @@ export async function redecideConversationsForSender(
   const accounts = await listAccounts(userId)
   if (accounts.length === 0) return 0
   const pipeline = await loadDecisionPipeline(userId)
+  const stateDefinitions = await loadStateDefinitions(userId)
+  const meaningLabels = await loadMeaningLabelsFor(userId)
   let redecided = 0
 
   for (const account of accounts) {
@@ -298,6 +415,8 @@ export async function redecideConversationsForSender(
           userId,
           pipeline,
           senderFacts,
+          stateDefinitions,
+          meaningLabels,
         })
         redecided++
       } catch (error) {
@@ -323,6 +442,8 @@ export async function redecideStoredConversations(
 
   const pipeline = await loadDecisionPipeline(userId)
   const senderFacts = await loadSenderFacts(accountId, userId)
+  const stateDefinitions = await loadStateDefinitions(userId)
+  const meaningLabels = await loadMeaningLabelsFor(userId)
 
   let redecided = 0
   for (const conversation of conversations) {
@@ -331,6 +452,8 @@ export async function redecideStoredConversations(
         userId,
         pipeline,
         senderFacts,
+        stateDefinitions,
+        meaningLabels,
       })
       redecided++
     } catch (error) {
@@ -364,6 +487,10 @@ export async function syncThread(
      * this one.
      */
     senderFacts?: SenderFacts
+    /** The user's state meanings, loaded once by the batch that owns this sync. */
+    stateDefinitions?: StateDefinitions
+    /** The user's meaning-matched labels, loaded once by the owning batch. */
+    meaningLabels?: MeaningLabel[]
   },
 ): Promise<'synced' | 'skipped' | 'error'> {
   const { onProgress, profileContext, senderFacts } = opts
@@ -408,6 +535,8 @@ export async function syncThread(
     await decideAndSave(accountId, built, {
       userId: opts.userId,
       senderFacts,
+      stateDefinitions: opts.stateDefinitions,
+      meaningLabels: opts.meaningLabels,
     })
 
     onProgress?.({
@@ -476,6 +605,8 @@ export async function backfill(
   const targets = opts.limit ? threadIds.slice(0, opts.limit) : threadIds
   const profileContext = await getParsingProfileContext(accountId)
   const senderFacts = await loadSenderFacts(accountId, opts.userId)
+  const stateDefinitions = await loadStateDefinitions(opts.userId)
+  const meaningLabels = await loadMeaningLabelsFor(opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 
@@ -492,6 +623,8 @@ export async function backfill(
           onProgress,
           profileContext,
           senderFacts,
+          stateDefinitions,
+          meaningLabels,
         })
       } catch (error) {
         onProgress?.({
@@ -554,6 +687,8 @@ export async function syncIncremental(
     : [...threadIds]
   const profileContext = await getParsingProfileContext(accountId)
   const senderFacts = await loadSenderFacts(accountId, opts.userId)
+  const stateDefinitions = await loadStateDefinitions(opts.userId)
+  const meaningLabels = await loadMeaningLabelsFor(opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 
@@ -568,6 +703,8 @@ export async function syncIncremental(
           onProgress,
           profileContext,
           senderFacts,
+          stateDefinitions,
+          meaningLabels,
         })
       } catch (error) {
         onProgress?.({

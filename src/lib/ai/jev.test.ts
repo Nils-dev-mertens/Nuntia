@@ -78,6 +78,52 @@ describe('JevDecisionModel', () => {
     expect(verdict.reasoning).toBeTruthy()
   })
 
+  test('asks the state question with the recipient’s own meaning for the label', async () => {
+    let body: Record<string, unknown> = {}
+
+    const fetchImpl: FetchLike = async (_url, init) => {
+      body = JSON.parse(init.body) as Record<string, unknown>
+      return json(200, {
+        model: 'jev-1.13.0',
+        answers: {
+          importance: { type: 'score', score: 5 },
+          urgency: { type: 'score', score: 5 },
+          state: { type: 'choice', choice: 'informational' },
+          replyable: { type: 'choice', choice: 'replyable' },
+        },
+      })
+    }
+
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
+    await model.decide(
+      {
+        ...INPUT,
+        stateDefinitions: {
+          'needs-action': 'Only when a client is waiting on a decision from me.',
+        },
+      },
+      // The rules abstained, so the state question is the one being asked.
+      { ...RULES_ABSTAINED },
+    )
+
+    const questions = body.questions as Record<
+      string,
+      { instructions: string }
+    >
+    expect(questions.state.instructions).toContain(
+      'Only when a client is waiting on a decision from me.',
+    )
+    // The transcript carries it too, labelled as the recipient's own words
+    // rather than as an instruction the model should obey.
+    expect(String(body.state)).toContain(
+      'Needs action: Only when a client is waiting on a decision from me.',
+    )
+  })
+
   test('includes a user-authored contact rating as context for the importance decision', async () => {
     let requestState = ''
     let instructions = ''

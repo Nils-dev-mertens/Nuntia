@@ -16,7 +16,7 @@
  *
  *   1. `RuleClassifier`    — deterministic, keyless, always runs
  *   2. `DecisionModel`     — Jev, typed decisions
- *   3. `TopicGenerator`    — an LLM, short prose
+ *   3. `ContextUpdater`    — an LLM, prose and context
  *
  * A keyless install just uses the rule-based defaults below. `decideConversation`
  * runs the stages in order and folds the result into one `Decision`.
@@ -27,7 +27,12 @@
 
 import type { Conversation, ConversationMessage } from './model.ts'
 import type { ConversationState } from '#/db/schema.ts'
-import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
+import type {
+  ContactContextTextFields,
+  ContactDecisionContext,
+} from '#/lib/contacts/context.ts'
+import type { StateDefinitions } from '#/lib/organization/labels.ts'
+import type { MeaningLabel } from '#/lib/organization/matching.ts'
 import {
   activeImportanceOverride,
   activeStateOverride,
@@ -74,6 +79,34 @@ export type DecisionInput = {
   senderImportance?: number | null
   /** User-authored profile notes for this correspondent, when present. */
   senderContext?: ContactDecisionContext | null
+  /**
+   * The user's own words for what a state means, where they rewrote one.
+   *
+   * The one place a classification can be personal: the rules and Jev both read
+   * "needs action" the same way for everyone, and that is the label users
+differ on most. Only customised labels arrive here — see
+   * `customStateMeanings` — so an install that never edited a label sends
+   * exactly what it sent before.
+   */
+  stateDefinitions?: StateDefinitions | null
+  /**
+   * Machine mail, where a refreshed profile would be noise rather than context.
+   *
+   * A verification code must not become the correspondent's `currentWork`, so the
+   * stage still labels the thread but proposes no goal and no profile. The stored
+   * `is_automated` flag is the caller's to pass: it is derived from the messages
+   * before the rules run, so nothing has to guess here.
+   */
+  skipContextRefresh?: boolean
+  /**
+   * The user's own labels that have no match rule, so something has to read the
+   * mail to place a thread in one.
+   *
+   * Only those: a label with a rule is settled by the rule, and the model is not
+   * asked about it. Empty means the user has no meaning-matched labels, which is
+   * the case for most installs.
+   */
+  meaningLabels?: MeaningLabel[] | null
 }
 
 /**
@@ -136,6 +169,13 @@ export type ModelVerdict = {
    * thread has a human on it; machine mail is settled before the model sees it.
    */
   replyable: boolean | null
+  /**
+   * The id of one of the user's own meaning-matched labels, or null for none.
+   *
+   * Ids rather than names, because a rename has to move every thread with it.
+   * Only ever an id the caller offered, so a model cannot invent a label.
+   */
+  labelId: string | null
   reasoning: string | null
 }
 
@@ -145,10 +185,45 @@ export interface DecisionModel {
   decide: (input: DecisionInput, facts: RuleFacts) => Promise<ModelVerdict>
 }
 
-/** Stage 3 — prose. An LLM writes the topic label. */
-export interface TopicGenerator {
+/**
+ * What one context refresh produced.
+ *
+ * Three optional answers rather than a shape to copy over: a thread that says
+ * nothing new about its correspondent returns the topic alone, and an empty
+ * field means "nothing to change" — never "clear it". A model that returns
+ * nothing at all returns `null` at the caller.
+ */
+export type ContextUpdate = {
+  topic: string | null
+  goal: string | null
+  contact: ContactContextTextFields | null
+  /**
+   * The id of one of the user's meaning-matched labels, or null for none.
+   *
+   * The same answer the decision model gives, asked here because which section a
+   * thread belongs in is a judgement about prose — so an LLM is a fair second
+   * opinion, and on an install with no Jev key it is the only one available.
+   * Jev's typed answer wins where both are configured; see `decideConversation`.
+   */
+  labelId?: string | null
+}
+
+/**
+ * Stage 3 — prose. An LLM labels the thread and refreshes what the app knows
+ * about it.
+ *
+ * One prompt rather than three. The topic label already ran on every decide and
+ * its answer was thrown away whenever a topic existed, so the same call now
+ * returns the goal and the contact fields when the user has asked for them —
+ * one call whether it is labelling a topic or refreshing a profile. A user who
+ * has not opted in sends the label-only prompt they sent before, for the same
+ * budget.
+ *
+ * Nothing this returns is written by `applyDecision`; see `applyDecision`'s note.
+ */
+export interface ContextUpdater {
   readonly name: string
-  generate: (input: DecisionInput) => Promise<string | null>
+  update: (input: DecisionInput) => Promise<ContextUpdate | null>
 }
 
 /** The composed result, in the order the app consumes it. */
@@ -166,6 +241,23 @@ export type Decision = {
   urgency: number
   /** Topic is an LLM's job; null until one is configured. */
   topic: string | null
+  /**
+   * A goal the context stage proposes, or null when it proposed none.
+   *
+   * Deliberately not folded into `applyDecision`, which is what keeps the goal
+   * user-owned: the thing that writes it is an explicit, revisioned call behind
+   * the user's own switch.
+   */
+  goal: string | null
+  /** Contact profile fields the context stage proposes, or null for none. */
+  contact: ContactContextTextFields | null
+  /**
+   * A custom label the decision settled the thread into, or null for none.
+   *
+   * Not applied by `applyDecision`: the write goes through the revision log, and
+   * only for a thread the user has not filed by hand.
+   */
+  labelId: string | null
   reasoning: string | null
   /** Stage names that ran, in order. Recorded on the `decisions` row. */
   providers: string[]
@@ -174,7 +266,7 @@ export type Decision = {
 export type DecisionPipeline = {
   rules: RuleClassifier
   model: DecisionModel
-  topics: TopicGenerator
+  context: ContextUpdater
 }
 
 /**
@@ -288,16 +380,17 @@ export class PlaceholderDecisionModel implements DecisionModel {
       importance: facts.placeholderImportance,
       urgency: facts.placeholderUrgency,
       replyable: null,
+      labelId: null,
       reasoning: null,
     }
   }
 }
 
-/** Keyless fallback for the topic stage: no topic. */
-export class NoTopicGenerator implements TopicGenerator {
+/** Keyless fallback for the context stage: no topic, no update. */
+export class NoContextUpdater implements ContextUpdater {
   readonly name = 'none'
 
-  async generate(): Promise<string | null> {
+  async update(): Promise<ContextUpdate | null> {
     return null
   }
 }
@@ -307,7 +400,7 @@ export function defaultDecisionPipeline(): DecisionPipeline {
   return {
     rules: new HeuristicRuleClassifier(),
     model: new PlaceholderDecisionModel(),
-    topics: new NoTopicGenerator(),
+    context: new NoContextUpdater(),
   }
 }
 
@@ -332,7 +425,7 @@ export async function decideConversation(
   // a rejected parameter) must not stop a synced thread from being saved —
   // otherwise the inbox silently stops showing new mail.
   const verdict = await safeDecide(pipeline.model, input, facts)
-  const topic = await safeGenerateTopic(pipeline.topics, input)
+  const context = await safeUpdateContext(pipeline.context, input)
 
   return {
     state: foldState(facts, verdict),
@@ -348,9 +441,15 @@ export async function decideConversation(
         : (verdict.replyable ?? true),
     importance: verdict.importance,
     urgency: verdict.urgency,
-    topic,
+    topic: context?.topic ?? null,
+    goal: context?.goal ?? null,
+    contact: context?.contact ?? null,
+    // The typed decision first, then prose: Jev answers with a calibrated choice
+    // and the LLM with a reading of the description, and a keyless-Jev install
+    // otherwise has nobody to ask at all.
+    labelId: verdict.labelId ?? context?.labelId ?? null,
     reasoning: verdict.reasoning ?? facts.reasoning,
-    providers: [pipeline.rules.name, pipeline.model.name, pipeline.topics.name],
+    providers: [pipeline.rules.name, pipeline.model.name, pipeline.context.name],
   }
 }
 
@@ -409,23 +508,30 @@ async function safeDecide(
       importance: facts.placeholderImportance,
       urgency: facts.placeholderUrgency,
       replyable: null,
+      labelId: null,
       reasoning: null,
     }
   }
 }
 
-/** Generate the topic label, or null when the generator fails. */
-async function safeGenerateTopic(
-  topics: TopicGenerator,
+/**
+ * Run the context stage, or null when it fails.
+ *
+ * A failure costs the label and the refresh, never the decision: the stored goal
+ * and profile stay exactly as they were, which is the same rule the decision
+ * model follows.
+ */
+async function safeUpdateContext(
+  context: ContextUpdater,
   input: DecisionInput,
-): Promise<string | null> {
+): Promise<ContextUpdate | null> {
   try {
-    return await topics.generate(input)
+    return await context.update(input)
   } catch (error) {
     await reportAiFailure(
-      topics.name,
+      context.name,
       error,
-      'failed; this conversation gets no topic',
+      'failed; this conversation gets no topic and no context update',
     )
     return null
   }

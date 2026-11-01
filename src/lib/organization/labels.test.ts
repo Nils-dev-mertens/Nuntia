@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 
 import {
+  customStateMeanings,
   defaultStateLabels,
   normaliseStateLabels,
   resolveStateLabels,
@@ -39,6 +40,25 @@ describe('state labels', () => {
       },
     ])
     expect(stateLabelOverrides(defaultStateLabels())).toEqual([])
+  })
+
+  test('only a meaning the user rewrote reaches the decision prompt', () => {
+    const labels = defaultStateLabels()
+    expect(customStateMeanings(labels)).toEqual({})
+
+    labels['needs-action'].description =
+      '  Only a client waiting on a decision from me.  '
+    expect(customStateMeanings(labels)).toEqual({
+      'needs-action': 'Only a client waiting on a decision from me.',
+    })
+
+    // A renamed label carrying the app's own meaning is not a new definition:
+    // sending it would spend tokens restating the default.
+    labels['needs-action'] = {
+      name: 'Do this now',
+      description: defaultStateLabels()['needs-action'].description,
+    }
+    expect(customStateMeanings(labels)).toEqual({})
   })
 
   test('normalises a full set of labels', () => {

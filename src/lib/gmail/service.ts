@@ -88,13 +88,14 @@ import type { ContactContext } from '#/lib/contacts/context.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
 import {
-  listOrganizationRules,
+  listOrganizationLabels,
   listStateLabels,
 } from '#/lib/organization/store.ts'
+import { recordUserLabelChange } from '#/lib/context/revisions.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
 import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
 import { resolveOrganizationGroup } from '#/lib/organization/matching.ts'
-import type { OrganizationRule } from '#/lib/organization/matching.ts'
+import type { OrganizationLabel } from '#/lib/organization/matching.ts'
 import {
   downloadAttachment,
   isCached,
@@ -199,8 +200,8 @@ export type InboxPayload =
       conversations: ConversationSummary[]
       /** Every state is present, including zeroes, so the UI can render headers. */
       counts: Record<ConversationState, number>
-      /** Ordered user-defined rules used to create custom inbox sections. */
-      organizationRules: OrganizationRule[]
+      /** Ordered user-defined labels, each with the rules that find its mail. */
+      organizationLabels: OrganizationLabel[]
       /**
        * The user's section order: `state:<state>` and `label:<rule id>` tokens.
        * Done is not in it — a finished thread is always the last section.
@@ -877,12 +878,20 @@ export async function setConversationUnread(
 
 /**
  * File a thread under one of the user's custom labels, or hand it back to the
- * rules with `null`.
+ * app with `null`.
  *
- * A local write: a custom label is Nuntia's own filing, not something Gmail
- * knows about. The id arrives from the browser, so it is checked against the
- * user's own rules here — an unknown label is refused rather than stored, or the
- * thread would vanish from every section.
+ * "Hand it back" is two steps, and the second one is the point: clearing the
+ * column only removes the user's answer, so the thread would sit in no section
+ * until something else decided it. The re-decide is what actually runs the
+ * automatic path — the rules first, then the decision model for the labels that
+ * have no conditions. Without it, a label placed by meaning could never be
+ * reached from this menu at all: it has no rule to match, so clearing the column
+ * would simply leave the thread unlabelled.
+ *
+ * A local write either way: a custom label is Nuntia's own filing, not something
+ * Gmail knows about. The id arrives from the browser, so it is checked against
+ * the user's own labels here — an unknown one is refused rather than stored, or
+ * the thread would vanish from every section.
  */
 export async function setConversationOrganizationGroup(
   userId: string,
@@ -895,8 +904,8 @@ export async function setConversationOrganizationGroup(
   )
 
   if (groupId !== null) {
-    const rules = await listOrganizationRules(userId)
-    if (!rules.some((rule) => rule.id === groupId && rule.enabled)) {
+    const labels = await listOrganizationLabels(userId)
+    if (!labels.some((label) => label.id === groupId && label.enabled)) {
       throw new Error('That label no longer exists.')
     }
   }
@@ -906,6 +915,33 @@ export async function setConversationOrganizationGroup(
     conversation.providerThreadId,
     groupId,
   )
+
+  // Recorded as the user's own filing, which is what stops the decision layer
+  // moving the thread again: one column holds both their answer and the app's
+  // guess, and the revision log is the only thing that distinguishes them.
+  try {
+    await recordUserLabelChange({
+      userId,
+      conversationId: conversation.id,
+      providerThreadId: conversation.providerThreadId,
+      previous: conversation.organizationGroupId,
+      next: groupId,
+    })
+  } catch (error) {
+    // The move is already stored; a missing revision must not undo it.
+    console.error('[organization] could not record the label change:', error)
+  }
+
+  if (groupId === null) {
+    // `conversation` is the row as it was read, so its label is the one just
+    // cleared. Passing it on stale would make the decision layer think the
+    // thread is still filed and leave it where it was.
+    await decideAndSave(
+      accountId,
+      { ...conversation, organizationGroupId: null },
+      { userId },
+    )
+  }
 }
 
 /**
@@ -1653,7 +1689,7 @@ function toSummary(
   emailById: Map<string, string>,
   names: Map<string, string>,
   useGravatar: boolean,
-  organizationRules: OrganizationRule[],
+  organizationLabels: OrganizationLabel[],
   contactImportance: ReadonlyMap<string, number>,
 ): ConversationSummary {
   const conversation = merged.conversation
@@ -1668,7 +1704,7 @@ function toSummary(
       topic: conversation.topic,
       state: conversation.state,
     },
-    organizationRules,
+    organizationLabels,
   )
 
   return {
@@ -1912,9 +1948,9 @@ export async function loadInbox(
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
   const { counts, doneCount } = partitionByState(matched)
-  const [organizationRules, contactImportance, stateLabels] = await Promise.all(
-    [
-      listOrganizationRules(userId),
+  const [organizationLabels, contactImportance, stateLabels] =
+    await Promise.all([
+      listOrganizationLabels(userId),
       listContactImportanceByEmail(userId),
       listStateLabels(userId),
     ],
@@ -1925,7 +1961,7 @@ export async function loadInbox(
   // hide a section.
   const inboxOrder = resolveInboxOrder(
     preferences.inboxOrder,
-    organizationRules.filter((rule) => rule.enabled).map((rule) => rule.id),
+    organizationLabels.filter((label) => label.enabled).map((label) => label.id),
   )
 
   // The list is grouped by state in the UI, but ordering within a group is by
@@ -1940,7 +1976,7 @@ export async function loadInbox(
     signedIn: true,
     microsoftConfigured: isMicrosoftConfigured(),
     accounts,
-    organizationRules,
+    organizationLabels,
     inboxOrder,
     stateLabels,
     conversations: matched.map((row) =>
@@ -1949,7 +1985,7 @@ export async function loadInbox(
         emailById,
         names,
         preferences.useGravatar,
-        organizationRules,
+        organizationLabels,
         contactImportance,
       ),
     ),

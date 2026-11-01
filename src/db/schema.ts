@@ -37,6 +37,13 @@ export const INTENTS = [
 
 export type Intent = (typeof INTENTS)[number]
 
+/**
+ * The tests a label's rules may run against a thread.
+ *
+ * There is deliberately no `meaning` value. A label with no rules is the one the
+ * decision model places, so "chosen by its meaning" is the *absence* of a test
+ * rather than a test that never matches.
+ */
 export const ORGANIZATION_RULE_FIELDS = [
   'sender-email',
   'sender-domain',
@@ -666,8 +673,23 @@ export const contactContexts = sqliteTable(
   ],
 )
 
-export const organizationRules = sqliteTable(
-  'organization_rules',
+/**
+ * A custom inbox section: the user's own name, meaning and order for a group of
+ * threads.
+ *
+ * Separate from `organization_rules` because the two answer different questions.
+ * This is *what the section is* — the name shown in the heading, the meaning
+ * under it, whether it is shown at all, and where it sits. The rules are *how a
+ * thread is found for it*, and there may be none: a label with no rules is one
+ * only judgement can place, which is what the decision model reads its
+ * description for.
+ *
+ * Keeping them apart is what lets one label match several ways — "invoices" can
+ * be a domain *or* a subject line — where a single row could only ever test one
+ * field once.
+ */
+export const organizationLabels = sqliteTable(
+  'organization_labels',
   {
     id: text('id').primaryKey(),
     userId: text('user_id')
@@ -677,11 +699,10 @@ export const organizationRules = sqliteTable(
     name: text('name').notNull(),
     /**
      * What this label means, in the user's words — shown under the inbox heading
-     * so a section explains itself rather than only naming itself.
+     * so a section explains itself rather than only naming itself, and read by
+     * the decision model when the label has no rules.
      */
     description: text('description').notNull().default(''),
-    field: text('field').$type<OrganizationRuleField>().notNull(),
-    value: text('value').notNull(),
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
     /** Lower number wins; array order is preserved by the settings UI. */
     position: integer('position').notNull(),
@@ -693,8 +714,37 @@ export const organizationRules = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [
-    index('organization_rules_user_position_idx').on(
+    index('organization_labels_user_position_idx').on(
       table.userId,
+      table.position,
+    ),
+  ],
+)
+
+/**
+ * One test a label runs against a thread.
+ *
+ * A label may have several, and they are alternatives rather than conditions: a
+ * thread is filed as soon as any enabled label has any matching rule. Deleting a
+ * rule is how it stops matching — there is no per-rule off switch, because a
+ * rule you do not want is a rule you should remove, and `enabled` on the label
+ * already answers "do I want this section at all".
+ */
+export const organizationRules = sqliteTable(
+  'organization_rules',
+  {
+    id: text('id').primaryKey(),
+    labelId: text('label_id')
+      .notNull()
+      .references(() => organizationLabels.id, { onDelete: 'cascade' }),
+    field: text('field').$type<OrganizationRuleField>().notNull(),
+    value: text('value').notNull(),
+    /** Lower number wins within the label; order decides which match names it. */
+    position: integer('position').notNull(),
+  },
+  (table) => [
+    index('organization_rules_label_position_idx').on(
+      table.labelId,
       table.position,
     ),
   ],
@@ -726,6 +776,66 @@ export const stateLabels = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [primaryKey({ columns: [table.userId, table.state] })],
+)
+
+export const CONTEXT_REVISION_SCOPES = ['contact', 'conversation'] as const
+export type ContextRevisionScope = (typeof CONTEXT_REVISION_SCOPES)[number]
+
+/**
+ * Who made a change: the app refreshing context after a thread settled, or the
+ * user editing it.
+ *
+ * The pair is what makes the log worth keeping. `auto` alone is a changelog;
+ * `user` right after an `auto` is a correction, and a run of corrections in one
+ * direction is the only honest evidence of what a label means to this person.
+ */
+export const CONTEXT_REVISION_SOURCES = ['auto', 'user'] as const
+export type ContextRevisionSource = (typeof CONTEXT_REVISION_SOURCES)[number]
+
+/**
+ * Every change made to the context the app holds for one person.
+ *
+ * Two jobs, and both need the *previous* value rather than only the new one: an
+ * Undo, and the correction signal that can teach the app what "Needs action"
+ * means to this user. Neither can be reconstructed from the current row, so the
+ * history has to be written when the write happens.
+ *
+ * Deliberately small and pruned per target: a safety net plus a correction log,
+ * not an audit trail of everything the app has ever thought.
+ */
+export const contextRevisions = sqliteTable(
+  'context_revisions',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** `contact` targets an address, `conversation` targets a conversation id. */
+    scope: text('scope').$type<ContextRevisionScope>().notNull(),
+    /** Lowercased address for a contact, `conversations.id` for a conversation. */
+    target: text('target').notNull(),
+    /** Which field changed: `state`, `topic`, `goal`, `roleCompany`, … */
+    field: text('field').notNull(),
+    /** The value before the write; null when there was none. */
+    previousValue: text('previous_value'),
+    /** The value written; null when the write cleared it. */
+    nextValue: text('next_value'),
+    source: text('source').$type<ContextRevisionSource>().notNull(),
+    /** The thread the change was read from, when there is one. */
+    threadId: text('thread_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    /** Set when the user undid this change; the revision itself is kept. */
+    undoneAt: integer('undone_at', { mode: 'timestamp_ms' }),
+  },
+  (table) => [
+    index('context_revisions_target_idx').on(
+      table.userId,
+      table.target,
+      table.createdAt,
+    ),
+  ],
 )
 
 export const contacts = sqliteTable(
@@ -833,6 +943,19 @@ export const appSettings = sqliteTable(
     goalCheckEnabled: integer('goal_check_enabled', { mode: 'boolean' })
       .notNull()
       .default(true),
+    /**
+     * Whether the app refreshes a thread's goal and the correspondent's profile
+     * from the mail itself.
+     *
+     * The one AI feature that writes to fields the user owns, which is why it is
+     * off by default and why it is a switch at all: it is one model call per
+     * decided thread, and what it buys is text the user did not type. Everything
+     * it writes lands in `context_revisions` with an Undo, so opting in is not a
+     * one-way door — but opting in is still the user's decision to make.
+     */
+    autoContextEnabled: integer('auto_context_enabled', { mode: 'boolean' })
+      .notNull()
+      .default(false),
     /**
      * Whether avatars may be fetched from Gravatar.
      *
@@ -1263,6 +1386,8 @@ export type SenderProfile = typeof senderProfiles.$inferSelect
 export type SenderSignal = typeof senderSignals.$inferSelect
 export type Contact = typeof contacts.$inferSelect
 export type ContactContext = typeof contactContexts.$inferSelect
+export type OrganizationLabelRow = typeof organizationLabels.$inferSelect
 export type OrganizationRuleRow = typeof organizationRules.$inferSelect
 export type FormParticipation = typeof formParticipation.$inferSelect
 export type Decision = typeof decisions.$inferSelect
+export type ContextRevision = typeof contextRevisions.$inferSelect

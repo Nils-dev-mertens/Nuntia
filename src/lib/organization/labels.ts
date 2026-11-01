@@ -15,10 +15,33 @@ import { STATE_META } from '#/lib/conversation-state.ts'
 export type StateLabel = { name: string; description: string }
 export type StateLabels = Record<ConversationState, StateLabel>
 
+/**
+ * The state meanings the user has rewritten, keyed by state.
+ *
+ * A partial map because most people never edit a label, and the decision prompt
+ * should not pay to read back the app's own default copy.
+ */
+export type StateDefinitions = Partial<Record<ConversationState, string>>
+
 export const STATE_LABEL_LIMITS = {
   name: 40,
   description: 300,
 } as const
+
+/**
+ * How many corrections one label needs before a rewritten meaning is proposed.
+ *
+ * Three: one is a misfiled thread, two is a coincidence, and the first two would
+ * otherwise be enough to rewrite a definition on very little evidence.
+ *
+ * Here rather than beside the proposal code on purpose. This module is pure —
+ * schema constants and the app's own copy — while `state-meaning.ts` opens the
+ * database. The settings page prints this number in its markup, and a value
+ * import from a database module at render time is not stripped by the
+ * server-function transform: it drags `createClient({ url: 'file:…' })` into the
+ * browser bundle, where libsql refuses the scheme.
+ */
+export const STATE_MEANING_MIN_CORRECTIONS = 3
 
 /** What a label reads as before the user has changed it. */
 export function defaultStateLabels(): StateLabels {
@@ -69,6 +92,28 @@ export function stateLabelOverrides(
       labels[state].name !== defaults[state].name ||
       labels[state].description !== defaults[state].description,
   ).map((state) => ({ state, ...labels[state] }))
+}
+
+/**
+ * The labels this user has put into their own words, for the decision prompt.
+ *
+ * "Needs action" is not the same claim for a support desk and a founder, so a
+ * meaning the user rewrote has to travel with the thread. Only changed labels
+ * are returned: an untouched label is the app's own copy, and sending it would
+ * spend tokens restating the default.
+ */
+export function customStateMeanings(labels: StateLabels): StateDefinitions {
+  const defaults = defaultStateLabels()
+  const meanings: StateDefinitions = {}
+
+  for (const state of CONVERSATION_STATES) {
+    const description = labels[state].description.trim()
+    if (description && description !== defaults[state].description) {
+      meanings[state] = description
+    }
+  }
+
+  return meanings
 }
 
 /**

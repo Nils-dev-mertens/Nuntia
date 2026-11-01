@@ -31,6 +31,7 @@ const {
   accounts,
   appSettings,
   attachments: attachmentsTable,
+  contextRevisions,
   conversations,
   decisions,
   messages,
@@ -1506,6 +1507,42 @@ describe('the user’s own call on a thread', () => {
       await import('#/lib/mailbox/sync.ts')
     await redecideStoredConversations(ACCOUNT, USER)
     expect((await listConversations(ACCOUNT))[0].state).toBe('low-priority')
+  })
+
+  test('a changed label is kept as a correction; confirming one is not', async () => {
+    const client = new FakeMailboxClient({
+      threads: [question('ask-thread', 'Can you confirm Tuesday?')],
+    })
+    await backfill(client, ACCOUNT, { userId: USER })
+
+    const { applyUserStateOverride } = await import('#/lib/gmail/service.ts')
+    await applyUserStateOverride(USER, 'ask-thread', 'low-priority')
+
+    const revisions = await db.select().from(contextRevisions)
+    expect(revisions).toHaveLength(1)
+    expect(revisions[0]).toMatchObject({
+      userId: USER,
+      scope: 'conversation',
+      field: 'state',
+      previousValue: 'needs-action',
+      nextValue: 'low-priority',
+      source: 'user',
+      threadId: 'ask-thread',
+    })
+
+    // Picking the label the thread already has agrees with the app rather than
+    // correcting it, so there is nothing to learn and nothing to undo.
+    await applyUserStateOverride(USER, 'ask-thread', 'low-priority')
+    expect(await db.select().from(contextRevisions)).toHaveLength(1)
+
+    // Handing it back is a correction too: the call being removed is the
+    // previous value, and that is what an Undo would restore.
+    await applyUserStateOverride(USER, 'ask-thread', null)
+    const after = await db.select().from(contextRevisions)
+    expect(after).toHaveLength(2)
+    expect(after.map((row) => [row.previousValue, row.nextValue])).toContainEqual(
+      ['low-priority', null],
+    )
   })
 
   test('a new message re-opens a thread the user filed away', async () => {

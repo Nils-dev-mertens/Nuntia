@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 
 import type { DecisionInput } from '#/lib/conversation/index.ts'
 
-import { LlmTopicGenerator, sanitizeTopic } from './llm.ts'
+import { LlmContextUpdater } from './context.ts'
+import { sanitizeTopic } from './llm.ts'
 import type { FetchLike } from './http.ts'
 
 const INPUT: DecisionInput = {
@@ -17,7 +18,7 @@ function json(status: number, body: unknown) {
   return { status, text: async () => JSON.stringify(body) }
 }
 
-describe('LlmTopicGenerator', () => {
+describe('LlmContextUpdater', () => {
   test('reads an Anthropic response and sanitizes the label', async () => {
     const fetchImpl: FetchLike = async (url, init) => {
       expect(url).toContain('api.anthropic.com')
@@ -25,14 +26,14 @@ describe('LlmTopicGenerator', () => {
       return json(200, { content: [{ type: 'text', text: '"Launch schedule."' }] })
     }
 
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'anthropic',
       apiKey: 'k',
       model: 'm',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBe('Launch schedule')
+    expect(await (await generator.update(INPUT))?.topic).toBe('Launch schedule')
     expect(generator.name).toBe('llm:anthropic')
   })
 
@@ -44,14 +45,14 @@ describe('LlmTopicGenerator', () => {
       return json(200, { choices: [{ message: { content: 'Launch schedule' } }] })
     }
 
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'openai',
       apiKey: 'k',
       model: 'gpt-4.1-mini',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBe('Launch schedule')
+    expect(await (await generator.update(INPUT))?.topic).toBe('Launch schedule')
     // `max_tokens` is rejected by the reasoning models; the current name is
     // `max_completion_tokens`.
     expect(body.max_completion_tokens).toBe(64)
@@ -66,14 +67,14 @@ describe('LlmTopicGenerator', () => {
       return json(200, { choices: [{ message: { content: 'Launch schedule' } }] })
     }
 
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'openai',
       apiKey: 'k',
       model: 'gpt-5-mini',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBe('Launch schedule')
+    expect(await (await generator.update(INPUT))?.topic).toBe('Launch schedule')
     // `max_completion_tokens` also pays for hidden reasoning, so a label-sized
     // budget is spent before the model writes a word and the call 400s.
     expect(body.max_completion_tokens).toBe(4096)
@@ -87,14 +88,14 @@ describe('LlmTopicGenerator', () => {
       return json(200, { choices: [{ message: { content: 'Launch schedule' } }] })
     }
 
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'openai',
       apiKey: 'k',
       model: 'o3',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBe('Launch schedule')
+    expect(await (await generator.update(INPUT))?.topic).toBe('Launch schedule')
     expect(body.max_completion_tokens).toBe(4096)
     expect(body.temperature).toBeUndefined()
   })
@@ -107,26 +108,26 @@ describe('LlmTopicGenerator', () => {
       })
     }
 
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'gemini',
       apiKey: 'k',
       model: 'gemini-2.5-flash',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBe('Launch schedule')
+    expect(await (await generator.update(INPUT))?.topic).toBe('Launch schedule')
   })
 
   test('returns null when a provider answers with no text', async () => {
     const fetchImpl: FetchLike = async () => json(200, { content: [] })
-    const generator = new LlmTopicGenerator({
+    const generator = new LlmContextUpdater({
       provider: 'anthropic',
       apiKey: 'k',
       model: 'm',
       fetchImpl,
     })
 
-    expect(await generator.generate(INPUT)).toBeNull()
+    expect(await (await generator.update(INPUT))?.topic).toBeNull()
   })
 })
 

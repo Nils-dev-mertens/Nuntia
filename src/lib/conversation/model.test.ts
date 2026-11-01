@@ -18,7 +18,7 @@ import {
   applyDecision,
   decideConversation,
   HeuristicRuleClassifier,
-  NoTopicGenerator,
+  NoContextUpdater,
   PlaceholderDecisionModel,
 } from './decision.ts'
 import type { DecisionInput } from './decision.ts'
@@ -671,10 +671,11 @@ function pipelineWith(
         importance: verdict.importance ?? 5,
         urgency: verdict.urgency ?? 5,
         replyable: null,
+        labelId: null,
         reasoning: 'test verdict',
       }),
     },
-    topics: new NoTopicGenerator(),
+    context: new NoContextUpdater(),
   }
 }
 
@@ -810,11 +811,12 @@ describe('decision layer', () => {
             state: 'needs-action',
             importance: 9,
             urgency: 9,
-            replyable: null,
-            reasoning: 'model says so',
+        replyable: null,
+        labelId: null,
+        reasoning: 'model says so',
           }),
         },
-        topics: new NoTopicGenerator(),
+        context: new NoContextUpdater(),
       },
     )
 
@@ -864,11 +866,12 @@ describe('decision layer', () => {
             state: null,
             importance: 5,
             urgency: 5,
-            replyable: true,
-            reasoning: 'a reply would reach someone',
+        replyable: true,
+        labelId: null,
+        reasoning: 'a reply would reach someone',
           }),
         },
-        topics: new NoTopicGenerator(),
+        context: new NoContextUpdater(),
       },
     )
 
@@ -945,6 +948,9 @@ describe('decision layer', () => {
       importance: 8,
       urgency: 7,
       topic: 'Launch date',
+      goal: null,
+      contact: null,
+      labelId: null,
       reasoning: 'test',
       providers: ['test'],
     })
@@ -977,6 +983,9 @@ describe('decision layer', () => {
       importance: 9,
       urgency: 9,
       topic: null,
+      goal: null,
+      contact: null,
+      labelId: null,
       reasoning: 'test',
       providers: ['test'],
     }
@@ -1044,7 +1053,7 @@ describe('decision layer', () => {
             throw new Error('AI service request failed (400)')
           },
         },
-        topics: new NoTopicGenerator(),
+        context: new NoContextUpdater(),
       },
     )
 
@@ -1067,9 +1076,9 @@ describe('decision layer', () => {
       {
         rules: new HeuristicRuleClassifier(),
         model: new PlaceholderDecisionModel(),
-        topics: {
+        context: {
           name: 'llm:openai',
-          generate: async () => {
+          update: async () => {
             throw new Error('AI service request failed (400)')
           },
         },
