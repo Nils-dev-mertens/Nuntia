@@ -105,7 +105,8 @@ bun run build            # client + server bundles in dist/
 # production entry (deployment config is still manual):
 #   bun dist/server/server.js
 bun run typecheck        # tsc --noEmit
-bun test                 # 590+ tests
+bun test                 # unit and server-side tests
+bun run test:e2e         # Playwright: the beta's core actions in a browser
 bun run lint             # eslint
 bun run format           # prettier --write + eslint --fix
 bun run db:generate      # new migration from schema.ts
@@ -157,8 +158,14 @@ bun test
 The suite uses a temporary database per run (`test/setup.ts` refuses to run
 against `data/lumen.db`). Coverage is heaviest where a mistake is expensive:
 sync and parsing, the decision pipeline, send paths, invite redemption (every
-refusal), and the access-mode gates. There is no DOM harness, so UI behaviour is
-covered by typecheck plus server-side checks against a running instance.
+refusal), and the access-mode gates.
+
+UI behaviour is covered by Playwright (`e2e/`, `bun run test:e2e`), which boots
+the real server on port 3100 with a throwaway database and walks the beta's core
+actions: asking for access, the deduplicated answer, redemption through the
+bootstrap code, and signing back in. It needs a browser once —
+`bunx playwright install chromium`, or `PLAYWRIGHT_CHANNEL=chrome` to use an
+already-installed Chrome. The `CI` workflow runs it on every pull request.
 
 ## Layout
 

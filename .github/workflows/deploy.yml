@@ -6,7 +6,9 @@ on:
 
 concurrency:
   group: production
-  cancel-in-progress: true
+  # Queued rather than cancelled: a run interrupted between `docker compose down`
+  # and `up -d` leaves the server with nothing listening.
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -30,7 +32,11 @@ jobs:
 
       - name: Deploy
         run: |
-          sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.TS_USER }}@${{ secrets.TS_HOST }} "
+          # `set -e` on the remote side, not just here: without it a failed pull or
+          # build still runs the teardown and restarts the previous image, and the
+          # job reports success while the new code was never deployed.
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.TS_USER }}@${{ secrets.TS_HOST }} '
+            set -euo pipefail
             cd /home/${{ secrets.TS_USER }}/Desktop/Lumix
             git checkout master
             git pull
@@ -38,4 +44,4 @@ jobs:
             docker compose down
             docker compose up -d --remove-orphans
             docker image prune -f
-          "
+          '
