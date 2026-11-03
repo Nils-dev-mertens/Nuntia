@@ -524,27 +524,44 @@ const searchInbox = createServerFn({ method: 'GET' })
       data,
     }): Promise<{
       conversations: ConversationSummary[]
+      /** Threads assigned to this member that match too, kept apart from the rest. */
+      assignedConversations: ConversationSummary[]
       error: string | null
     }> => {
       const session = await getSession()
       if (!session) {
-        return { conversations: [], error: 'You are not signed in.' }
+        return {
+          conversations: [],
+          assignedConversations: [],
+          error: 'You are not signed in.',
+        }
       }
 
       const query =
         typeof data.query === 'string' ? data.query.trim().slice(0, 200) : ''
-      if (!query) return { conversations: [], error: null }
+      if (!query) {
+        return { conversations: [], assignedConversations: [], error: null }
+      }
 
       try {
         const payload = await loadInbox(session.userId, { search: query })
         if (!payload.signedIn) {
-          return { conversations: [], error: 'No mailbox is connected.' }
+          return {
+            conversations: [],
+            assignedConversations: [],
+            error: 'No mailbox is connected.',
+          }
         }
-        return { conversations: payload.conversations, error: null }
+        return {
+          conversations: payload.conversations,
+          assignedConversations: payload.assignedConversations,
+          error: null,
+        }
       } catch (error) {
         console.error('[search] failed:', error)
         return {
           conversations: [],
+          assignedConversations: [],
           error: 'Search failed. Try again in a moment.',
         }
       }

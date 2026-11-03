@@ -6,7 +6,7 @@
  * in a REST route, so the same auth and error handling covers both.
  */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createServerFn } from '@tanstack/react-start'
 import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
 
@@ -42,6 +42,7 @@ import {
 } from '#/lib/gmail/send.ts'
 import type { ReplyAttachmentUpload } from '#/lib/gmail/send.ts'
 import {
+  assignConversation,
   getParsingProfileContext,
   reparseStoredMessages,
   replyAccountsFor,
@@ -56,6 +57,7 @@ import { listAccounts } from '#/lib/auth/accounts.ts'
 import {
   CONTACT_CONTEXT_LIMITS,
   getContactContext,
+  isContactKind,
   normaliseContactContextTextFields,
   saveContactContext,
 } from '#/lib/contacts/context.ts'
@@ -159,6 +161,9 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
         typeof context.relationship !== 'string' ||
         typeof context.topics !== 'string' ||
         typeof context.currentWork !== 'string' ||
+        // The kind is a closed list, so an unknown value is refused here rather
+        // than stored and silently ignored by every section.
+        (context.kind !== null && !isContactKind(context.kind)) ||
         (context.importance !== null && typeof context.importance !== 'number')
       ) {
         throw new Error('Contact context fields are invalid.')
@@ -166,6 +171,7 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
       return {
         providerThreadId: candidate.providerThreadId,
         context: {
+          kind: context.kind,
           roleCompany: context.roleCompany,
           relationship: context.relationship,
           topics: context.topics,
@@ -347,6 +353,41 @@ const suggestContactContextAction = createServerFn({ method: 'POST' })
       }
     },
   )
+
+const assignConversationAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => {
+    const candidate = data as {
+      providerThreadId?: unknown
+      assigneeUserId?: unknown
+    } | null
+    if (!candidate || typeof candidate.providerThreadId !== 'string') {
+      throw new Error('A conversation is required.')
+    }
+    return {
+      providerThreadId: candidate.providerThreadId,
+      assigneeUserId:
+        typeof candidate.assigneeUserId === 'string'
+          ? candidate.assigneeUserId
+          : null,
+    }
+  })
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      // The server resolves the workspace and checks the assignee against it;
+      // the browser only names a person.
+      return await assignConversation(
+        session.userId,
+        data.providerThreadId,
+        data.assigneeUserId,
+      )
+    } catch (error) {
+      console.error('[assignment] saving an assignment failed:', error)
+      return { error: 'Could not save that assignment.' }
+    }
+  })
 
 const fetchConversation = createServerFn({ method: 'GET' })
   .inputValidator((data: { providerThreadId: string }) => data)
@@ -810,6 +851,80 @@ export const Route = createFileRoute('/conversations/$providerThreadId')({
   component: ConversationRoute,
 })
 
+/**
+ * Who a thread is handed to, above the thread itself.
+ *
+ * The owner picks a colleague; the assignee is told the thread is a reference and
+ * that replies leave from the mailbox it belongs to. A solo workspace has nobody
+ * to hand anything to, so the bar hides rather than offering an empty picker.
+ */
+function AssignmentBar({
+  assignment,
+  onAssign,
+}: {
+  assignment: NonNullable<
+    Awaited<ReturnType<typeof loadConversation>>
+  >['assignment']
+  onAssign: (assigneeUserId: string | null) => Promise<{ error: string | null }>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (assignment.viewerIsAssignee) {
+    return (
+      <div className="border-b border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+        Assigned to you by a colleague. You are reading a reference — the thread
+        stays in their mailbox, so replies leave from there.
+      </div>
+    )
+  }
+
+  if (assignment.members.length === 0) return null
+
+  async function change(email: string) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    const member = assignment.members.find((entry) => entry.email === email)
+    try {
+      const saved = await onAssign(member?.userId ?? null)
+      if (saved.error) setError(saved.error)
+    } catch {
+      setError('Could not save that assignment.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-4 py-2 text-xs">
+      <label className="flex items-center gap-1.5 text-muted-foreground">
+        Assigned to
+        <select
+          aria-label="Assign this conversation"
+          value={assignment.assignee?.email ?? ''}
+          disabled={busy}
+          onChange={(event) => void change(event.target.value)}
+          className="rounded-md border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
+        >
+          <option value="">Nobody</option>
+          {assignment.members.map((member) => (
+            <option key={member.userId} value={member.email}>
+              {member.name ?? member.email}
+            </option>
+          ))}
+        </select>
+      </label>
+      {assignment.assignee ? (
+        <span className="text-muted-foreground">
+          {assignment.assignee.email} has a read-only view of this thread.
+        </span>
+      ) : null}
+      {error ? <span className="text-destructive">{error}</span> : null}
+    </div>
+  )
+}
+
 function ConversationMissing() {
   return (
     <div className="mx-auto max-w-2xl p-8">
@@ -853,107 +968,119 @@ function ConversationRoute() {
   const { detail } = result
 
   return (
-    <ConversationView
-      detail={detail}
-      onSaveParsingProfile={async (profile) => {
-        const saved = await saveParsingProfileAction({
-          data: {
-            providerThreadId: detail.providerThreadId,
-            profile,
-          },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onSaveContactContext={async (context) => {
-        const saved = await saveContactContextAction({
-          data: { providerThreadId: detail.providerThreadId, context },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onSuggestContactContext={async (current) =>
-        suggestContactContextAction({
-          data: { providerThreadId: detail.providerThreadId, current },
-        })
-      }
-      onSaveDetails={async (topic: string | null, goal: string | null) => {
-        const saved = await saveConversationDetailsAction({
-          data: {
-            providerThreadId: detail.providerThreadId,
-            topic,
-            goal,
-          },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onReanalyse={async () => {
-        const reanalysis = await reanalyseAction({
-          data: { providerThreadId: detail.providerThreadId },
-        })
-        if (!reanalysis.error) await router.invalidate()
-        return reanalysis
-      }}
-      onSetStateOverride={async (state) => {
-        const saved = await setStateOverrideAction({
-          data: { providerThreadId: detail.providerThreadId, state },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onSetImportance={async (importance) => {
-        const saved = await setImportanceAction({
-          data: { providerThreadId: detail.providerThreadId, importance },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onDraft={async (instructions: string | null) =>
-        draftReplyAction({
-          data: { providerThreadId: detail.providerThreadId, instructions },
-        })
-      }
-      onMarkSenderUnreplyable={async () => {
-        const marked = await markSenderUnreplyableAction({
-          data: { providerThreadId: detail.providerThreadId },
-        })
-        if (!marked.error) await router.invalidate()
-        return marked
-      }}
-      onSetDone={async (done) => {
-        const saved = await setDoneAction({
-          data: { providerThreadId: detail.providerThreadId, done },
-        })
-        if (!saved.error) await router.invalidate()
-        return saved
-      }}
-      onSend={async (
-        body: string,
-        attachments: ReplyAttachmentUpload[],
-        fromAccountId: string,
-      ) => {
-        const sent = await sendReplyAction({
-          data: {
-            providerThreadId: detail.providerThreadId,
-            body,
-            attachments,
-            fromAccountId,
-          },
-        })
-
-        if (!sent.error) {
-          // Re-run the loader so the sent message shows up.
-          await router.invalidate()
+    <>
+      <AssignmentBar
+        assignment={detail.assignment}
+        onAssign={async (assigneeUserId: string | null) => {
+          const saved = await assignConversationAction({
+            data: { providerThreadId: detail.providerThreadId, assigneeUserId },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+      />
+      <ConversationView
+        detail={detail}
+        onSaveParsingProfile={async (profile) => {
+          const saved = await saveParsingProfileAction({
+            data: {
+              providerThreadId: detail.providerThreadId,
+              profile,
+            },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onSaveContactContext={async (context) => {
+          const saved = await saveContactContextAction({
+            data: { providerThreadId: detail.providerThreadId, context },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onSuggestContactContext={async (current) =>
+          suggestContactContextAction({
+            data: { providerThreadId: detail.providerThreadId, current },
+          })
         }
+        onSaveDetails={async (topic: string | null, goal: string | null) => {
+          const saved = await saveConversationDetailsAction({
+            data: {
+              providerThreadId: detail.providerThreadId,
+              topic,
+              goal,
+            },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onReanalyse={async () => {
+          const reanalysis = await reanalyseAction({
+            data: { providerThreadId: detail.providerThreadId },
+          })
+          if (!reanalysis.error) await router.invalidate()
+          return reanalysis
+        }}
+        onSetStateOverride={async (state) => {
+          const saved = await setStateOverrideAction({
+            data: { providerThreadId: detail.providerThreadId, state },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onSetImportance={async (importance) => {
+          const saved = await setImportanceAction({
+            data: { providerThreadId: detail.providerThreadId, importance },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onDraft={async (instructions: string | null) =>
+          draftReplyAction({
+            data: { providerThreadId: detail.providerThreadId, instructions },
+          })
+        }
+        onMarkSenderUnreplyable={async () => {
+          const marked = await markSenderUnreplyableAction({
+            data: { providerThreadId: detail.providerThreadId },
+          })
+          if (!marked.error) await router.invalidate()
+          return marked
+        }}
+        onSetDone={async (done) => {
+          const saved = await setDoneAction({
+            data: { providerThreadId: detail.providerThreadId, done },
+          })
+          if (!saved.error) await router.invalidate()
+          return saved
+        }}
+        onSend={async (
+          body: string,
+          attachments: ReplyAttachmentUpload[],
+          fromAccountId: string,
+        ) => {
+          const sent = await sendReplyAction({
+            data: {
+              providerThreadId: detail.providerThreadId,
+              body,
+              attachments,
+              fromAccountId,
+            },
+          })
 
-        return sent
-      }}
-      onReviewReply={async (body) =>
-        reviewReplyAction({
-          data: { providerThreadId: detail.providerThreadId, body },
-        })
-      }
-    />
+          if (!sent.error) {
+            // Re-run the loader so the sent message shows up.
+            await router.invalidate()
+          }
+
+          return sent
+        }}
+        onReviewReply={async (body) =>
+          reviewReplyAction({
+            data: { providerThreadId: detail.providerThreadId, body },
+          })
+        }
+      />
+    </>
   )
 }

@@ -103,17 +103,15 @@ describe('JevDecisionModel', () => {
       {
         ...INPUT,
         stateDefinitions: {
-          'needs-action': 'Only when a client is waiting on a decision from me.',
+          'needs-action':
+            'Only when a client is waiting on a decision from me.',
         },
       },
       // The rules abstained, so the state question is the one being asked.
       { ...RULES_ABSTAINED },
     )
 
-    const questions = body.questions as Record<
-      string,
-      { instructions: string }
-    >
+    const questions = body.questions as Record<string, { instructions: string }>
     expect(questions.state.instructions).toContain(
       'Only when a client is waiting on a decision from me.',
     )
@@ -147,6 +145,7 @@ describe('JevDecisionModel', () => {
         ...INPUT,
         senderImportance: 9,
         senderContext: {
+          kind: 'client',
           roleCompany: 'CEO of Acme',
           relationship: 'Long-term customer',
           topics: 'Product launch',
@@ -220,7 +219,11 @@ describe('JevDecisionModel', () => {
         answers: { replyable: { type: 'choice', choice: 'no-reply' } },
       })
 
-    const model = new JevDecisionModel({ apiKey: 'k', model: 'jev-latest', fetchImpl })
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
     const verdict = await model.decide(INPUT, RULES_ABSTAINED)
 
     expect(verdict.replyable).toBe(false)
@@ -312,7 +315,11 @@ describe('JevDecisionModel', () => {
         },
       })
 
-    const model = new JevDecisionModel({ apiKey: 'k', model: 'jev-latest', fetchImpl })
+    const model = new JevDecisionModel({
+      apiKey: 'k',
+      model: 'jev-latest',
+      fetchImpl,
+    })
     const verdict = await model.decide(INPUT, RULES_ABSTAINED)
 
     expect(verdict.importance).toBe(10)

@@ -1,0 +1,1 @@
+ALTER TABLE `contact_contexts` ADD `kind` text;

@@ -308,6 +308,16 @@ export type Conversation = {
   urgency: number
   intent: Intent
 
+  /**
+   * The colleague this thread was handed to, as a reference into this mailbox.
+   *
+   * Optional on the domain type because most constructions (tests, a freshly
+   * built thread) have no assignment; only the stored row carries one.
+   */
+  assignedTo?: string | null
+  assignedBy?: string | null
+  assignedAt?: Date | null
+
   messageCount: number
   attachmentCount: number
   lastMessageAt: Date

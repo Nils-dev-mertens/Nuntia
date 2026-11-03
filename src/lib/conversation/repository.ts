@@ -20,9 +20,11 @@ import {
   decisions,
   messages as messagesTable,
   accounts,
+  memberships,
   senderProfiles,
   senderSignals,
 } from '#/db/schema.ts'
+import { ensureWorkspace } from '#/lib/organization/workspace.ts'
 import type {
   Conversation,
   ConversationAttachment,
@@ -1096,6 +1098,122 @@ export async function getConversationClusterByThreadId(
   )
 }
 
+/**
+ * Hand a conversation to a colleague, or clear the assignment.
+ *
+ * Only the thread's owner can do it, and only to someone in their own workspace:
+ * an assignment is a reference into their mailbox, so the person doing the
+ * handing over has to be the person whose mailbox it is. Assigning to yourself
+ * means "nobody", which is how a hand-over is taken back.
+ */
+export async function assignConversation(
+  userId: string,
+  providerThreadId: string,
+  assigneeUserId: string | null,
+): Promise<{ error: string | null }> {
+  const conversation = await getConversationByThreadId(userId, providerThreadId)
+  if (!conversation) {
+    return { error: 'That conversation is not in your mailbox.' }
+  }
+
+  const actor = userId.trim().toLowerCase()
+  const target = assigneeUserId?.trim().toLowerCase() ?? ''
+  const clear = target === '' || target === actor
+
+  if (!clear) {
+    const workspace = await ensureWorkspace(actor)
+    if (!workspace) return { error: 'You have no workspace to assign from.' }
+
+    const [membership] = await db
+      .select({ userId: memberships.userId })
+      .from(memberships)
+      .where(
+        and(
+          eq(memberships.userId, target),
+          eq(memberships.organizationId, workspace.organizationId),
+        ),
+      )
+      .limit(1)
+    if (!membership) return { error: 'That person is not in this workspace.' }
+  }
+
+  await db
+    .update(conversations)
+    .set(
+      clear
+        ? { assignedTo: null, assignedBy: null, assignedAt: null }
+        : { assignedTo: target, assignedBy: actor, assignedAt: new Date() },
+    )
+    .where(
+      and(
+        eq(conversations.accountId, conversation.accountId),
+        eq(conversations.providerThreadId, providerThreadId),
+      ),
+    )
+
+  return { error: null }
+}
+
+/**
+ * A conversation a colleague handed to this member.
+ *
+ * The fallback that makes an assignment a reference rather than a copy: the row
+ * still belongs to the owner's account, and this is the one read that lets the
+ * assignee see it.
+ */
+export async function getConversationAssignedTo(
+  userId: string,
+  providerThreadId: string,
+): Promise<AccountConversation | null> {
+  const row = await db.query.conversations.findFirst({
+    where: and(
+      eq(conversations.providerThreadId, providerThreadId),
+      eq(conversations.assignedTo, userId.trim().toLowerCase()),
+    ),
+  })
+  if (!row) return null
+
+  return {
+    accountId: row.accountId,
+    conversation: await rowToConversation(row),
+  }
+}
+
+/**
+ * Every thread assigned to this member, newest activity first.
+ *
+ * Joined to the owning account for its address: the row belongs to a colleague's
+ * mailbox, so the list has to say whose it is rather than pretend the reader owns
+ * it. Archived threads are left out — filing a thread away also takes it off
+ * someone else's desk.
+ */
+export async function listAssignedConversations(
+  userId: string,
+): Promise<Array<AccountConversation & { ownerEmail: string }>> {
+  const owner = userId.trim().toLowerCase()
+  if (!owner) return []
+
+  const rows = await db
+    .select({ conversation: conversations, ownerEmail: accounts.email })
+    .from(conversations)
+    .innerJoin(accounts, eq(accounts.id, conversations.accountId))
+    .where(
+      and(
+        eq(conversations.assignedTo, owner),
+        eq(conversations.isArchived, false),
+      ),
+    )
+    .orderBy(desc(conversations.lastMessageAt))
+
+  return Promise.all(
+    rows.map(async (row) => ({
+      accountId: row.conversation.accountId,
+      ownerEmail: row.ownerEmail,
+      conversation: await rowToConversation(row.conversation),
+    })),
+  )
+}
+
 /** Fetch one conversation with its messages and attachments. */
 export async function getConversation(
   accountId: string,
@@ -1235,6 +1353,9 @@ async function rowToConversation(
     importance: row.importance,
     urgency: row.urgency,
     intent: row.intent,
+    assignedTo: row.assignedTo,
+    assignedBy: row.assignedBy,
+    assignedAt: row.assignedAt,
     messageCount: row.messageCount,
     attachmentCount: row.attachmentCount,
     lastMessageAt: row.lastMessageAt,

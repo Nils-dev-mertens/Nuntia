@@ -1,17 +1,14 @@
 /**
- * Account and AI settings.
+ * Account settings.
  *
- * The two AI services are configured here rather than in the environment: the
- * keys are per-user secrets set by the signed-in person, stored encrypted, and
- * editable without a redeploy. Each service is independent — you can configure
- * Jev without an LLM, or an LLM without Jev, and an unconfigured service simply
- * falls back to the rule-based behaviour.
+ * Identity lives here: who is signed in, which devices hold a session, and the
+ * two ways out — this device, or every other one. So do the settings that are
+ * one person's own: mailbox parsing defaults, the four state labels and the
+ * custom sections, and the senders a reply cannot reach.
  *
- * Identity lives here too: who is signed in, which devices hold a session, and
- * the two ways out — this device, or every other one.
- *
- * The loader returns a *summary* only (is it configured, which model). The keys
- * are never sent to the browser.
+ * The AI services are *not* configured here any more. Their keys belong to the
+ * workspace, so the form moved to `/organisation`; this page only links there and
+ * shows the member's own log of automatic context changes.
  */
 
 import { createServerFn } from '@tanstack/react-start'
@@ -32,8 +29,8 @@ import {
   listSessions,
   revokeAllSessions,
 } from '#/lib/auth/index.ts'
-import { getAiSettings, saveAiSettings } from '#/lib/ai/index.ts'
-import type { AiSettingsSummary, LlmProvider } from '#/lib/ai/index.ts'
+import { getAiSettings } from '#/lib/ai/index.ts'
+import type { AiSettingsSummary } from '#/lib/ai/index.ts'
 import {
   listRecentContextRevisions,
   undoContextRevision,
@@ -54,15 +51,21 @@ import {
 import type { ParsingPreferences } from '#/lib/conversation/index.ts'
 import { assertOwnedAccount } from '#/lib/auth/accounts.ts'
 import { redecideStoredConversations } from '#/lib/mailbox/sync.ts'
-// The draft limits are imported from the pure module that defines them, not from
-// the conversation barrel: the barrel also re-exports the repository and the
-// decision pipeline, and a browser import of it drags `node:fs` (the AI log)
-// into the client graph. Only server functions may use the barrel.
-import {
-  REPLY_DRAFT_MIN_IMPORTANCE_MAX,
-  REPLY_DRAFT_MIN_IMPORTANCE_MIN,
-} from '#/lib/conversation/draft.ts'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
+import {
+  CONTACT_KIND_LABELS,
+  CONTACT_KINDS,
+  isContactKind,
+} from '#/lib/contacts/context.ts'
+import type { ContactKind } from '#/lib/contacts/context.ts'
+// The parser and the writer are server-only: this module reaches the database,
+// so no component may import a value from it. The picker uses the kind list from
+// `context.ts`, and the default arrives as data on the action's argument.
+import {
+  CONTACT_IMPORT_DEFAULT_KIND,
+  importContactKinds,
+  parseContactImport,
+} from '#/lib/contacts/import.ts'
 import {
   listOrganizationLabels,
   listStateLabels,
@@ -88,16 +91,6 @@ import { proposeStateMeaning } from '#/lib/organization/state-meaning.ts'
 import type { StateMeaningProposal } from '#/lib/organization/state-meaning.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import { STATE_META, STATE_ORDER } from '#/lib/conversation-state.ts'
-
-/** Provider choices for the topic generator. Labels only — no server code. */
-const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
-  { value: '', label: 'Off — no topic labels' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'gemini', label: 'Google Gemini' },
-]
-
-const PROVIDER_VALUES = new Set(PROVIDERS.map((p) => p.value))
 
 const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
   async (): Promise<
@@ -331,7 +324,10 @@ const saveOrganizationLabelsAction = createServerFn({ method: 'POST' })
   .handler(
     async ({
       data,
-    }): Promise<{ rules: OrganizationLabel[] | null; error: string | null }> => {
+    }): Promise<{
+      rules: OrganizationLabel[] | null
+      error: string | null
+    }> => {
       const session = await getSession()
       if (!session) return { rules: null, error: 'You are not signed in.' }
 
@@ -367,6 +363,72 @@ const saveStateLabelsAction = createServerFn({ method: 'POST' })
       } catch (error) {
         console.error('[settings] saving state labels failed:', error)
         return { labels: null, error: 'Could not save the labels.' }
+      }
+    },
+  )
+
+const importContactKindsAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => {
+    const candidate = data as { text?: unknown; defaultKind?: unknown } | null
+    if (!candidate || typeof candidate.text !== 'string') {
+      throw new Error('A list of addresses is required.')
+    }
+    return { text: candidate.text, defaultKind: candidate.defaultKind }
+  })
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      imported: number
+      skipped: string[]
+      error: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) {
+        return { imported: 0, skipped: [], error: 'You are not signed in.' }
+      }
+
+      // The parser's own limit counts addresses, not bytes, so a runaway paste is
+      // held back here: splitting a megabyte of text into lines to reject it is
+      // the work this avoids.
+      if (data.text.length > 200_000) {
+        return {
+          imported: 0,
+          skipped: [],
+          error: 'That list is too large to import at once. Split it up.',
+        }
+      }
+
+      const parsed = parseContactImport(
+        data.text,
+        isContactKind(data.defaultKind)
+          ? data.defaultKind
+          : CONTACT_IMPORT_DEFAULT_KIND,
+      )
+      if (parsed.entries.length === 0) {
+        return {
+          imported: 0,
+          skipped: parsed.skipped,
+          error:
+            parsed.skipped.length > 0
+              ? 'No address on that list could be read.'
+              : 'That list was empty.',
+        }
+      }
+
+      try {
+        const imported = await importContactKinds(
+          session.userId,
+          parsed.entries,
+        )
+        return { imported, skipped: parsed.skipped, error: null }
+      } catch (error) {
+        console.error('[settings] importing clients failed:', error)
+        return {
+          imported: 0,
+          skipped: [],
+          error: 'Could not import that list.',
+        }
       }
     },
   )
@@ -515,103 +577,6 @@ const markSenderReplyabilityAction = createServerFn({ method: 'POST' })
       }
     },
   )
-
-type SaveInput = {
-  jevModel: string | null
-  llmProvider: string
-  llmModel: string | null
-  /** Importance at or above which a reply draft is offered, 1–10. */
-  suggestReplyMinImportance: number
-  /** Whether a sent reply is checked against the thread's goal. */
-  goalCheckEnabled: boolean
-  /** Whether the app refreshes goals and contact profiles from the mail. */
-  autoContextEnabled: boolean
-  /** `null` means "leave the stored key unchanged". */
-  jevApiKey: string | null
-  clearJevKey: boolean
-  llmApiKey: string | null
-  clearLlmKey: boolean
-}
-
-function validateSave(data: SaveInput): string | null {
-  if (!PROVIDER_VALUES.has(data.llmProvider as '' | LlmProvider)) {
-    return 'That LLM provider is not supported.'
-  }
-
-  const threshold = data.suggestReplyMinImportance
-  if (
-    typeof threshold !== 'number' ||
-    !Number.isInteger(threshold) ||
-    threshold < REPLY_DRAFT_MIN_IMPORTANCE_MIN ||
-    threshold > REPLY_DRAFT_MIN_IMPORTANCE_MAX
-  ) {
-    return `Importance must be a whole number between ${REPLY_DRAFT_MIN_IMPORTANCE_MIN} and ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}.`
-  }
-
-  if (typeof data.goalCheckEnabled !== 'boolean') {
-    return 'The goal check setting has to be on or off.'
-  }
-
-  if (typeof data.autoContextEnabled !== 'boolean') {
-    return 'The automatic context setting has to be on or off.'
-  }
-
-  const fields: Array<[string, string | null, number]> = [
-    ['Jev model', data.jevModel, 100],
-    ['LLM model', data.llmModel, 100],
-    ['Jev API key', data.jevApiKey, 500],
-    ['LLM API key', data.llmApiKey, 500],
-  ]
-  for (const [label, value, limit] of fields) {
-    if (value !== null && typeof value !== 'string') {
-      return `${label} must be text.`
-    }
-    if (typeof value === 'string' && value.length > limit) {
-      return `${label} must be ${limit} characters or fewer.`
-    }
-  }
-  return null
-}
-
-/** `null`/blank means "not provided"; the caller decides what that means. */
-function blankToNull(value: string | null): string | null {
-  const trimmed = value?.trim() ?? ''
-  return trimmed || null
-}
-
-const saveAiSettingsAction = createServerFn({ method: 'POST' })
-  .inputValidator((data: SaveInput) => data)
-  .handler(async ({ data }): Promise<{ error: string | null }> => {
-    const session = await getSession()
-    if (!session) return { error: 'You are not signed in.' }
-
-    const invalid = validateSave(data)
-    if (invalid) return { error: invalid }
-
-    try {
-      await saveAiSettings(session.userId, {
-        jevModel: blankToNull(data.jevModel),
-        llmProvider: data.llmProvider
-          ? (data.llmProvider as LlmProvider)
-          : null,
-        llmModel: blankToNull(data.llmModel),
-        suggestReplyMinImportance: data.suggestReplyMinImportance,
-        goalCheckEnabled: data.goalCheckEnabled,
-        autoContextEnabled: data.autoContextEnabled,
-        // `undefined` keeps the stored key; `''` clears it; a value replaces it.
-        jevApiKey: data.clearJevKey
-          ? ''
-          : (blankToNull(data.jevApiKey) ?? undefined),
-        llmApiKey: data.clearLlmKey
-          ? ''
-          : (blankToNull(data.llmApiKey) ?? undefined),
-      })
-      return { error: null }
-    } catch (error) {
-      console.error('[settings] save failed:', error)
-      return { error: 'Could not save the AI settings.' }
-    }
-  })
 
 /**
  * Put a context value back.
@@ -865,8 +830,9 @@ function StateLabelsEditor({ initialLabels }: { initialLabels: StateLabels }) {
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           Moving a thread out of a label is the app getting it wrong. After{' '}
           {STATE_MEANING_MIN_CORRECTIONS} of those on the same label, it can
-          draft what that label means to you — shown as a diff you approve, never
-          applied on its own. It proposes the meaning only, never the name.
+          draft what that label means to you — shown as a diff you approve,
+          never applied on its own. It proposes the meaning only, never the
+          name.
         </p>
         <button
           type="button"
@@ -1062,13 +1028,13 @@ function OrganizationRulesEditor({
         subject" without being duplicated. Labels run from top to bottom and the
         first enabled match wins. A label with no conditions is placed by the
         decision model instead, from the meaning you write for it; the same
-        meaning is what the inbox shows under the heading. In
-        the inbox, drag a label by its handle to put it anywhere between the
-        four AI groups — or collapse it to keep the page short. A thread can
-        also be moved to a different label (or back to the rules) from its
-        right-click menu. Unlabelled threads stay in their four groups, and Done
-        threads stay in Done. Labels only change where a thread is listed, never
-        its state or AI classification.
+        meaning is what the inbox shows under the heading. In the inbox, drag a
+        label by its handle to put it anywhere between the four AI groups — or
+        collapse it to keep the page short. A thread can also be moved to a
+        different label (or back to the rules) from its right-click menu.
+        Unlabelled threads stay in their four groups, and Done threads stay in
+        Done. Labels only change where a thread is listed, never its state or AI
+        classification.
       </p>
       {rules.length > 0 ? (
         <ol className="mt-3 space-y-2">
@@ -1345,6 +1311,134 @@ function contextRevisionLabel(field: string): string {
   }
 }
 
+/**
+ * Paste a client list.
+ *
+ * The manual half of the client registry, and the shape the organisation import
+ * will send over a token. It writes a kind and nothing else: the notes under
+ * each name are the member's own, and an import is not a way to overwrite them.
+ * The result names the lines it could not read, because a row silently missing
+ * from a client list is the failure nobody notices until a client writes.
+ */
+function ClientImportPanel() {
+  const router = useRouter()
+  const [text, setText] = useState('')
+  const [kind, setKind] = useState<ContactKind>('client')
+  const [busy, setBusy] = useState(false)
+  const [imported, setImported] = useState<number | null>(null)
+  const [skipped, setSkipped] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy || text.trim() === '') return
+    setBusy(true)
+    setError(null)
+    setImported(null)
+    setSkipped([])
+    try {
+      const result = await importContactKindsAction({
+        data: { text, defaultKind: kind },
+      })
+      if (result.error) {
+        setError(result.error)
+        setSkipped(result.skipped)
+        return
+      }
+      setImported(result.imported)
+      setSkipped(result.skipped)
+      setText('')
+      await router.invalidate()
+    } catch {
+      setError('Could not import that list.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">Clients</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Paste a client list — one address per line, optionally followed by a
+        kind after a comma (<code>ceo@acme.test, client</code>). Addresses
+        without one are marked as the kind below. A client's mail leaves the
+        four state groups for a Clients section at the top of the inbox, so the
+        list is what makes them sort first. Only the kind is written: role,
+        relationship, topics, current work and importance stay yours, and
+        importing never overwrites them.
+      </p>
+      <form className="mt-3 space-y-3" onSubmit={(event) => void submit(event)}>
+        <textarea
+          aria-label="Client list"
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          disabled={busy}
+          rows={6}
+          spellCheck={false}
+          placeholder={
+            'ceo@acme.test, client\nana@acme.test\nsam@vendor.test, vendor'
+          }
+          className="w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground/60 disabled:opacity-50"
+        />
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <label className="flex items-center gap-2 text-muted-foreground">
+            Kind for addresses without one
+            <select
+              value={kind}
+              onChange={(event) => setKind(event.target.value as ContactKind)}
+              disabled={busy}
+              className="rounded-md border border-border bg-background px-2 py-1 text-foreground disabled:opacity-50"
+            >
+              {CONTACT_KINDS.map((value) => (
+                <option key={value} value={value}>
+                  {CONTACT_KIND_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="submit"
+            disabled={busy || text.trim() === ''}
+            className="ml-auto rounded-md border border-border px-3 py-1.5 font-medium text-foreground hover:border-foreground/25 disabled:opacity-50"
+          >
+            {busy ? 'Importing…' : 'Import list'}
+          </button>
+        </div>
+      </form>
+      {error ? (
+        <p
+          role="alert"
+          className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {error}
+        </p>
+      ) : null}
+      {imported !== null ? (
+        <p
+          role="status"
+          className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+        >
+          Imported {imported} {imported === 1 ? 'address' : 'addresses'}.
+          {skipped.length > 0
+            ? ` ${skipped.length} ${skipped.length === 1 ? 'line was' : 'lines were'} not read.`
+            : ''}
+        </p>
+      ) : null}
+      {skipped.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+          {skipped.slice(0, 10).map((line, index) => (
+            <li key={`${index}:${line}`} className="truncate font-mono">
+              {line}
+            </li>
+          ))}
+          {skipped.length > 10 ? <li>and {skipped.length - 10} more</li> : null}
+        </ul>
+      ) : null}
+    </section>
+  )
+}
+
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -1353,7 +1447,6 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   const router = useRouter()
 
   const {
-    settings,
     organizationLabels: initialOrganizationLabels,
     stateLabels: initialStateLabels,
     contextRevisions,
@@ -1368,28 +1461,6 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   // Own state so the checkbox responds before the save comes back; the server
   // value arrives on the next loader run and would otherwise be the only truth.
   const [gravatar, setGravatar] = useState(useGravatar)
-
-  const [jevModel, setJevModel] = useState(settings.jevModel ?? '')
-  const [jevApiKey, setJevApiKey] = useState('')
-  const [clearJevKey, setClearJevKey] = useState(false)
-
-  const [llmProvider, setLlmProvider] = useState<'' | LlmProvider>(
-    settings.llmProvider ?? '',
-  )
-  const [llmModel, setLlmModel] = useState(settings.llmModel ?? '')
-  const [llmApiKey, setLlmApiKey] = useState('')
-  const [clearLlmKey, setClearLlmKey] = useState(false)
-  // Held as text so the field can be emptied while typing; parsed on save, and
-  // the server refuses anything that is not a whole 1–10.
-  const [minImportance, setMinImportance] = useState(
-    String(settings.suggestReplyMinImportance),
-  )
-  const [goalCheckEnabled, setGoalCheckEnabled] = useState(
-    settings.goalCheckEnabled,
-  )
-  const [autoContextEnabled, setAutoContextEnabled] = useState(
-    settings.autoContextEnabled,
-  )
 
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
@@ -1688,53 +1759,8 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     }
   }
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (busy) return
-
-    setBusy(true)
-    setError(null)
-    setMessage(null)
-    try {
-      const saved = await saveAiSettingsAction({
-        data: {
-          jevModel: jevModel.trim() || null,
-          llmProvider,
-          llmModel: llmModel.trim() || null,
-          suggestReplyMinImportance: Number(minImportance),
-          goalCheckEnabled,
-          autoContextEnabled,
-          jevApiKey: jevApiKey.trim() || null,
-          clearJevKey,
-          llmApiKey: llmApiKey.trim() || null,
-          clearLlmKey,
-        },
-      })
-
-      if (saved.error) {
-        setError(saved.error)
-        return
-      }
-
-      // Clear the secret inputs; the stored value is never sent back.
-      setJevApiKey('')
-      setLlmApiKey('')
-      setClearJevKey(false)
-      setClearLlmKey(false)
-      setMessage(
-        'Saved. New decisions and topics apply from the next sync; the draft threshold applies to the next draft you ask for, and the goal check to the next reply you send.',
-      )
-      await router.invalidate()
-    } catch {
-      setError('Could not save the AI settings.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   const inputClass =
     'mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground'
-  const statusClass = 'mt-1 text-[11px] text-muted-foreground'
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]">
@@ -1983,270 +2009,88 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
         />
       </div>
 
-      <section className="mt-5 rounded-lg border border-border bg-card">
-        <div className="border-b border-border p-4">
+      {/*
+       * The keys, models and thresholds belong to the workspace now, so the form
+       * lives on /organisation. What stays here is this member's own log of what
+       * the automatic updater changed: it is about their threads, not the
+       * company's settings.
+       */}
+      <section className="mt-5 space-y-3 rounded-lg border border-border bg-card p-4">
+        <div>
           <h2 className="text-sm font-semibold text-foreground">AI services</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Both are optional. Without them Nuntia classifies with rules only
-            and conversations have no topic. Each person connects their own keys
-            — there is no shared key for the install — and they are encrypted at
-            rest.
+            The keys, the models and the draft threshold are set once for the
+            workspace, so every member classifies and drafts with the same
+            configuration. An owner or admin manages them on the organisation
+            page.
           </p>
+          <Link
+            to="/organisation"
+            className="mt-2 inline-flex h-8 items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground hover:border-foreground/25"
+          >
+            Open organisation settings
+          </Link>
         </div>
 
-        {/*
-         * Stacked rather than split 5/7: the two services are one topic, but the
-         * LLM half now carries the draft threshold, the goal check, the context
-         * switch and the change log, which made a narrow column a long scroll
-         * beside a mostly empty one.
-         */}
-        <form onSubmit={(event) => void submit(event)} className="divide-y divide-border">
-          <section className="p-4">
-            <h3 className="text-sm font-semibold text-foreground">
-              Decision model — Jev
-            </h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Rates importance and urgency, and fills in the state when the
-              rules cannot decide it.
+        {contextRevisions.length > 0 ? (
+          <div className="rounded-md border border-border bg-muted/20 p-3">
+            <p className="text-xs font-medium text-foreground">
+              Recent context changes
             </p>
-            <p className={statusClass}>
-              {settings.jevConfigured
-                ? 'A key is stored. Enter a new one to replace it.'
-                : 'Not connected yet — add a key below.'}
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              What the app changed, and what it replaced. Undo puts the old
+              value back and keeps the change in this list. This log is yours
+              alone, even when the AI settings are the workspace's.
             </p>
-
-            <div className="mt-3 space-y-3">
-              <Field label="Jev API key">
-                <input
-                  type="password"
-                  value={jevApiKey}
-                  disabled={clearJevKey}
-                  placeholder={settings.jevConfigured ? '••••••••' : 'ts-...'}
-                  onChange={(event) => setJevApiKey(event.target.value)}
-                  autoComplete="off"
-                  className={inputClass}
-                />
-              </Field>
-              <Field label="Model" hint="Defaults to jev-latest.">
-                <input
-                  value={jevModel}
-                  placeholder="jev-latest"
-                  onChange={(event) => setJevModel(event.target.value)}
-                  className={inputClass}
-                />
-              </Field>
-              {settings.jevConfigured ? (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={clearJevKey}
-                    onChange={(event) => setClearJevKey(event.target.checked)}
-                  />
-                  Remove the stored Jev key
-                </label>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="p-4">
-            <h3 className="text-sm font-semibold text-foreground">
-              Topics and drafts — LLM
-            </h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Writes a short topic label for each conversation, and drafts a
-              reply on every replyable thread that clears the threshold below —
-              whether or not the newest message asks for one. A draft is always
-              text in the composer to review — the app never sends it.
-            </p>
-            <p className={statusClass}>
-              {settings.llmConfigured
-                ? 'A key is stored. Enter a new one to replace it.'
-                : 'Not connected yet — add a key below.'}
-            </p>
-
-            <div className="mt-3 space-y-3">
-              <Field label="Provider">
-                <select
-                  value={llmProvider}
-                  onChange={(event) =>
-                    setLlmProvider(event.target.value as '' | LlmProvider)
-                  }
-                  className={inputClass}
+            <ul className="mt-2 space-y-1.5">
+              {contextRevisions.map((revision) => (
+                <li
+                  key={revision.id}
+                  className="flex items-start justify-between gap-3 text-[11px] text-muted-foreground"
                 >
-                  {PROVIDERS.map((provider) => (
-                    <option key={provider.value} value={provider.value}>
-                      {provider.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="API key">
-                <input
-                  type="password"
-                  value={llmApiKey}
-                  disabled={clearLlmKey || llmProvider === ''}
-                  placeholder={settings.llmConfigured ? '••••••••' : 'sk-...'}
-                  onChange={(event) => setLlmApiKey(event.target.value)}
-                  autoComplete="off"
-                  className={inputClass}
-                />
-              </Field>
-              <Field
-                label="Model"
-                hint="Leave blank to use the provider default."
-              >
-                <input
-                  value={llmModel}
-                  placeholder="gemini-2.5-flash"
-                  disabled={llmProvider === ''}
-                  onChange={(event) => setLlmModel(event.target.value)}
-                  className={inputClass}
-                />
-              </Field>
-              <Field
-                label="Draft a reply from importance"
-                hint={`${REPLY_DRAFT_MIN_IMPORTANCE_MIN} to ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}. Every draft is one API call, so the routine mail below this is left alone.`}
-              >
-                <input
-                  type="number"
-                  min={REPLY_DRAFT_MIN_IMPORTANCE_MIN}
-                  max={REPLY_DRAFT_MIN_IMPORTANCE_MAX}
-                  step={1}
-                  value={minImportance}
-                  onChange={(event) => setMinImportance(event.target.value)}
-                  className={inputClass}
-                />
-              </Field>
-              <label className="flex items-start gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={goalCheckEnabled}
-                  onChange={(event) =>
-                    setGoalCheckEnabled(event.target.checked)
-                  }
-                  className="mt-0.5"
-                />
-                <span>
-                  <span className="font-medium text-foreground">
-                    Check each reply against its goal
+                  <span className="min-w-0">
+                    <span className="font-medium text-foreground">
+                      {contextRevisionLabel(revision.field)}
+                    </span>{' '}
+                    {revision.previousValue ? (
+                      <>
+                        <span className="line-through">
+                          {revision.previousValue}
+                        </span>{' '}
+                        →{' '}
+                      </>
+                    ) : null}
+                    <span>{revision.nextValue ?? 'cleared'}</span>
+                    {revision.subject ? (
+                      <span className="block truncate opacity-80">
+                        {revision.subject}
+                      </span>
+                    ) : null}
                   </span>
-                  <span className="mt-0.5 block">
-                    After you send, one extra call asks whether the reply moves
-                    the thread toward its goal, and offers a follow-up when it
-                    does not. Turning it off costs no drafts or topics.
-                  </span>
-                </span>
-              </label>
-              <label className="flex items-start gap-2 text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={autoContextEnabled}
-                  onChange={(event) =>
-                    setAutoContextEnabled(event.target.checked)
-                  }
-                  className="mt-0.5"
-                />
-                <span>
-                  <span className="font-medium text-foreground">
-                    Update the goal and contact profile automatically
-                  </span>
-                  <span className="mt-0.5 block">
-                    One extra call per thread that gains messages, so the goal
-                    and each correspondent&rsquo;s profile follow the mail
-                    instead of waiting to be filled in. It costs more tokens than
-                    a topic alone, so it is off unless you turn it on. Blank
-                    fields are never cleared, and every change appears under
-                    recent changes below with an Undo.
-                  </span>
-                </span>
-              </label>
-              {contextRevisions.length > 0 ? (
-                <div className="rounded-md border border-border bg-muted/20 p-3">
-                  <p className="text-xs font-medium text-foreground">
-                    Recent context changes
-                  </p>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    What the app changed, and what it replaced. Undo puts the old
-                    value back and keeps the change in this list.
-                  </p>
-                  <ul className="mt-2 space-y-1.5">
-                    {contextRevisions.map((revision) => (
-                      <li
-                        key={revision.id}
-                        className="flex items-start justify-between gap-3 text-[11px] text-muted-foreground"
-                      >
-                        <span className="min-w-0">
-                          <span className="font-medium text-foreground">
-                            {contextRevisionLabel(revision.field)}
-                          </span>{' '}
-                          {revision.previousValue ? (
-                            <>
-                              <span className="line-through">
-                                {revision.previousValue}
-                              </span>{' '}
-                              →{' '}
-                            </>
-                          ) : null}
-                          <span>{revision.nextValue ?? 'cleared'}</span>
-                          {revision.subject ? (
-                            <span className="block truncate opacity-80">
-                              {revision.subject}
-                            </span>
-                          ) : null}
-                        </span>
-                        <button
-                          type="button"
-                          disabled={busy || revision.undone}
-                          onClick={() => void undoRevision(revision.id)}
-                          className="shrink-0 rounded border border-border px-2 py-0.5 font-medium text-foreground disabled:opacity-40"
-                        >
-                          {revision.undone ? 'Undone' : 'Undo'}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {settings.llmConfigured ? (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={clearLlmKey}
-                    onChange={(event) => setClearLlmKey(event.target.checked)}
-                  />
-                  Remove the stored LLM key
-                </label>
-              ) : null}
-            </div>
-          </section>
-
-          <div className="space-y-3 p-4">
-            {error ? (
-              <p
-                role="alert"
-                className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-              >
-                {error}
-              </p>
-            ) : null}
-            {message ? (
-              <p
-                role="status"
-                className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
-              >
-                {message}
-              </p>
-            ) : null}
-
-            <button
-              type="submit"
-              disabled={busy}
-              className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
-            >
-              {busy ? 'Saving…' : 'Save settings'}
-            </button>
+                  <button
+                    type="button"
+                    disabled={busy || revision.undone}
+                    onClick={() => void undoRevision(revision.id)}
+                    className="shrink-0 rounded border border-border px-2 py-0.5 font-medium text-foreground disabled:opacity-40"
+                  >
+                    {revision.undone ? 'Undone' : 'Undo'}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </div>
-        </form>
+        ) : null}
+
+        {error ? (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
+        {message ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            {message}
+          </p>
+        ) : null}
       </section>
 
       {/* Same rule below: two unrelated topics, so neither gets a half-width slot. */}
@@ -2406,6 +2250,8 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             </p>
           ) : null}
         </section>
+
+        <ClientImportPanel />
 
         <section className="rounded-lg border border-border bg-card p-4">
           <h2 className="text-sm font-semibold text-foreground">

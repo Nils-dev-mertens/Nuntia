@@ -1243,9 +1243,12 @@ export function Inbox({
    * hiding. Absent in isolation, where the box is not rendered: a search field
    * that cannot search is worse than no search field.
    */
-  onSearch?: (
-    query: string,
-  ) => Promise<{ conversations: ConversationSummary[]; error: string | null }>
+  onSearch?: (query: string) => Promise<{
+    conversations: ConversationSummary[]
+    /** Threads assigned to this member that match, rendered in their own section. */
+    assignedConversations: ConversationSummary[]
+    error: string | null
+  }>
   /**
    * Load one thread's newest message for the preview column. Absent in
    * isolation, where the column falls back to its hint.
@@ -1313,6 +1316,7 @@ export function Inbox({
   const [searchResults, setSearchResults] = useState<{
     query: string
     conversations: ConversationSummary[]
+    assignedConversations: ConversationSummary[]
   } | null>(null)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -1399,7 +1403,11 @@ export function Inbox({
             return
           }
           setSearchError(null)
-          setSearchResults({ query, conversations: result.conversations })
+          setSearchResults({
+            query,
+            conversations: result.conversations,
+            assignedConversations: result.assignedConversations,
+          })
         })
         .catch(() => {
           if (request !== searchRequest.current) return
@@ -1556,7 +1564,13 @@ export function Inbox({
   // "no matches" message back in charge.
   useEffect(() => {
     if (!searchInput.trim() || !searchResults) return
-    if (searchResults.conversations.length === 0) setSectionFilter('all')
+    if (
+      searchResults.conversations.length +
+        searchResults.assignedConversations.length ===
+      0
+    ) {
+      setSectionFilter('all')
+    }
   }, [searchInput, searchResults])
 
   /**
@@ -1812,6 +1826,7 @@ export function Inbox({
   const {
     accounts,
     conversations,
+    assignedConversations,
     counts,
     doneCount,
     syncError,
@@ -1825,6 +1840,11 @@ export function Inbox({
   const searchQuery = searchInput.trim()
   const searchActive = searchQuery.length > 0
   const visibleConversations = searchResults?.conversations ?? conversations
+  // Assigned threads follow the same rule: while a search is in flight the last
+  // matches stay on screen, and the section renders from what the server found
+  // rather than from the last full load.
+  const visibleAssigned =
+    searchResults?.assignedConversations ?? assignedConversations
   const stateLabels = payload.stateLabels
   // Which provider each mailbox is: the read toggle is offered only where the
   // provider can express a thread-level flag (Gmail), not on every row.
@@ -1845,6 +1865,23 @@ export function Inbox({
     payload.organizationLabels,
   )
   const done = organizationGroups.done
+  // Clients are a built-in section, not a stored label: it is computed from the
+  // contact profile at render time, so unmarking someone moves their threads
+  // back to the state groups on the next load and a row can never disagree with
+  // the person it belongs to. Done threads stay in Done — being finished outranks
+  // being a client.
+  const clientConversations = organizationGroups.ungrouped
+    .filter((conversation) => conversation.contactKind === 'client')
+    .sort(byImportance)
+  const stateCandidates = organizationGroups.ungrouped.filter(
+    (conversation) => conversation.contactKind !== 'client',
+  )
+  // The strip above the list counts what the sections show, so a client is not
+  // counted under Needs action and again under Clients.
+  const stateCounts = { ...counts }
+  for (const conversation of clientConversations) {
+    stateCounts[conversation.state] -= 1
+  }
 
   /** One section in the shape the list renders: heading, meaning, dot, rows. */
   const stateSection = (
@@ -1865,9 +1902,7 @@ export function Inbox({
   const sectionsByToken = new Map<string, InboxSection>()
 
   for (const state of STATE_ORDER) {
-    const items = byState(organizationGroups.ungrouped, state).sort(
-      byImportance,
-    )
+    const items = byState(stateCandidates, state).sort(byImportance)
     if (items.length === 0) continue
     const section = stateSection(state, items)
     sectionsByToken.set(section.key, section)
@@ -1897,6 +1932,36 @@ export function Inbox({
   })
 
   const sections: InboxSection[] = [
+    // A colleague's hand-over sits above everything and outside the arrangement.
+    // It is not this member's filing, and it is not their mail either: the thread
+    // stays in the owner's mailbox and this is a reference to it.
+    ...(visibleAssigned.length > 0
+      ? [
+          {
+            key: 'assigned',
+            title: 'Assigned to you',
+            description:
+              'Threads a colleague handed over. They stay in that mailbox; this is a reference.',
+            dotClass: 'bg-warning',
+            items: visibleAssigned,
+          },
+        ]
+      : []),
+    // Above the state groups and outside the arrangement: which threads are a
+    // client's is a fact about the person, not a section the user files mail
+    // into, so it is not something a drag can move away from the top.
+    ...(clientConversations.length > 0
+      ? [
+          {
+            key: 'clients',
+            title: 'Clients',
+            description:
+              'People you marked as a client. Their mail sorts first here.',
+            dotClass: 'bg-primary',
+            items: clientConversations,
+          },
+        ]
+      : []),
     ...orderedSections,
     ...(done.length > 0
       ? [
@@ -2097,7 +2162,7 @@ export function Inbox({
       {/* The shape of the work before the work: counts the section headings
           would otherwise only reveal one at a time. */}
       <SummaryStrip
-        counts={counts}
+        counts={stateCounts}
         doneCount={doneCount}
         unseenCount={
           conversations.filter(
@@ -2620,15 +2685,26 @@ export function Inbox({
           {searchActive &&
           searchResults &&
           !searching &&
-          searchResults.conversations.length > 0 ? (
+          searchResults.conversations.length +
+            searchResults.assignedConversations.length >
+            0 ? (
             <p role="status" className="mt-2 text-xs text-muted-foreground">
-              {searchResults.conversations.length}{' '}
-              {searchResults.conversations.length === 1 ? 'result' : 'results'}{' '}
-              for “{searchResults.query}” in synced mail.
+              {searchResults.conversations.length +
+                searchResults.assignedConversations.length}{' '}
+              {searchResults.conversations.length +
+                searchResults.assignedConversations.length ===
+              1
+                ? 'result'
+                : 'results'}{' '}
+              for “{searchResults.query}” in synced mail
+              {searchResults.assignedConversations.length > 0
+                ? `, ${searchResults.assignedConversations.length} of them assigned to you`
+                : ''}
+              .
             </p>
           ) : null}
 
-          {visibleConversations.length === 0 ? (
+          {visibleConversations.length === 0 && visibleAssigned.length === 0 ? (
             <div className="mt-8">
               <p className="text-sm text-muted-foreground">
                 {searchActive

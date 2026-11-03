@@ -96,6 +96,81 @@ export const users = sqliteTable(
 )
 
 /**
+ * The account type. `solo` is one person's workspace, `company` several.
+ *
+ * Deliberately not `users.work_kind`: that says what a person does and only
+ * seeds their defaults, while this decides what is shared and who may see it. A
+ * solo support person is a valid pair.
+ */
+export const ORGANIZATION_KINDS = ['solo', 'company'] as const
+
+export type OrganizationKind = (typeof ORGANIZATION_KINDS)[number]
+
+/**
+ * What a member may do in a workspace.
+ *
+ * Separate from `users.role`, which stays the install-level switch that opens
+ * `/admin`. An organisation can therefore have its own admins without handing
+ * anyone the operator page, and `LUMEN_ADMIN_EMAILS` remains the break-glass
+ * path for an install whose organisation has no owner left.
+ */
+export const MEMBERSHIP_ROLES = ['owner', 'admin', 'member'] as const
+
+export type MembershipRole = (typeof MEMBERSHIP_ROLES)[number]
+
+/**
+ * A workspace.
+ *
+ * The unit that owns a client list and, later, the sections and rules a company
+ * wants everyone to share. Identified by a readable deterministic id for the
+ * solo case (`org:<userId>`), which is what makes the migration backfill
+ * idempotent — running it twice creates the same rows rather than a second
+ * workspace per person.
+ */
+export const organizations = sqliteTable('organizations', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  kind: text('kind').notNull().default('solo').$type<OrganizationKind>(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+})
+
+/**
+ * Who belongs to a workspace, and what they may do there.
+ *
+ * `user_id` is unique: one person belongs to exactly one organisation. That is a
+ * decided constraint, not an accident of the beta — with a single membership no
+ * query needs an "active workspace" from the session, and a member cannot read
+ * another workspace's client list because they are not in it. Several
+ * memberships would need a switcher and a stored active id before any query that
+ * reads this could be trusted.
+ */
+export const memberships = sqliteTable(
+  'memberships',
+  {
+    id: text('id').primaryKey(),
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    role: text('role').notNull().default('member').$type<MembershipRole>(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('memberships_user_idx').on(table.userId),
+    index('memberships_organization_idx').on(table.organizationId),
+  ],
+)
+
+/**
  * A signed-in device.
  *
  * The cookie carries `<session id>.<random token>`; only the SHA-256 of the
@@ -248,6 +323,22 @@ export const conversations = sqliteTable(
       .notNull()
       .default(false),
     intent: text('intent').$type<Intent>().notNull().default('unknown'),
+
+    /**
+     * The colleague this thread was handed to, or null when it is unassigned.
+     *
+     * A reference, not a copy: the thread stays in its owner's mailbox and the
+     * assignee gets a view of it. A copy would produce two threads that disagree
+     * about what was said, with no way to tell which one is the conversation.
+     */
+    assignedTo: text('assigned_to').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    /** Who made the assignment; kept so the owner's name is answerable later. */
+    assignedBy: text('assigned_by').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    assignedAt: integer('assigned_at', { mode: 'timestamp_ms' }),
 
     messageCount: integer('message_count').notNull().default(0),
     attachmentCount: integer('attachment_count').notNull().default(0),
@@ -674,8 +765,48 @@ export const contactContexts = sqliteTable(
 )
 
 /**
- * A custom inbox section: the user's own name, meaning and order for a group of
+ * The organisation's client list.
+ *
+ * One row per address that *is* a client, vendor, partner and so on. The kind
+ * lives here, not on `contact_contexts`, because its owner is the workspace:
+ * "Acme is a client" is a fact about the company and every member's inbox should
+ * sort Acme first. The notes — role, relationship, topics, current work,
+ * importance — stay on `contact_contexts`, keyed by the person who wrote them, so
+ * sharing the list shares no private judgement.
+ *
+ * A row with no kind would mean nothing, which is why the column is required
+ * here and clearing a kind deletes the row. The allowed values are checked in
+ * `lib/contacts/context.ts`, next to the other rules for these fields; the column
+ * is plain text so adding a kind is not a migration.
+ */
+export const organizationClients = sqliteTable(
+  'organization_clients',
+  {
+    organizationId: text('organization_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    /** Normalized email address. */
+    email: text('email').notNull(),
+    kind: text('kind').notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.organizationId, table.email] }),
+    index('organization_clients_email_idx').on(table.email),
+  ],
+)
+
+/**
+ * A custom inbox section: the workspace's name, meaning and order for a group of
  * threads.
+ *
+ * Owned by the organisation, not by the person: a company's filing ("Invoices",
+ * "Support") is how the company sorts its mail, and four members inventing four
+ * sets of sections would mean four different inboxes. State labels stay personal;
+ * which state a thread is in is a reading, while which drawer it belongs in is a
+ * shared decision.
  *
  * Separate from `organization_rules` because the two answer different questions.
  * This is *what the section is* — the name shown in the heading, the meaning
@@ -692,9 +823,9 @@ export const organizationLabels = sqliteTable(
   'organization_labels',
   {
     id: text('id').primaryKey(),
-    userId: text('user_id')
+    organizationId: text('organization_id')
       .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
+      .references(() => organizations.id, { onDelete: 'cascade' }),
     /** User-facing name of the custom inbox section. */
     name: text('name').notNull(),
     /**
@@ -714,8 +845,8 @@ export const organizationLabels = sqliteTable(
       .default(sql`(unixepoch() * 1000)`),
   },
   (table) => [
-    index('organization_labels_user_position_idx').on(
-      table.userId,
+    index('organization_labels_organization_position_idx').on(
+      table.organizationId,
       table.position,
     ),
   ],
@@ -889,12 +1020,64 @@ export const syncCursors = sqliteTable(
 )
 
 /**
- * Install-wide settings. A single row, id `app`.
+ * The workspace's AI configuration.
  *
- * The AI service credentials live here rather than in `.env`: they are secrets
- * the user sets in the UI, they are per-install, and they are encrypted at rest
- * with the same key as the OAuth refresh tokens. Keeping them out of the
- * environment also means the app can be configured without a redeploy.
+ * One row per organisation, not per person: a key is a company purchase, and a
+ * member who leaves must not take the key with them. An owner or admin edits it
+ * from `/organisation`; everyone else reads through it, because a topic label or
+ * a draft is produced with the workspace's key either way.
+ *
+ * Encrypted at rest with the same AES-256-GCM envelope as the OAuth refresh
+ * tokens, and `getAiSettings()` returns a summary only — the UI never receives a
+ * secret.
+ */
+export const organizationAiSettings = sqliteTable('organization_ai_settings', {
+  organizationId: text('organization_id')
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  /** AES-256-GCM ciphertext of the Jev API key. Never store plaintext. */
+  jevApiKeyEncrypted: text('jev_api_key_encrypted'),
+  jevModel: text('jev_model'),
+  /** One of `anthropic` | `openai` | `gemini`, or null when topics are off. */
+  llmProvider: text('llm_provider'),
+  llmModel: text('llm_model'),
+  /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
+  llmApiKeyEncrypted: text('llm_api_key_encrypted'),
+  /**
+   * How important a conversation has to be before a draft is offered (1–10).
+   *
+   * A draft costs a paid API call per thread, and what is worth one is the
+   * workspace's call. Compared against the same 1–10 the decision layer scores,
+   * so the number here and the number on the conversation are the same unit.
+   * The default mirrors `REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT` (written out rather
+   * than imported, so the schema keeps no dependency on the conversation layer).
+   */
+  suggestReplyMinImportance: integer('suggest_reply_min_importance')
+    .notNull()
+    .default(6),
+  /** Whether a reply the user sends is checked against the thread's goal. */
+  goalCheckEnabled: integer('goal_check_enabled', { mode: 'boolean' })
+    .notNull()
+    .default(true),
+  /**
+   * Whether the app refreshes a thread's goal and the correspondent's profile
+   * from the mail itself. Off by default: it writes fields the user owns.
+   */
+  autoContextEnabled: integer('auto_context_enabled', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+})
+
+/**
+ * Per-user settings that are not secrets.
+ *
+ * The AI keys used to live here; they moved to `organization_ai_settings` when a
+ * workspace became the owner of them. What is left belongs to one person and
+ * would be wrong to share: whether avatars may be fetched from Gravatar, and the
+ * order that person arranged their inbox sections in.
  */
 export const appSettings = sqliteTable(
   'app_settings',
@@ -910,52 +1093,6 @@ export const appSettings = sqliteTable(
     userId: text('user_id').references(() => users.id, {
       onDelete: 'cascade',
     }),
-    /** AES-256-GCM ciphertext of the Jev API key. Never store plaintext. */
-    jevApiKeyEncrypted: text('jev_api_key_encrypted'),
-    jevModel: text('jev_model'),
-    /** One of `anthropic` | `openai` | `gemini`, or null when topics are off. */
-    llmProvider: text('llm_provider'),
-    llmModel: text('llm_model'),
-    /** AES-256-GCM ciphertext of the chosen LLM provider's API key. */
-    llmApiKeyEncrypted: text('llm_api_key_encrypted'),
-    /**
-     * How important a conversation has to be before a draft is offered (1–10).
-     *
-     * The spec's "importance exceeds a configured threshold", and the reason it is
-     * stored rather than hard-coded: a draft costs a paid API call per thread, and
-     * what is worth one is the user's call. Compared against the same 1–10 the
-     * decision layer scores, so the number on this row and the number on the
-     * conversation are the same unit. Default mirrors
-     * `REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT` (written out rather than imported, so
-     * the schema keeps no dependency on the conversation layer).
-     */
-    suggestReplyMinImportance: integer('suggest_reply_min_importance')
-      .notNull()
-      .default(6),
-    /**
-     * Whether a reply the user sends is checked against the thread's goal.
-     *
-     * On by default: the goal is the reason a reply exists, and the check is what
-     * says whether it did what it was for. It is a setting because it is one
-     * extra model call per send, which is a cost the user should be able to
-     * decline without losing drafts or topics.
-     */
-    goalCheckEnabled: integer('goal_check_enabled', { mode: 'boolean' })
-      .notNull()
-      .default(true),
-    /**
-     * Whether the app refreshes a thread's goal and the correspondent's profile
-     * from the mail itself.
-     *
-     * The one AI feature that writes to fields the user owns, which is why it is
-     * off by default and why it is a switch at all: it is one model call per
-     * decided thread, and what it buys is text the user did not type. Everything
-     * it writes lands in `context_revisions` with an Undo, so opting in is not a
-     * one-way door — but opting in is still the user's decision to make.
-     */
-    autoContextEnabled: integer('auto_context_enabled', { mode: 'boolean' })
-      .notNull()
-      .default(false),
     /**
      * Whether avatars may be fetched from Gravatar.
      *

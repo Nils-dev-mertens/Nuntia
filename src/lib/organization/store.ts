@@ -6,6 +6,7 @@ import {
   organizationRules,
   stateLabels,
 } from '#/db/schema.ts'
+import { ensureWorkspace } from '#/lib/organization/workspace.ts'
 
 import {
   normaliseStateLabels,
@@ -21,7 +22,11 @@ import type {
 } from './matching.ts'
 
 /**
- * This user's labels, in their arranged order, each with its rules.
+ * The workspace's labels, in their arranged order, each with its rules.
+ *
+ * Read through the member's workspace rather than the member: a section is shared
+ * filing, so a colleague's "Invoices" is this inbox's "Invoices" too. The caller
+ * still names a user, so no query can reach a workspace the reader is not in.
  *
  * Two queries rather than a join: the rules come back flat and are grouped here,
  * which keeps a label with no rules a row with an empty array instead of a row
@@ -30,11 +35,11 @@ import type {
 export async function listOrganizationLabels(
   userId: string,
 ): Promise<OrganizationLabel[]> {
-  const owner = userId.trim().toLowerCase()
-  if (!owner) return []
+  const workspace = await ensureWorkspace(userId)
+  if (!workspace) return []
 
   const labels = await db.query.organizationLabels.findMany({
-    where: eq(organizationLabels.userId, owner),
+    where: eq(organizationLabels.organizationId, workspace.organizationId),
     orderBy: [
       asc(organizationLabels.position),
       asc(organizationLabels.createdAt),
@@ -67,27 +72,33 @@ export async function listOrganizationLabels(
 }
 
 /**
- * Replace the user's labels and every rule they carry, atomically.
+ * Replace the workspace's labels and every rule they carry, atomically.
  *
  * Delete-then-insert rather than a diff, the same as the rules list has always
  * been: the form submits the whole set, so a label removed on screen has to be
  * removed here, and a stale rule is worse than a rewritten one. Invalid input
  * leaves storage untouched.
+ *
+ * Any member may save: the set is shared filing rather than a credential, and a
+ * section is only useful if the people doing the filing can change it. The roles
+ * that gate renaming the workspace and spending its AI budget are a different
+ * question and stay on `/organisation`.
  */
 export async function saveOrganizationLabels(
   userId: string,
   input: unknown,
 ): Promise<OrganizationLabel[] | null> {
-  const owner = userId.trim().toLowerCase()
+  const workspace = await ensureWorkspace(userId)
   const labels = normaliseOrganizationLabels(input)
-  if (!owner || !labels) return null
+  if (!workspace || !labels) return null
 
+  const organizationId = workspace.organizationId
   const now = new Date()
   await db.transaction(async (tx) => {
     const existing = await tx
       .select({ id: organizationLabels.id })
       .from(organizationLabels)
-      .where(eq(organizationLabels.userId, owner))
+      .where(eq(organizationLabels.organizationId, organizationId))
 
     // Explicit, even though the foreign key cascades: a test or a manual
     // delete that ran without `PRAGMA foreign_keys` would otherwise leave rules
@@ -100,15 +111,15 @@ export async function saveOrganizationLabels(
         ),
       )
     }
-    await tx.delete(organizationLabels).where(
-      eq(organizationLabels.userId, owner),
-    )
+    await tx
+      .delete(organizationLabels)
+      .where(eq(organizationLabels.organizationId, organizationId))
 
     if (labels.length > 0) {
       await tx.insert(organizationLabels).values(
         labels.map((label, position) => ({
           id: label.id,
-          userId: owner,
+          organizationId,
           name: label.name,
           description: label.description,
           enabled: label.enabled,

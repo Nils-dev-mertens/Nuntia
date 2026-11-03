@@ -34,6 +34,7 @@ import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
 import { dedupeMediaByHash, sha256Hex } from '#/lib/mail/media.ts'
+import { CONTACT_KIND_LABELS, CONTACT_KINDS } from '#/lib/contacts/context.ts'
 import type {
   ContactContextFields,
   ContactContextTextFields,
@@ -716,6 +717,9 @@ function ContactContextEditor({
   const [importance, setImportance] = useState<number | null>(
     initialContext?.importance ?? null,
   )
+  const [kind, setKind] = useState<ContactContextFields['kind']>(
+    initialContext?.kind ?? null,
+  )
 
   useEffect(() => {
     setRoleCompany(initialContext?.roleCompany ?? '')
@@ -723,6 +727,7 @@ function ContactContextEditor({
     setTopics(initialContext?.topics ?? '')
     setCurrentWork(initialContext?.currentWork ?? '')
     setImportance(initialContext?.importance ?? null)
+    setKind(initialContext?.kind ?? null)
     setEditing(false)
     setAiSuggested(false)
     setError(null)
@@ -762,6 +767,7 @@ function ContactContextEditor({
     setError(null)
     try {
       const result = await onSave({
+        kind,
         roleCompany,
         relationship,
         topics,
@@ -781,6 +787,7 @@ function ContactContextEditor({
   }
 
   const hasContext = Boolean(
+    initialContext?.kind ||
     initialContext?.roleCompany ||
     initialContext?.relationship ||
     initialContext?.topics ||
@@ -810,6 +817,25 @@ function ContactContextEditor({
       </div>
       {editing ? (
         <form className="mt-3 space-y-2" onSubmit={(event) => void save(event)}>
+          <label className="block text-xs text-muted-foreground">
+            Kind
+            <select
+              value={kind ?? ''}
+              onChange={(event) =>
+                setKind(
+                  (event.target.value || null) as ContactContextFields['kind'],
+                )
+              }
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            >
+              <option value="">Not set</option>
+              {CONTACT_KINDS.map((value) => (
+                <option key={value} value={value}>
+                  {CONTACT_KIND_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="block text-xs text-muted-foreground">
             Role / company
             <input
@@ -907,6 +933,7 @@ function ContactContextEditor({
                 setTopics(initialContext?.topics ?? '')
                 setCurrentWork(initialContext?.currentWork ?? '')
                 setImportance(initialContext?.importance ?? null)
+                setKind(initialContext?.kind ?? null)
                 setEditing(false)
                 setAiSuggested(false)
                 setError(null)
@@ -937,6 +964,12 @@ function ContactContextEditor({
           ) : null}
           <dl className="mt-3 space-y-2 text-sm">
             {[
+              [
+                'Kind',
+                initialContext?.kind
+                  ? CONTACT_KIND_LABELS[initialContext.kind]
+                  : '',
+              ],
               ['Role / company', initialContext?.roleCompany],
               ['Relationship', initialContext?.relationship],
               ['Topics discussed', initialContext?.topics],

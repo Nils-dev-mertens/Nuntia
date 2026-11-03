@@ -33,13 +33,17 @@ import {
   setDerivedVersion,
 } from '#/lib/auth/accounts.ts'
 import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
+import { listContactKindsByEmail } from '#/lib/contacts/context.ts'
+import type { ContactKind } from '#/lib/contacts/context.ts'
 import {
   activeDone,
   activeImportanceOverride,
   activeStateOverride,
   backfillDerivedFields,
   DERIVED_VERSION,
+  getConversationAssignedTo,
   getConversationClusterByThreadId,
+  listAssignedConversations,
   getParsingProfileContext,
   getStoredAttachment,
   isSenderAddress,
@@ -92,6 +96,9 @@ import {
   listStateLabels,
 } from '#/lib/organization/store.ts'
 import { recordUserLabelChange } from '#/lib/context/revisions.ts'
+import { getUser } from '#/lib/auth/index.ts'
+import { listWorkspaceMembers } from '#/lib/organization/members.ts'
+import { ensureWorkspace } from '#/lib/organization/workspace.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
 import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
 import { resolveOrganizationGroup } from '#/lib/organization/matching.ts'
@@ -179,10 +186,19 @@ export type ConversationSummary = {
   /** User-authored contact importance rating, when the correspondent is rated. */
   senderImportance: number | null
   /**
+   * What the correspondent is to the user, when they have said.
+   *
+   * Read from the contact profile rather than stored on the conversation, which
+   * is what lets the Clients section be recomputed on every load.
+   */
+  contactKind: ContactKind | null
+  /**
    * The custom label this thread is filed under: the label the user moved it
    * into when they made a move, otherwise the first matching rule.
    */
   organizationGroup: { id: string; name: string } | null
+  /** A colleague handed this thread to the reader; it is their mailbox's. */
+  assignedToMe?: boolean
 }
 
 export type InboxPayload =
@@ -198,6 +214,12 @@ export type InboxPayload =
       /** Every connected mailbox, in connection order. */
       accounts: Array<{ id: string; email: string; provider: Provider }>
       conversations: ConversationSummary[]
+      /**
+       * Threads a colleague assigned to this member, kept out of the state
+       * groups: they are the owner's mail, and counting them as this member's
+       * work would inflate every number the company reports.
+       */
+      assignedConversations: ConversationSummary[]
       /** Every state is present, including zeroes, so the UI can render headers. */
       counts: Record<ConversationState, number>
       /** Ordered user-defined labels, each with the rules that find its mail. */
@@ -297,6 +319,18 @@ export type ConversationDetail = {
   accountEmail: string
   /** Which service this mailbox belongs to; drives the reconnect link. */
   provider: Provider
+  /**
+   * Who this thread was handed to, and who it could be handed to.
+   *
+   * `viewerIsAssignee` is what tells the view it is looking at someone else's
+   * mailbox: the composer is hidden and no reply can leave from here. `members`
+   * is empty for the assignee — handing a thread on is the owner's act.
+   */
+  assignment: {
+    assignee: { email: string; name: string | null } | null
+    viewerIsAssignee: boolean
+    members: Array<{ userId: string; email: string; name: string | null }>
+  }
   /**
    * Every address a reply could leave from, best first. More than one when the
    * thread carries several of the user's connected addresses.
@@ -433,17 +467,34 @@ export async function loadConversation(
   // the same way in the sender's and recipient's mailboxes. The inbox merges the
   // Message-ID-connected component; the detail view must render the same one, or
   // clicking a merged row shows one account's fragment and hides the rest.
-  const cluster = await getConversationClusterByThreadId(
-    userId,
-    providerThreadId,
-  )
-  if (!cluster || cluster.length === 0) return null
+  let cluster = await getConversationClusterByThreadId(userId, providerThreadId)
+  let viewerIsAssignee = false
+
+  // An assignment is a reference, not a copy: the row still belongs to the
+  // owner's mailbox, so it is not in this member's cluster and the normal read
+  // finds nothing. The one fallback that lets the assignee in is this. Their
+  // view is a single account's fragment rather than a merged cluster, which is
+  // the honest shape for "someone else's mailbox".
+  if (!cluster || cluster.length === 0) {
+    const assigned = await getConversationAssignedTo(userId, providerThreadId)
+    if (!assigned) return null
+    cluster = [assigned]
+    viewerIsAssignee = true
+  }
 
   const accountRows = await listAccounts(userId)
   const accounts = accountRows.map((account) => ({
     id: account.id,
     email: account.email,
   }))
+
+  // The assigned thread's mailbox belongs to the colleague, so it is not in this
+  // member's account list. Adding it lets the merge resolve the owner's address
+  // instead of falling back to a raw account id.
+  for (const source of cluster) {
+    if (accounts.some((account) => account.id === source.accountId)) continue
+    accounts.push({ id: source.accountId, email: source.accountId })
+  }
 
   // The cluster is one connected component, so it folds into a single row.
   const merged = mergeAccountConversations(cluster, accounts).at(0)
@@ -537,6 +588,11 @@ export async function loadConversation(
   const preferences = await getPreferences(userId)
   // The user's wording for the label on the badge and in the picker.
   const stateLabels = await listStateLabels(userId)
+  const assignment = await resolveAssignment(
+    userId,
+    conversation,
+    viewerIsAssignee,
+  )
 
   return {
     providerThreadId: conversation.providerThreadId,
@@ -551,7 +607,10 @@ export async function loadConversation(
     subject: conversation.subject,
     state: conversation.state,
     isAutomated: conversation.isAutomated,
-    replyable: conversation.replyable,
+    // The assignee has no token for the owner's mailbox, so nothing could leave
+    // from here. A composer that failed on send would be worse than none.
+    replyable: viewerIsAssignee ? false : conversation.replyable,
+    assignment,
     senderEmail,
     topic: conversation.topic,
     goal: conversation.goal,
@@ -1672,6 +1731,53 @@ export function startBackgroundSync(
 }
 
 /** One line of preview text, collapsed to something list-sized. */
+/**
+ * Who a thread was handed to, and who it may be handed to.
+ *
+ * The owner is the only one who can hand it on, so only they get the list of
+ * colleagues. The assignee gets the assignee's own name, which is enough for the
+ * view to say whose mailbox it is looking at — a reference with no way back
+ * would be a dead end.
+ */
+async function resolveAssignment(
+  userId: string,
+  conversation: Conversation,
+  viewerIsAssignee: boolean,
+): Promise<ConversationDetail['assignment']> {
+  const workspace = await ensureWorkspace(userId)
+  if (!workspace) return { assignee: null, viewerIsAssignee, members: [] }
+
+  const members = viewerIsAssignee
+    ? []
+    : (await listWorkspaceMembers(workspace.organizationId)).map((member) => ({
+        userId: member.userId,
+        email: member.email,
+        name: member.name,
+      }))
+
+  const assignedTo = conversation.assignedTo ?? null
+  if (!assignedTo) return { assignee: null, viewerIsAssignee, members }
+
+  const known = members.find((member) => member.userId === assignedTo)
+  if (known) {
+    return {
+      assignee: { email: known.email, name: known.name },
+      viewerIsAssignee,
+      members,
+    }
+  }
+
+  // The assignee's own view has no member list to look in.
+  const person = await getUser(assignedTo)
+  return {
+    assignee: person
+      ? { email: person.email, name: person.name }
+      : { email: assignedTo, name: null },
+    viewerIsAssignee,
+    members,
+  }
+}
+
 function previewOf(conversation: {
   messages: Array<{ snippet: string | null; body: string }>
 }): string | null {
@@ -1684,6 +1790,70 @@ function previewOf(conversation: {
   return text.length > 140 ? `${text.slice(0, 139)}…` : text
 }
 
+/**
+ * One assigned thread, shaped like an inbox row.
+ *
+ * Written out rather than routed through `toSummary`: the merge type describes a
+ * thread this member's own mailboxes hold, and an assignment deliberately is not
+ * one. The fields are the same because the row renders the same way — it just
+ * belongs to someone else's mailbox and says so in `accountEmail`.
+ */
+function toAssignedSummary(
+  row: AccountConversation & { ownerEmail: string },
+  names: Map<string, string>,
+  useGravatar: boolean,
+  organizationLabels: OrganizationLabel[],
+  contactImportance: ReadonlyMap<string, number>,
+  contactKinds: ReadonlyMap<string, ContactKind>,
+): ConversationSummary {
+  const conversation = row.conversation
+  const sender = otherPartyOf(conversation)
+  const matchedRule = resolveOrganizationGroup(
+    conversation.organizationGroupId,
+    {
+      senderEmail: sender,
+      subject: conversation.subject,
+      topic: conversation.topic,
+      state: conversation.state,
+    },
+    organizationLabels,
+  )
+
+  return {
+    id: conversation.id,
+    providerThreadId: conversation.providerThreadId,
+    subject: conversation.subject,
+    state: conversation.state,
+    isAutomated: conversation.isAutomated,
+    replyable: conversation.replyable,
+    accountId: row.accountId,
+    accountEmail: row.ownerEmail,
+    relation: 'primary',
+    ccAccountEmails: [],
+    participants: enrichParticipants(
+      conversation.participants,
+      names,
+      useGravatar,
+    ),
+    messageCount: conversation.messageCount,
+    attachmentCount: conversation.attachmentCount,
+    lastMessageAt: conversation.lastMessageAt.toISOString(),
+    topic: conversation.topic,
+    goal: conversation.goal,
+    importance: conversation.importance,
+    urgency: conversation.urgency,
+    unseen: conversation.unread ?? unseenMessages(conversation).length > 0,
+    done: activeDone(conversation) !== null,
+    preview: previewOf(conversation),
+    senderImportance: contactImportance.get(sender) ?? null,
+    contactKind: contactKinds.get(sender) ?? null,
+    organizationGroup: matchedRule
+      ? { id: matchedRule.id, name: matchedRule.name }
+      : null,
+    assignedToMe: true,
+  }
+}
+
 function toSummary(
   merged: MergedConversation,
   emailById: Map<string, string>,
@@ -1691,6 +1861,7 @@ function toSummary(
   useGravatar: boolean,
   organizationLabels: OrganizationLabel[],
   contactImportance: ReadonlyMap<string, number>,
+  contactKinds: ReadonlyMap<string, ContactKind>,
 ): ConversationSummary {
   const conversation = merged.conversation
 
@@ -1734,6 +1905,7 @@ function toSummary(
     done: activeDone(conversation) !== null,
     preview: previewOf(conversation),
     senderImportance: contactImportance.get(otherPartyOf(conversation)) ?? null,
+    contactKind: contactKinds.get(otherPartyOf(conversation)) ?? null,
     organizationGroup: matchedRule
       ? { id: matchedRule.id, name: matchedRule.name }
       : null,
@@ -1942,26 +2114,43 @@ export async function loadInbox(
     ? merged.filter((row) => conversationMatchesQuery(row.conversation, search))
     : merged
 
+  // A colleague's hand-over is a short separate list rather than a state group:
+  // the rows are the owner's mail, and counting them as this member's work would
+  // double the company's numbers. A search covers stored mail, so it does not
+  // reach across mailboxes the reader cannot read.
+  // A search still covers assigned threads: they are stored mail this member can
+  // open, and staying silent about the one list a colleague deliberately put in
+  // front of them would be the wrong kind of quiet.
+  const assignedRows = await listAssignedConversations(userId)
+  const assignedConversations = search
+    ? assignedRows.filter((row) =>
+        conversationMatchesQuery(row.conversation, search),
+      )
+    : assignedRows
+
   // Done threads are counted apart from the state groups, not inside them: the
   // groups are what is still open, and a handled thread sitting under "Needs
   // action" was the thing the user could not tell from work that was actually
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
   const { counts, doneCount } = partitionByState(matched)
-  const [organizationLabels, contactImportance, stateLabels] =
+
+  const [organizationLabels, contactImportance, contactKinds, stateLabels] =
     await Promise.all([
       listOrganizationLabels(userId),
       listContactImportanceByEmail(userId),
+      listContactKindsByEmail(userId),
       listStateLabels(userId),
-    ],
-  )
+    ])
 
   // The section order, made valid for the labels this user has now: a deleted
   // label's token is dropped and a new one appended, so an old order can never
   // hide a section.
   const inboxOrder = resolveInboxOrder(
     preferences.inboxOrder,
-    organizationLabels.filter((label) => label.enabled).map((label) => label.id),
+    organizationLabels
+      .filter((label) => label.enabled)
+      .map((label) => label.id),
   )
 
   // The list is grouped by state in the UI, but ordering within a group is by
@@ -1987,6 +2176,17 @@ export async function loadInbox(
         preferences.useGravatar,
         organizationLabels,
         contactImportance,
+        contactKinds,
+      ),
+    ),
+    assignedConversations: assignedConversations.map((row) =>
+      toAssignedSummary(
+        row,
+        names,
+        preferences.useGravatar,
+        organizationLabels,
+        contactImportance,
+        contactKinds,
       ),
     ),
     counts,

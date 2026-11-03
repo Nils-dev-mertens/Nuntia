@@ -29,6 +29,26 @@ async function gotoWithForm(page: Page, path: string) {
   })
 }
 
+/**
+ * Sign in as the account the bootstrap code created.
+ *
+ * The suite is serial and ordered, so this only means anything after that test
+ * has run. Each test still starts from a fresh browser context, so every one of
+ * them has to sign in for itself.
+ */
+async function signIn(page: Page) {
+  await gotoWithForm(page, '/sign-in')
+  await expect(
+    page.getByRole('heading', { name: 'Sign in to Nuntia' }),
+  ).toBeVisible()
+
+  await page.getByLabel('Email').fill(EMAIL)
+  await page.getByLabel('Password').fill(PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+
+  await expect(page).toHaveURL('/')
+}
+
 const EMAIL = 'e2e@example.com'
 const PASSWORD = 'twelve-chars-or-more'
 const BOOTSTRAP_CODE = 'AAAA-BBBB-CCCC'
@@ -83,16 +103,7 @@ test('the bootstrap code creates the first account', async ({ page }) => {
 })
 
 test('the account signs back in', async ({ page }) => {
-  await gotoWithForm(page, '/sign-in')
-  await expect(
-    page.getByRole('heading', { name: 'Sign in to Nuntia' }),
-  ).toBeVisible()
-
-  await page.getByLabel('Email').fill(EMAIL)
-  await page.getByLabel('Password').fill(PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
-
-  await expect(page).toHaveURL('/')
+  await signIn(page)
   await expect(
     page.getByRole('heading', { name: 'Welcome to Nuntia' }),
   ).toBeVisible()
@@ -101,4 +112,60 @@ test('the account signs back in', async ({ page }) => {
 test('a dead invite lands on the code form', async ({ page }) => {
   await page.goto('/join/ZZZZ-ZZZZ-ZZZZ')
   await expect(page).toHaveURL(/\/join$/)
+})
+
+test('the workspace page is the owner’s to manage', async ({ page }) => {
+  await signIn(page)
+  // The rename form needs React's handler: without it the submit is native, the
+  // page reloads, and the save is silently dropped.
+  await gotoWithForm(page, '/organisation')
+
+  await expect(
+    page.getByRole('heading', { name: 'Organisation', level: 1 }),
+  ).toBeVisible()
+
+  // The first account is the owner of its own one-person workspace, which is
+  // what makes «solo stays the default» something the page can already show.
+  await expect(page.getByText('You are owner here.')).toBeVisible()
+  await expect(page.getByText('1 seat in this workspace.')).toBeVisible()
+
+  // An owner gets the AI form, not the member's read-only summary. Solo users
+  // are owners of their own workspace, so they keep the form they had before it
+  // moved.
+  await expect(page.getByLabel('Jev API key')).toBeVisible()
+
+  await page.getByLabel('Name').fill('E2E Workspace')
+  await page.getByRole('button', { name: 'Save name' }).click()
+  await expect(page.getByText('Workspace renamed.')).toBeVisible()
+
+  // A reload reads the stored name back rather than the optimistic one.
+  await page.reload()
+  await expect(page.getByLabel('Name')).toHaveValue('E2E Workspace')
+})
+
+test('the workspace page needs a session', async ({ page }) => {
+  await page.goto('/organisation')
+  await expect(page).toHaveURL(/\/sign-in/)
+})
+
+test('the AI keys point at the workspace instead of the member', async ({
+  page,
+}) => {
+  await signIn(page)
+  // No hydration wait here: after the AI form moved out, this page has no
+  // `<form>` left, and the link is a plain anchor in the markup.
+  await page.goto('/settings')
+  await expect(
+    page.getByRole('heading', { name: 'Settings', level: 1 }),
+  ).toBeVisible()
+
+  const link = page.getByRole('link', { name: 'Open organisation settings' })
+  await expect(link).toBeVisible()
+
+  // The per-user key form is gone: a raw key field on the personal page would be
+  // the old behaviour, where each member brought their own key.
+  await expect(page.getByLabel('Jev API key')).toHaveCount(0)
+
+  await link.click()
+  await expect(page).toHaveURL('/organisation')
 })
