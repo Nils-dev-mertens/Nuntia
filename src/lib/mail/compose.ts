@@ -6,6 +6,11 @@
  * other email they've ever got.
  */
 
+import {
+  signatureHasMarkup,
+  signatureToHtml,
+  signatureToText,
+} from './signature.ts'
 import type { ParsedMessage } from './types.ts'
 
 export type ComposeInput = {
@@ -128,7 +133,7 @@ function composeText(input: ComposeInput): string {
     sections.push(body)
   }
 
-  const signature = input.signature?.trim()
+  const signature = signatureToText(input.signature)
   if (signature) sections.push(signature)
 
   if (input.quoteOriginal && input.original) {
@@ -174,7 +179,13 @@ function originalPlainText(original: ParsedMessage): string[] {
  */
 function composeHtml(input: ComposeInput): string | null {
   const originalHtml = input.originalHtml?.trim()
-  if (!input.quoteOriginal || !originalHtml || !input.original) return null
+  const styledSignature = signatureHasMarkup(input.signature)
+  if (!input.quoteOriginal || !originalHtml || !input.original) {
+    // Nothing rich to quote. A styled signature is still worth an HTML part —
+    // otherwise the plain-text half would be the only one sent and the styling
+    // would silently disappear from every reply in a plain-text thread.
+    return styledSignature ? `<div>${bodyHtml(input)}</div>` : null
+  }
 
   const sections: string[] = ['<div>', bodyHtml(input)]
 
@@ -207,9 +218,9 @@ function bodyHtml(input: {
   if (greeting) sections.push(`<p>${escapeHtml(greeting)}</p>`)
   if (body) sections.push(`<p>${escapeHtml(body).replace(/\n/g, '<br>')}</p>`)
   // Signature before the quote (when there is one), matching the plain-text part:
-  // it belongs to the user's own message, not to what they are quoting.
-  if (signature)
-    sections.push(`<p>${escapeHtml(signature).replace(/\n/g, '<br>')}</p>`)
+  // it belongs to the user's own message, not to what they are quoting. Styled
+  // markup is rendered only in this representation; `composeText` strips it.
+  if (signature) sections.push(signatureToHtml(signature))
 
   return sections.join('')
 }

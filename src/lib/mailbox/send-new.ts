@@ -17,8 +17,14 @@
  * the inbox and appears on the next sync.
  */
 
-import { assertOwnedAccount } from '#/lib/auth/accounts.ts'
-import { recordContactedAddresses } from '#/lib/contacts/index.ts'
+import {
+  assertOwnedAccount,
+  listSiblingAccountIds,
+} from '#/lib/auth/accounts.ts'
+import {
+  contactNameFor,
+  recordContactedAddresses,
+} from '#/lib/contacts/index.ts'
 import {
   getLastOwnMessageStyle,
   getParsingProfileContext,
@@ -114,22 +120,33 @@ function parseAddresses(
  * last sent mail in this mailbox. Exported because the composer shows exactly
  * what will be added, and a preview computed differently from the send is a
  * preview that lies.
+ *
+ * The recipient is only an address here — the composer has no message from them
+ * yet — so a `{name}` greeting reads the name earlier mail taught the address
+ * book, exactly as a reply does when its From header is bare.
  */
 export async function resolveNewMessageStyle(
   accountId: string,
   recipient: string | null,
 ): Promise<ReplyStyle> {
+  const mailboxId = accountId.trim().toLowerCase()
   const key = recipient?.trim().toLowerCase() ?? ''
 
-  const [context, lastOwnerMessage] = await Promise.all([
-    getParsingProfileContext(accountId),
-    getLastOwnMessageStyle(accountId),
+  const [context, lastOwnerMessage, knownName] = await Promise.all([
+    getParsingProfileContext(mailboxId),
+    getLastOwnMessageStyle(mailboxId),
+    key
+      ? listSiblingAccountIds(mailboxId).then((ids) =>
+          contactNameFor(ids, key),
+        )
+      : null,
   ])
 
   return resolveReplyStyle({
     account: context.replyStyles.account,
     sender: key ? context.replyStyles.senders[key] : null,
     lastOwnerMessage,
+    recipient: key ? { email: key, knownName } : null,
   })
 }
 

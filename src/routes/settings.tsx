@@ -86,11 +86,19 @@ import {
   STATE_MEANING_MIN_CORRECTIONS,
   defaultStateLabels,
 } from '#/lib/organization/labels.ts'
+import {
+  listTeamMembers,
+  removeTeamMember,
+  saveTeamMember,
+} from '#/lib/team/store.ts'
+import { TEAM_MEMBER_LIMITS } from '#/lib/team/types.ts'
+import type { TeamMember } from '#/lib/team/types.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
 import { proposeStateMeaning } from '#/lib/organization/state-meaning.ts'
 import type { StateMeaningProposal } from '#/lib/organization/state-meaning.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import { STATE_META, STATE_ORDER } from '#/lib/conversation-state.ts'
+import { SignatureField } from '#/components/signature-field.tsx'
 
 const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
   async (): Promise<
@@ -146,6 +154,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
           name: string | null
           lastMessageAt: string
         }>
+        /** The user's own colleagues, for the @mention picker. */
+        teamMembers: TeamMember[]
       }
   > => {
     const session = await getSession()
@@ -230,6 +240,7 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       useGravatar: (await getPreferences(session.userId)).useGravatar,
       unreplyableSenders,
       recentSenders,
+      teamMembers: await listTeamMembers(session.userId),
     }
   },
 )
@@ -604,6 +615,44 @@ const undoContextRevisionAction = createServerFn({ method: 'POST' })
     } catch (error) {
       console.error('[settings] undo failed:', error)
       return { error: 'Could not undo that change.' }
+    }
+  })
+
+const saveTeamMemberAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { id: string | null; name: string; email: string; role: string }) =>
+      data,
+  )
+  .handler(
+    async ({
+      data,
+    }): Promise<{ member: TeamMember | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { member: null, error: 'You are not signed in.' }
+
+      try {
+        return await saveTeamMember(session.userId, data)
+      } catch (error) {
+        console.error('[settings] saving a team member failed:', error)
+        return { member: null, error: 'Could not save that team member.' }
+      }
+    },
+  )
+
+const removeTeamMemberAction = createServerFn({ method: 'POST' })
+  .validator((data: { id: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    try {
+      const removed = await removeTeamMember(session.userId, data.id)
+      return removed
+        ? { error: null }
+        : { error: 'That team member no longer exists.' }
+    } catch (error) {
+      console.error('[settings] removing a team member failed:', error)
+      return { error: 'Could not remove that team member.' }
     }
   })
 
@@ -1439,6 +1488,241 @@ function ClientImportPanel() {
   )
 }
 
+/**
+ * The team directory, edited in place.
+ *
+ * A personal list rather than an organisation roster: it is what the composer's
+ * @mention picker reads, and the role is the one thing worth carrying into a
+ * message — it says who handles what. Sharing it across an organisation is a
+ * separate decision (see `docs/organizations.md`).
+ */
+function TeamMembersEditor({
+  initialMembers,
+}: {
+  initialMembers: TeamMember[]
+}) {
+  const [members, setMembers] = useState(initialMembers)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [role, setRole] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const input =
+    'mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30'
+
+  function reset() {
+    setEditingId(null)
+    setName('')
+    setEmail('')
+    setRole('')
+    setError(null)
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await saveTeamMemberAction({
+        data: { id: editingId, name, email, role },
+      })
+      if (result.error || !result.member) {
+        setError(result.error ?? 'Could not save that team member.')
+        return
+      }
+
+      const saved = result.member
+      setMembers((current) => {
+        const existing = current.findIndex((member) => member.id === saved.id)
+        const next =
+          existing === -1
+            ? [...current, saved]
+            : current.map((member) =>
+                member.id === saved.id ? saved : member,
+              )
+
+        return next.sort((a, b) => a.name.localeCompare(b.name))
+      })
+      setMessage(`${saved.name} saved. Type @ in a message to mention them.`)
+      reset()
+    } catch {
+      setError('Could not save that team member.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(id: string) {
+    if (busy) return
+
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await removeTeamMemberAction({ data: { id } })
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+
+      setMembers((current) => current.filter((member) => member.id !== id))
+      if (editingId === id) reset()
+      setMessage('Removed from your team.')
+    } catch {
+      setError('Could not remove that team member.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="mt-5 rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">Team</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        People you work with. Type @ in a reply or a new message and pick a name
+        to insert their address — no more typing it out from memory. The role is
+        what the picker shows beside them, and what routing rules can use later.
+      </p>
+
+      <form
+        onSubmit={(event) => void submit(event)}
+        className="mt-3 grid gap-2 rounded-md border border-border bg-muted/20 p-3 sm:grid-cols-2"
+      >
+        <label className="block text-xs text-muted-foreground">
+          Name
+          <input
+            value={name}
+            required
+            maxLength={TEAM_MEMBER_LIMITS.name}
+            disabled={busy}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Sarah Jones"
+            className={input}
+          />
+        </label>
+        <label className="block text-xs text-muted-foreground">
+          Email
+          <input
+            type="email"
+            value={email}
+            required
+            maxLength={TEAM_MEMBER_LIMITS.email}
+            disabled={busy}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="sarah@example.com"
+            className={input}
+          />
+        </label>
+        <label className="block text-xs text-muted-foreground sm:col-span-2">
+          What they handle
+          <input
+            value={role}
+            maxLength={TEAM_MEMBER_LIMITS.role}
+            disabled={busy}
+            onChange={(event) => setRole(event.target.value)}
+            placeholder="Billing and invoices"
+            className={input}
+          />
+        </label>
+        <div className="flex items-center gap-2 sm:col-span-2">
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {busy
+              ? 'Saving…'
+              : editingId
+                ? 'Save changes'
+                : 'Add team member'}
+          </button>
+          {editingId ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={reset}
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-foreground disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          ) : null}
+          <span className="text-[11px] text-muted-foreground">
+            {members.length} {members.length === 1 ? 'person' : 'people'}
+          </span>
+        </div>
+      </form>
+
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {message ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {message}
+        </p>
+      ) : null}
+
+      {members.length > 0 ? (
+        <ul className="mt-3 divide-y divide-border rounded-md border border-border">
+          {members.map((member) => (
+            <li
+              key={member.id}
+              className="flex items-start justify-between gap-3 px-3 py-2"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-foreground">
+                  {member.name}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {member.email}
+                  {member.role ? ` · ${member.role}` : ''}
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setEditingId(member.id)
+                    setName(member.name)
+                    setEmail(member.email)
+                    setRole(member.role ?? '')
+                    setError(null)
+                    setMessage(null)
+                  }}
+                  className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void remove(member.id)}
+                  className="text-xs font-medium text-destructive hover:underline disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No one on your team yet. Add a colleague above and they appear in the
+          @mention picker.
+        </p>
+      )}
+    </section>
+  )
+}
+
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -1453,6 +1737,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     accounts,
     unreplyableSenders,
     recentSenders,
+    teamMembers: initialTeamMembers,
     viewer,
     devices,
     useGravatar,
@@ -1930,7 +2215,10 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                   {toggle('stripQuotedHistory', 'quoted history')}
                   {toggle('stripGreeting', 'greetings')}
                   {toggle('stripSignature', 'signatures')}
-                  <Field label="Default reply greeting">
+                  <Field
+                    label="Default reply greeting"
+                    hint="Use {name} for the recipient’s first name, e.g. Hi {name},"
+                  >
                     <input
                       value={draft.greeting}
                       maxLength={200}
@@ -1947,24 +2235,31 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                       className={inputClass}
                     />
                   </Field>
-                  <Field label="Default reply signature">
-                    <textarea
+                  {/* Not `Field`: it is a `<label>`, and a label may not
+                      contain the toolbar's buttons — clicking them would
+                      activate the label instead. Same shape, same classes. */}
+                  <div className="block text-xs text-muted-foreground">
+                    Default reply signature
+                    <SignatureField
                       value={draft.signature}
                       maxLength={1000}
                       rows={2}
                       disabled={parsingBusy !== null}
-                      onChange={(event) =>
+                      onChange={(signature) =>
                         setParsingDrafts((current) => ({
                           ...current,
                           [account.id]: {
                             ...(current[account.id] ?? draft),
-                            signature: event.target.value,
+                            signature,
                           },
                         }))
                       }
-                      className={inputClass}
                     />
-                  </Field>
+                    <span className="mt-1 block text-[11px]">
+                      Select text and use the buttons; the preview shows how it
+                      will look in the mail.
+                    </span>
+                  </div>
                   <button
                     type="button"
                     disabled={parsingBusy !== null}
@@ -1995,6 +2290,8 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             </p>
           ) : null}
         </section>
+
+        <TeamMembersEditor initialMembers={initialTeamMembers} />
 
         {/*
          * The two halves of one topic, kept together: what the built-in four

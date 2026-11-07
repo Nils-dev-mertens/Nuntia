@@ -40,6 +40,7 @@ await initDatabase()
 await migrate(db, { migrationsFolder: './drizzle' })
 
 const OWNER = 'owner@example.com'
+const SECOND = 'second@example.com'
 const OTHER = 'other@example.com'
 const PASSWORD = 'correct horse battery'
 
@@ -299,5 +300,44 @@ describe('the greeting and signature a new message goes out with', () => {
     await send({ to: ['fresh@example.com'], body: 'Hello.' }, client)
 
     expect(client.started[0]?.text).toBe('Hello.')
+  })
+
+  test('names the recipient from earlier mail when only the address is known', async () => {
+    await db
+      .update(accounts)
+      .set({ defaultReplyGreeting: 'Hoi {name},' })
+      .where(eq(accounts.id, OWNER))
+
+    // Learned on another mailbox the same person connected: contacts are stored
+    // per mailbox, but the person writing to them is one person.
+    await db.insert(accounts).values({
+      id: SECOND,
+      email: SECOND,
+      userId: OWNER,
+      refreshTokenEncrypted: 'v1:a:b:c',
+    })
+    await db.insert(contacts).values({
+      accountId: SECOND,
+      email: 'known@example.com',
+      name: 'Nils',
+      updatedAt: new Date(),
+    })
+
+    const client = new FakeMailboxClient()
+    await send({ to: ['known@example.com'], body: 'Lunch?' }, client)
+
+    expect(client.started[0]?.text).toBe('Hoi Nils,\n\nLunch?')
+  })
+
+  test('still reads the local part for someone mail never named', async () => {
+    await db
+      .update(accounts)
+      .set({ defaultReplyGreeting: 'Hoi {name},' })
+      .where(eq(accounts.id, OWNER))
+
+    const client = new FakeMailboxClient()
+    await send({ to: ['nils@example.com'], body: 'Lunch?' }, client)
+
+    expect(client.started[0]?.text).toBe('Hoi Nils,\n\nLunch?')
   })
 })

@@ -89,6 +89,8 @@ import {
   listContactImportanceByEmail,
 } from '#/lib/contacts/context.ts'
 import type { ContactContext } from '#/lib/contacts/context.ts'
+import { listTeamMembers } from '#/lib/team/store.ts'
+import type { TeamMember } from '#/lib/team/types.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
 import {
@@ -420,6 +422,8 @@ export type ConversationDetail = {
     initials: string
     avatarUrl: string | null
   }>
+  /** The user's team directory, for the composer's @mention picker. */
+  teamMembers: TeamMember[]
   messages: ConversationMessageView[]
   attachments: Array<{
     providerMessageId: string
@@ -436,6 +440,13 @@ export type ConversationDetail = {
   senderImportance: number | null
   /** The user's wording for the four labels, for the badge and the picker. */
   stateLabels: StateLabels
+  /**
+   * The name earlier mail taught for `senderEmail`, or null when none.
+   *
+   * The greeting prefers the newest message's From header; this is what it falls
+   * back to when that message arrived with a bare address.
+   */
+  senderKnownName: string | null
   parsingProfile: {
     senderEmail: string
     useAccountParsingDefaults: boolean
@@ -447,6 +458,8 @@ export type ConversationDetail = {
     replyStyleEnabled: boolean
     replyGreeting: string
     replySignature: string
+    /** The user's correction to the sender's name; empty when they made none. */
+    displayName: string
   } | null
 }
 
@@ -585,6 +598,7 @@ export async function loadConversation(
   // Names learned from earlier mail, and whether avatars may leave the machine.
   // Read once for the whole thread rather than per participant.
   const names = await contactNamesFor(accountRows.map((account) => account.id))
+  const senderKnownName = senderEmail ? (names.get(senderEmail) ?? null) : null
   const preferences = await getPreferences(userId)
   // The user's wording for the label on the badge and in the picker.
   const stateLabels = await listStateLabels(userId)
@@ -640,6 +654,7 @@ export async function loadConversation(
       names,
       preferences.useGravatar,
     ),
+    teamMembers: await listTeamMembers(userId),
     messages: messages.map((m) => ({
       providerMessageId: m.providerMessageId,
       from: { name: m.from.name ?? null, email: m.from.email },
@@ -673,6 +688,7 @@ export async function loadConversation(
     contactContext,
     senderImportance: contactContext?.importance ?? null,
     stateLabels,
+    senderKnownName,
     parsingProfile: senderEmail
       ? {
           senderEmail,
@@ -694,6 +710,7 @@ export async function loadConversation(
           replyStyleEnabled: senderStyle?.enabled ?? false,
           replyGreeting: senderStyle?.greeting ?? '',
           replySignature: senderStyle?.signature ?? '',
+          displayName: senderParsing?.displayName ?? '',
         }
       : null,
   }
@@ -1228,6 +1245,7 @@ function replyDraftRequestFor(
           enabled: detail.parsingProfile.replyStyleEnabled,
           greeting: detail.parsingProfile.replyGreeting || null,
           signature: detail.parsingProfile.replySignature || null,
+          name: detail.parsingProfile.displayName || null,
         }
       : null,
     // The `detected_*` pair is the one the parser always fills in, whether or not
@@ -1236,6 +1254,16 @@ function replyDraftRequestFor(
       ? {
           detectedGreeting: lastOwnerMessage.detectedGreeting,
           detectedSignature: lastOwnerMessage.detectedSignature,
+        }
+      : null,
+    recipient: incoming
+      ? {
+          name: incoming.from.name,
+          email: incoming.from.email,
+          // The greeting in the prompt has to match the one the send path will
+          // add, which uses a name learned from earlier mail when this message
+          // arrived without one.
+          knownName: detail.senderKnownName,
         }
       : null,
   })

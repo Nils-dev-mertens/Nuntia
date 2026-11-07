@@ -674,6 +674,17 @@ export const senderProfiles = sqliteTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     senderEmail: text('sender_email').notNull(),
+
+    /**
+     * The name the user gave this sender, when the header's one is wrong.
+     *
+     * A greeting template personalises itself from whatever the sender's mail
+     * client advertises, and that is sometimes a company ("Acme Billing") or a
+     * machine (`no-reply@`). Neither can be inferred away, so the correction is
+     * stored here, per sender, and used in place of the header's name. Null
+     * means no correction: the header, then the address, decides.
+     */
+    displayName: text('display_name'),
     stripQuotedHistory: integer('strip_quoted_history', { mode: 'boolean' })
       .notNull()
       .default(true),
@@ -1504,7 +1515,41 @@ export const formAnswers = sqliteTable(
   ],
 )
 
+/**
+ * One colleague, for the @mention picker and the team directory.
+ *
+ * Deliberately a personal address book rather than an organisation model:
+ * sharing mailboxes, assignment and organisation-wide routing are the open
+ * questions in `docs/organizations.md`, while "who is on my team and what do
+ * they do" is useful to one person today. `role` is free text — it is what the
+ * picker shows beside a name, and what routing rules can match on later.
+ */
+export const teamMembers = sqliteTable(
+  'team_members',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+    /** What this person handles, e.g. "billing and invoices". */
+    role: text('role'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('team_members_user_email_idx').on(table.userId, table.email),
+    index('team_members_user_idx').on(table.userId),
+  ],
+)
+
 export type User = typeof users.$inferSelect
+export type TeamMemberRow = typeof teamMembers.$inferSelect
 export type Invite = typeof invites.$inferSelect
 export type AccessRequest = typeof accessRequests.$inferSelect
 export type InviteRedemption = typeof inviteRedemptions.$inferSelect

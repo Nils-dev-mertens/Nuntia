@@ -426,6 +426,7 @@ describe('sender parsing profiles', () => {
       replyStyleEnabled: true,
       replyGreeting: 'Hi Alice,',
       replySignature: 'Cheers,\nMe',
+      displayName: 'Alice Smith',
     })
 
     const profiles = await getParsingProfileContext(ACCOUNT)
@@ -440,6 +441,7 @@ describe('sender parsing profiles', () => {
       stripSignature: false,
     })
     expect(profiles.parsingProfiles['alice@example.com']).toMatchObject({
+      displayName: 'Alice Smith',
       useAccountParsingDefaults: false,
       stripQuotedHistory: true,
       stripGreeting: true,
@@ -450,6 +452,7 @@ describe('sender parsing profiles', () => {
       enabled: true,
       greeting: 'Hi Alice,',
       signature: 'Cheers,\nMe',
+      name: 'Alice Smith',
     })
   })
 

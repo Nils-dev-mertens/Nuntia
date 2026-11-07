@@ -18,9 +18,14 @@ process.env.DATABASE_URL = `file:${join(tmpDir, 'test.db')}`
 process.env.TOKEN_ENCRYPTION_KEY = 'ab'.repeat(32)
 
 const { db, initDatabase } = await import('#/db/index.ts')
-const { accounts, contacts, users } = await import('#/db/schema.ts')
-const { listContactSuggestions, recordContactedAddresses } =
-  await import('./index.ts')
+const { accounts, contacts, conversations, users } =
+  await import('#/db/schema.ts')
+const {
+  contactNameFor,
+  listContactSuggestions,
+  recipientHistoryFor,
+  recordContactedAddresses,
+} = await import('./index.ts')
 const { matchContactSuggestions } = await import('./matching.ts')
 const { migrate } = await import('drizzle-orm/libsql/migrator')
 
@@ -40,6 +45,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   await db.delete(contacts)
+  await db.delete(conversations)
   await db.delete(accounts)
   await db.delete(users)
 
@@ -55,6 +61,28 @@ beforeEach(async () => {
     })
   }
 })
+
+/** A stored thread, the way `saveConversation` leaves one behind. */
+async function thread(
+  accountId: string,
+  providerThreadId: string,
+  subject: string,
+  participants: Array<{ name: string | null; email: string }>,
+  lastMessageAt: Date,
+  opts: { awaitingReply?: boolean; topic?: string } = {},
+) {
+  await db.insert(conversations).values({
+    id: `${accountId}:${providerThreadId}`,
+    accountId,
+    providerThreadId,
+    subject,
+    participants,
+    lastMessageAt,
+    messageCount: 2,
+    awaitingReply: opts.awaitingReply ?? false,
+    topic: opts.topic ?? null,
+  })
+}
 
 /** A learned address, with the timestamp the list is ordered by. */
 async function learn(
@@ -165,5 +193,99 @@ describe('listContactSuggestions', () => {
 
     expect(await listContactSuggestions([ALICE], [], 3)).toHaveLength(3)
     expect(await listContactSuggestions([], [])).toEqual([])
+  })
+})
+
+/**
+ * What a greeting names a sender from when their newest message had no name.
+ *
+ * The lookup has to fold the address the same way the table stores it, and pick
+ * the newest spelling when two mailboxes know the person differently — otherwise
+ * a greeting can say a name the rest of the app no longer shows.
+ */
+describe('contactNameFor', () => {
+  test('answers with the newest name learned for the address', async () => {
+    await learn(ALICE, 'sarah@example.com', 'Sarah Old', new Date(1_000))
+    await learn(BOB, 'sarah@example.com', 'Sarah New', new Date(2_000))
+
+    expect(await contactNameFor([ALICE], ' Sarah@Example.com ')).toBe(
+      'Sarah Old',
+    )
+    expect(await contactNameFor([ALICE, BOB], 'sarah@example.com')).toBe(
+      'Sarah New',
+    )
+  })
+
+  test('is null when mail never carried a name, or there is nothing to ask', async () => {
+    await learn(ALICE, 'bare@example.com', null, new Date())
+
+    expect(await contactNameFor([ALICE], 'bare@example.com')).toBeNull()
+    expect(await contactNameFor([ALICE], 'stranger@example.com')).toBeNull()
+    expect(await contactNameFor([], 'sarah@example.com')).toBeNull()
+    expect(await contactNameFor([ALICE], '  ')).toBeNull()
+  })
+})
+
+/**
+ * The card the composer shows about the person it is addressed to.
+ *
+ * It is the stored mail answering, so the tests seed conversations the way sync
+ * leaves them and check both what the card says and when it says nothing.
+ */
+describe('recipientHistoryFor', () => {
+  test('summarises the threads with this person, newest first', async () => {
+    await learn(ALICE, 'sarah@example.com', 'Sarah Jones', new Date(5_000))
+    await thread(
+      ALICE,
+      'thread-1',
+      'Invoice for March',
+      [{ email: 'sarah@example.com', name: null }],
+      new Date(1_000),
+    )
+    await thread(
+      BOB,
+      'thread-2',
+      'Lunch on Thursday',
+      [{ email: 'Sarah@Example.com', name: 'Sarah' }],
+      new Date(3_000),
+      { awaitingReply: true, topic: 'Planning lunch' },
+    )
+
+    const history = await recipientHistoryFor([ALICE, BOB], 'sarah@example.com')
+
+    expect(history?.name).toBe('Sarah Jones')
+    expect(history?.threadCount).toBe(2)
+    expect(history?.recent.map((t) => t.subject)).toEqual([
+      'Lunch on Thursday',
+      'Invoice for March',
+    ])
+    expect(history?.recent[0]?.topic).toBe('Planning lunch')
+    expect(history?.recent[0]?.awaitingReply).toBe(true)
+  })
+
+  test('is null for somebody the mail has never mentioned', async () => {
+    await thread(
+      ALICE,
+      'thread-1',
+      'Invoice',
+      [{ email: 'notsarah@example.com', name: null }],
+      new Date(1_000),
+    )
+
+    expect(await recipientHistoryFor([ALICE], 'sarah@example.com')).toBeNull()
+    expect(await recipientHistoryFor([], 'sarah@example.com')).toBeNull()
+    expect(await recipientHistoryFor([ALICE], '  ')).toBeNull()
+  })
+
+  test('matches the address as a value, not as a piece of text', async () => {
+    await thread(
+      ALICE,
+      'thread-1',
+      'Invoice',
+      [{ email: 'sarah@example.co.uk', name: null }],
+      new Date(1_000),
+    )
+
+    expect(await recipientHistoryFor([ALICE], 'sarah@example.co')).toBeNull()
   })
 })

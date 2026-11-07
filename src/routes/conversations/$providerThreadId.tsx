@@ -65,6 +65,7 @@ import type {
   ContactContextFields,
   ContactContextTextFields,
 } from '#/lib/contacts/context.ts'
+import { contactNameFor } from '#/lib/contacts/index.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
 
 /**
@@ -104,13 +105,16 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       (data.profile.replyGreeting !== null &&
         typeof data.profile.replyGreeting !== 'string') ||
       (data.profile.replySignature !== null &&
-        typeof data.profile.replySignature !== 'string')
+        typeof data.profile.replySignature !== 'string') ||
+      (data.profile.displayName != null &&
+        typeof data.profile.displayName !== 'string')
     ) {
       return { error: 'Parsing preferences are invalid.' }
     }
     const limits: Array<[string, unknown, number]> = [
       ['reply greeting', data.profile.replyGreeting ?? '', 200],
       ['reply signature', data.profile.replySignature ?? '', 1000],
+      ['sender name', data.profile.displayName ?? '', 100],
     ]
     for (const [label, value, limit] of limits) {
       if (typeof value !== 'string' || value.length > limit) {
@@ -121,6 +125,7 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       ...data.profile,
       replyGreeting: data.profile.replyGreeting?.trim() || null,
       replySignature: data.profile.replySignature?.trim() || null,
+      displayName: data.profile.displayName?.trim() || null,
     })
 
     try {
@@ -524,13 +529,24 @@ const sendReplyAction = createServerFn({ method: 'POST' })
         }
       }
 
-      const profileContext = await getParsingProfileContext(accountId)
       const incoming = [...conversation.messages]
         .reverse()
         .find((message) => !message.isFromOwner)
       const lastOwnerMessage = [...conversation.messages]
         .reverse()
         .find((message) => message.isFromOwner)
+      // The greeting names the sender from the newest incoming message, and that
+      // message is often the one sent without a display name. The address book,
+      // written from every synced thread, still knows what they are called.
+      const [profileContext, knownSenderName] = await Promise.all([
+        getParsingProfileContext(accountId),
+        incoming
+          ? contactNameFor(
+              accounts.map((account) => account.id),
+              incoming.from.email,
+            )
+          : null,
+      ])
       // Shared with the draft path (`service.ts`), which has to reach the same
       // answer to know whether to tell the model a greeting is arriving anyway.
       const replyStyle = resolveReplyStyle({
@@ -542,6 +558,9 @@ const sendReplyAction = createServerFn({ method: 'POST' })
           ? (profileContext.replyStyles.senders[
               incoming.from.email.trim().toLowerCase()
             ] ?? null)
+          : null,
+        recipient: incoming
+          ? { ...incoming.from, knownName: knownSenderName }
           : null,
         lastOwnerMessage,
       })

@@ -497,6 +497,8 @@ export type SenderProfileSettings = ParsingPreferences & {
   replyStyleEnabled: boolean
   replyGreeting: string | null
   replySignature: string | null
+  /** The user's correction to the sender's name; null when they left it alone. */
+  displayName?: string | null
 }
 
 export type ParsingProfileContext = {
@@ -507,7 +509,13 @@ export type ParsingProfileContext = {
     account: { greeting: string | null; signature: string | null }
     senders: Record<
       string,
-      { enabled: boolean; greeting: string | null; signature: string | null }
+      {
+        enabled: boolean
+        greeting: string | null
+        signature: string | null
+        /** The user's correction to the name a greeting uses, if they made one. */
+        name: string | null
+      }
     >
   }
 }
@@ -542,6 +550,7 @@ export async function getParsingProfileContext(
       replyStyleEnabled: profile.replyStyleEnabled,
       replyGreeting: profile.replyGreeting,
       replySignature: profile.replySignature,
+      displayName: profile.displayName,
     }
     parsingProfiles[email] = senderSettings
     parsingPreferences[email] = profile.useAccountParsingDefaults
@@ -555,6 +564,7 @@ export async function getParsingProfileContext(
       enabled: profile.replyStyleEnabled,
       greeting: profile.replyGreeting,
       signature: profile.replySignature,
+      name: profile.displayName,
     }
   }
 
@@ -622,6 +632,7 @@ export async function saveParsingProfile(
           replyStyleEnabled: profile.replyStyleEnabled,
           replyGreeting: profile.replyGreeting,
           replySignature: profile.replySignature,
+          displayName: profile.displayName ?? null,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
@@ -634,6 +645,7 @@ export async function saveParsingProfile(
             replyStyleEnabled: profile.replyStyleEnabled,
             replyGreeting: profile.replyGreeting,
             replySignature: profile.replySignature,
+            displayName: profile.displayName ?? null,
             updatedAt: new Date(),
           },
         })

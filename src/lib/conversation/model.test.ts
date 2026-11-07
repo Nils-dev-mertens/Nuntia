@@ -9,6 +9,7 @@ import {
   inferIntent,
   isSenderAddress,
   normaliseEmail,
+  personalizeGreeting,
   resolveReplyStyle,
   strippedReplyPrefix,
   toParticipant,
@@ -1376,5 +1377,118 @@ describe('resolveReplyStyle', () => {
         account: { greeting: null, signature: null },
       }),
     ).toEqual({ greeting: null, signature: null })
+  })
+
+  test('fills a greeting template with the recipient’s name', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        recipient: { name: 'Sarah Jones', email: 'sarah@example.com' },
+      }).greeting,
+    ).toBe('Hi Sarah,')
+  })
+
+  test('uses the whole name when the template asks for it', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Dear {full_name},', signature: null },
+        recipient: { name: 'Sarah Jones', email: 'sarah@example.com' },
+      }).greeting,
+    ).toBe('Dear Sarah Jones,')
+  })
+
+  test('falls back to the address when no display name is known', () => {
+    expect(
+      personalizeGreeting('Hoi {name},', {
+        email: 'sarah.jones@example.com',
+      }),
+    ).toBe('Hoi Sarah,')
+  })
+
+  test('removes the token cleanly when there is no name at all', () => {
+    expect(personalizeGreeting('Hi {name},', {})).toBe('Hi,')
+    expect(personalizeGreeting('{full_name}', {})).toBeNull()
+  })
+
+  test('a name the user set for the sender beats the From header', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        // The correction has to apply even without a reply style of its own:
+        // an enabled style is about the greeting, not about the name.
+        sender: {
+          enabled: false,
+          greeting: null,
+          signature: null,
+          name: 'Sarah Jones',
+        },
+        recipient: { name: 'Acme Billing', email: 'billing@acme.example' },
+      }).greeting,
+    ).toBe('Hi Sarah,')
+  })
+
+  test('a cleared name falls back to the header, then the address', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        sender: {
+          enabled: false,
+          greeting: null,
+          signature: null,
+          name: '   ',
+        },
+        recipient: { name: 'Sarah Jones', email: 'sarah@example.com' },
+      }).greeting,
+    ).toBe('Hi Sarah,')
+
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        sender: { enabled: false, greeting: null, signature: null, name: null },
+        recipient: { email: 'sarah.jones@example.com' },
+      }).greeting,
+    ).toBe('Hi Sarah,')
+  })
+
+  test('a name learned from earlier mail beats the address', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        // The newest message arrived with a bare address, which is exactly when
+        // the address book's memory is worth more than the local part.
+        recipient: {
+          email: 'sarah.jones@example.com',
+          knownName: 'Sarah Jones',
+        },
+      }).greeting,
+    ).toBe('Hi Sarah,')
+  })
+
+  test('this message’s own name outranks the learned one', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Dear {full_name},', signature: null },
+        recipient: {
+          name: 'Sarah Chen',
+          email: 'sarah.jones@example.com',
+          knownName: 'Sarah Jones',
+        },
+      }).greeting,
+    ).toBe('Dear Sarah Chen,')
+  })
+
+  test('the user’s correction still outranks the learned name', () => {
+    expect(
+      resolveReplyStyle({
+        account: { greeting: 'Hi {name},', signature: null },
+        sender: {
+          enabled: false,
+          greeting: null,
+          signature: null,
+          name: 'Sarah Jones',
+        },
+        recipient: { name: 'Acme Billing', knownName: 'Acme Accounts' },
+      }).greeting,
+    ).toBe('Hi Sarah,')
   })
 })

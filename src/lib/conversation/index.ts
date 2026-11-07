@@ -26,6 +26,7 @@ export {
   isSenderAddress,
   normaliseEmail,
   otherPartyOf,
+  personalizeGreeting,
   resolveReplyStyle,
   strippedReplyPrefix,
   toParticipant,
