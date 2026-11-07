@@ -1,11 +1,5 @@
 import { afterAll, expect, test } from 'bun:test'
-import {
-  cpSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -27,12 +21,24 @@ writeFileSync(journalPath, JSON.stringify(journal))
 await migrate(db, { migrationsFolder: oldMigrationsFolder })
 
 afterAll(() => {
-  try {
-    rmSync(tmpDir, { recursive: true, force: true })
-  } catch {}
   if (originalDbUrl === undefined) delete process.env.DATABASE_URL
   else process.env.DATABASE_URL = originalDbUrl
 })
+
+/**
+ * Nothing deletes `tmpDir` when these tests finish, on purpose.
+ *
+ * `#/db/index.ts` binds a single client for the whole process, and every later
+ * test file shares it — reassigning `DATABASE_URL` there is too late, the module
+ * is already loaded. This file imports it first, so its temp file is the
+ * database the rest of the suite runs on. Removing the directory here left the
+ * remaining files querying a database that no longer existed: invisible on
+ * Windows, where an open SQLite file cannot be unlinked, and
+ * `ConnectionFailed(... 14)` for 84 tests on the Linux runner.
+ *
+ * The connection is still open when the run ends, so there is no safe moment to
+ * remove it: the directory is left to the OS temp cleaner.
+ */
 
 test('startup applies pending migrations before message body queries', async () => {
   await initDatabase()
