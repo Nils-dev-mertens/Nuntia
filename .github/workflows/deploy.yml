@@ -1,7 +1,12 @@
 name: Deploy
 
+# Triggered by CI finishing, not by the push itself. Deploying on the push
+# meant a run that started alongside the tests: a red master still shipped,
+# because the two jobs never waited for each other.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [master]
 
 concurrency:
@@ -12,9 +17,16 @@ concurrency:
 
 jobs:
   deploy:
+    # A red or cancelled CI run — a superseded push is cancelled by CI's own
+    # concurrency group — ends here instead of reaching the server.
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      # The commit CI actually tested. By the time this runs master may already
+      # have moved on to a commit whose tests have not finished.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       # Join the tailnet so the runner can reach the server, which is not
       # exposed to the public internet.
@@ -32,14 +44,17 @@ jobs:
 
       - name: Deploy
         run: |
-          # `set -e` on the remote side, not just here: without it a failed pull or
+          # `set -e` on the remote side, not just here: without it a failed fetch or
           # build still runs the teardown and restarts the previous image, and the
           # job reports success while the new code was never deployed.
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.TS_USER }}@${{ secrets.TS_HOST }} '
             set -euo pipefail
             cd /home/${{ secrets.TS_USER }}/Desktop/Lumix
             git checkout master
-            git pull
+            git fetch origin
+            # The tested commit, not whatever master points at now: pulling
+            # could land a later push that has not been through CI.
+            git reset --hard ${{ github.event.workflow_run.head_sha }}
             docker compose build
             docker compose down
             docker compose up -d --remove-orphans
