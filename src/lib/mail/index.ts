@@ -51,3 +51,5 @@ export {
 } from './compose.ts'
 
 export type { ComposeInput, MimeAttachment } from './compose.ts'
+
+export { signatureToHtml, signatureToText } from './signature.ts'

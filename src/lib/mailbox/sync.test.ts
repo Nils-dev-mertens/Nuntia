@@ -30,6 +30,7 @@ const { db, initDatabase } = await import('#/db/index.ts')
 const {
   accounts,
   appSettings,
+  organizations,
   attachments: attachmentsTable,
   contextRevisions,
   conversations,
@@ -95,6 +96,10 @@ beforeEach(async () => {
   await db.delete(senderProfiles)
   await db.delete(accounts)
   await db.delete(users)
+  // The workspace's rows hang off the organisation, and the organisation does
+  // not hang off the user — so it needs clearing itself. Otherwise a key stored
+  // by one test classifies the next one's mail.
+  await db.delete(organizations)
 
   await db.insert(users).values({
     id: USER,
@@ -421,6 +426,7 @@ describe('sender parsing profiles', () => {
       replyStyleEnabled: true,
       replyGreeting: 'Hi Alice,',
       replySignature: 'Cheers,\nMe',
+      displayName: 'Alice Smith',
     })
 
     const profiles = await getParsingProfileContext(ACCOUNT)
@@ -435,6 +441,7 @@ describe('sender parsing profiles', () => {
       stripSignature: false,
     })
     expect(profiles.parsingProfiles['alice@example.com']).toMatchObject({
+      displayName: 'Alice Smith',
       useAccountParsingDefaults: false,
       stripQuotedHistory: true,
       stripGreeting: true,
@@ -445,6 +452,7 @@ describe('sender parsing profiles', () => {
       enabled: true,
       greeting: 'Hi Alice,',
       signature: 'Cheers,\nMe',
+      name: 'Alice Smith',
     })
   })
 
@@ -1540,9 +1548,9 @@ describe('the user’s own call on a thread', () => {
     await applyUserStateOverride(USER, 'ask-thread', null)
     const after = await db.select().from(contextRevisions)
     expect(after).toHaveLength(2)
-    expect(after.map((row) => [row.previousValue, row.nextValue])).toContainEqual(
-      ['low-priority', null],
-    )
+    expect(
+      after.map((row) => [row.previousValue, row.nextValue]),
+    ).toContainEqual(['low-priority', null])
   })
 
   test('a new message re-opens a thread the user filed away', async () => {

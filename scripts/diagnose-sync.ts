@@ -108,7 +108,7 @@ for (const conversation of newest) {
   )
 }
 
-const settings = await db.query.appSettings.findFirst()
+const settings = await db.query.organizationAiSettings.findFirst()
 console.log('\nAI settings (the layer whose failure aborts a save):')
 console.log(
   `  topic LLM: ${

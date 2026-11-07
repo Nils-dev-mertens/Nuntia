@@ -306,7 +306,7 @@ describe('mailbox ownership', () => {
 })
 
 describe('AI settings', () => {
-  test('are per user: one person’s key is not another’s', async () => {
+  test('are per workspace: one person’s key is not another’s', async () => {
     await signUp(ALICE, BOB)
     await saveAiSettings(ALICE, {
       jevModel: 'jev-latest',
@@ -335,12 +335,13 @@ describe('AI settings', () => {
     expect((await getAiSettings(BOB)).suggestReplyMinImportance).toBe(8)
   })
 
-  test('write to the row the first sign-up adopted', async () => {
+  test('write to the workspace, leaving the legacy member row alone', async () => {
     await signUp(ALICE)
 
-    // The pre-accounts row carries the old `id`; saving for its new owner has to
-    // update that row rather than fail on the primary key.
-    await db.insert(appSettings).values({ id: 'app', userId: ALICE })
+    // The pre-accounts row is still adopted — for the per-member preferences
+    // that live in `app_settings`. The AI columns moved to the workspace table,
+    // so a save must not depend on that row existing or touch it.
+    await db.insert(appSettings).values({ id: 'app', userId: null })
 
     await saveAiSettings(ALICE, {
       jevModel: null,
@@ -350,10 +351,12 @@ describe('AI settings', () => {
       jevApiKey: null,
     })
 
+    expect(await getAiSettings(ALICE)).toMatchObject({
+      suggestReplyMinImportance: 7,
+    })
     const rows = await db.select().from(appSettings)
     expect(rows).toHaveLength(1)
-    expect(rows[0].userId).toBe(ALICE)
-    expect(rows[0].suggestReplyMinImportance).toBe(7)
+    expect(rows[0].id).toBe('app')
   })
 })
 

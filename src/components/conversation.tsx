@@ -34,12 +34,15 @@ import type { SenderProfileSettings } from '#/lib/conversation/index.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import { isRichHtml } from '#/lib/mail/rich.ts'
 import { dedupeMediaByHash, sha256Hex } from '#/lib/mail/media.ts'
+import { CONTACT_KIND_LABELS, CONTACT_KINDS } from '#/lib/contacts/context.ts'
 import type {
   ContactContextFields,
   ContactContextTextFields,
 } from '#/lib/contacts/context.ts'
 
 import { Avatar } from '#/components/avatar'
+import { MentionTextarea } from '#/components/mention-textarea'
+import { SignatureField } from '#/components/signature-field'
 import { StateBadge } from '#/components/state-badge'
 import { DONE_META, READ_META, STATE_ORDER } from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
@@ -716,6 +719,9 @@ function ContactContextEditor({
   const [importance, setImportance] = useState<number | null>(
     initialContext?.importance ?? null,
   )
+  const [kind, setKind] = useState<ContactContextFields['kind']>(
+    initialContext?.kind ?? null,
+  )
 
   useEffect(() => {
     setRoleCompany(initialContext?.roleCompany ?? '')
@@ -723,6 +729,7 @@ function ContactContextEditor({
     setTopics(initialContext?.topics ?? '')
     setCurrentWork(initialContext?.currentWork ?? '')
     setImportance(initialContext?.importance ?? null)
+    setKind(initialContext?.kind ?? null)
     setEditing(false)
     setAiSuggested(false)
     setError(null)
@@ -762,6 +769,7 @@ function ContactContextEditor({
     setError(null)
     try {
       const result = await onSave({
+        kind,
         roleCompany,
         relationship,
         topics,
@@ -781,6 +789,7 @@ function ContactContextEditor({
   }
 
   const hasContext = Boolean(
+    initialContext?.kind ||
     initialContext?.roleCompany ||
     initialContext?.relationship ||
     initialContext?.topics ||
@@ -810,6 +819,25 @@ function ContactContextEditor({
       </div>
       {editing ? (
         <form className="mt-3 space-y-2" onSubmit={(event) => void save(event)}>
+          <label className="block text-xs text-muted-foreground">
+            Kind
+            <select
+              value={kind ?? ''}
+              onChange={(event) =>
+                setKind(
+                  (event.target.value || null) as ContactContextFields['kind'],
+                )
+              }
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+            >
+              <option value="">Not set</option>
+              {CONTACT_KINDS.map((value) => (
+                <option key={value} value={value}>
+                  {CONTACT_KIND_LABELS[value]}
+                </option>
+              ))}
+            </select>
+          </label>
           <label className="block text-xs text-muted-foreground">
             Role / company
             <input
@@ -907,6 +935,7 @@ function ContactContextEditor({
                 setTopics(initialContext?.topics ?? '')
                 setCurrentWork(initialContext?.currentWork ?? '')
                 setImportance(initialContext?.importance ?? null)
+                setKind(initialContext?.kind ?? null)
                 setEditing(false)
                 setAiSuggested(false)
                 setError(null)
@@ -937,6 +966,12 @@ function ContactContextEditor({
           ) : null}
           <dl className="mt-3 space-y-2 text-sm">
             {[
+              [
+                'Kind',
+                initialContext?.kind
+                  ? CONTACT_KIND_LABELS[initialContext.kind]
+                  : '',
+              ],
               ['Role / company', initialContext?.roleCompany],
               ['Relationship', initialContext?.relationship],
               ['Topics discussed', initialContext?.topics],
@@ -1002,6 +1037,7 @@ function ParsingProfileEditor({
   )
   const [replyGreeting, setReplyGreeting] = useState(profile.replyGreeting)
   const [replySignature, setReplySignature] = useState(profile.replySignature)
+  const [displayName, setDisplayName] = useState(profile.displayName)
 
   useEffect(() => {
     setUseAccountParsingDefaults(profile.useAccountParsingDefaults)
@@ -1011,6 +1047,7 @@ function ParsingProfileEditor({
     setReplyStyleEnabled(profile.replyStyleEnabled)
     setReplyGreeting(profile.replyGreeting)
     setReplySignature(profile.replySignature)
+    setDisplayName(profile.displayName)
   }, [profile])
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -1027,6 +1064,7 @@ function ParsingProfileEditor({
         replyStyleEnabled,
         replyGreeting: replyStyleEnabled ? replyGreeting : null,
         replySignature: replyStyleEnabled ? replySignature : null,
+        displayName: displayName.trim() || null,
       })
       if (result.error) setError(result.error)
       else setEditing(false)
@@ -1091,6 +1129,22 @@ function ParsingProfileEditor({
           {toggle('signatures', stripSignature, setStripSignature)}
         </div>
       ) : null}
+
+      <label className="block text-xs text-muted-foreground">
+        Name to use in greetings
+        <p className="mt-0.5 text-[10px] text-muted-foreground/80">
+          Leave empty to use the name from their mail. Correct it when they write
+          from a company name or a no-reply address.
+        </p>
+        <input
+          value={displayName}
+          maxLength={100}
+          placeholder="Sarah Jones"
+          onChange={(event) => setDisplayName(event.target.value)}
+          className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+        />
+      </label>
+
       <div className="border-t border-border pt-3">
         <label className="flex items-center gap-2 text-sm text-foreground">
           <input
@@ -1104,6 +1158,9 @@ function ParsingProfileEditor({
           <>
             <label className="mt-2 block text-xs text-muted-foreground">
               Greeting for this sender
+              <p className="mt-0.5 text-[10px] text-muted-foreground/80">
+                Use {'{name}'} for the recipient’s first name.
+              </p>
               <input
                 value={replyGreeting}
                 maxLength={200}
@@ -1111,16 +1168,21 @@ function ParsingProfileEditor({
                 className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
               />
             </label>
-            <label className="mt-2 block text-xs text-muted-foreground">
-              Signature for this sender
-              <textarea
+            <div className="mt-2">
+              <span className="block text-xs text-muted-foreground">
+                Signature for this sender
+              </span>
+              <p className="mt-0.5 text-[10px] text-muted-foreground/80">
+                Select text and use the buttons. The preview shows how it will
+                look in the mail.
+              </p>
+              <SignatureField
                 value={replySignature}
+                onChange={setReplySignature}
                 maxLength={1000}
                 rows={2}
-                onChange={(event) => setReplySignature(event.target.value)}
-                className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
               />
-            </label>
+            </div>
           </>
         ) : null}
       </div>
@@ -1307,6 +1369,7 @@ function ConversationDetailsEditor({
 function Composer({
   accounts,
   provider,
+  teamMembers,
   suggest,
   onDraft,
   onSend,
@@ -1314,6 +1377,8 @@ function Composer({
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
+  /** Colleagues the @mention picker can insert. */
+  teamMembers: ConversationDetail['teamMembers']
   /** Which service the owning mailbox uses, for the reconnect link. */
   provider: ConversationDetail['provider']
   /** Whether a draft can be generated, and why not when it cannot. */
@@ -1554,10 +1619,11 @@ function Composer({
         }}
       />
 
-      <textarea
-        ref={textarea}
+      <MentionTextarea
+        textareaRef={textarea}
+        members={teamMembers}
         value={body}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={setBody}
         onKeyDown={(e) => {
           // Enter sends, Shift+Enter breaks the line — the convention every
           // chat UI shares, and the opposite of a plain textarea.
@@ -1567,7 +1633,8 @@ function Composer({
           }
         }}
         rows={1}
-        placeholder="Write a reply…"
+        placement="above"
+        placeholder="Write a reply…  (@ a teammate to insert their address)"
         className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-foreground/30"
       />
 
@@ -2386,6 +2453,7 @@ export function ConversationView({
         <Composer
           accounts={detail.replyAccounts}
           provider={detail.provider}
+          teamMembers={detail.teamMembers}
           suggest={detail.suggestReply}
           onDraft={onDraft}
           onSend={onSend}

@@ -96,6 +96,18 @@ export function RecipientField({
       return
     }
 
+    if (event.key === 'Enter' && token && (!open || matches.length === 0)) {
+      // Enter commits the address being typed rather than submitting the form
+      // with it half-written. The trailing separator makes the next one start on
+      // a fresh token, which is also what makes a space after it read cleanly.
+      event.preventDefault()
+      const parts = addressesOf(value)
+      parts[parts.length - 1] = token
+      onChange(`${parts.join(', ')}, `)
+      setOpen(false)
+      return
+    }
+
     if (event.key === 'Enter' && open && matches.length > 0) {
       // Otherwise this would submit the form with an address half-typed.
       event.preventDefault()

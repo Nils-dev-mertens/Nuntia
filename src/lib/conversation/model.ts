@@ -228,6 +228,107 @@ export type ReplyStyle = {
   signature: string | null
 }
 
+/** The placeholder a greeting may carry for the person being written to. */
+const GREETING_NAME_TOKEN = /\{(?:name|first_name|full_name)\}/i
+
+/**
+ * Fill a greeting template with the recipient's name.
+ *
+ * "Hi {name}," is how one saved greeting serves every correspondent without
+ * either sounding generic or being retyped per person. `{name}` and
+ * `{first_name}` use the first word of the display name, `{full_name}` the whole
+ * of it, and an address with no display name falls back to its local part
+ * (`sarah.jones@` → `Sarah`) — because a greeting that reads "Hi ," is worse
+ * than one that names nobody. When there is no name to find at all, the token is
+ * removed with the punctuation tidied around it, so the template still produces
+ * a sentence.
+ */
+/**
+ * Who a greeting is being written to.
+ *
+ * `name` is what the message in hand said, and `knownName` is what earlier mail in
+ * the same mailbox taught the address book. The second one matters because a
+ * correspondent's newest message is often the one without a display name — a
+ * phone, a first-time client, a script — and a saved greeting should still say
+ * "Hi Sarah," rather than read a guess off the local part.
+ */
+export type GreetingRecipient = {
+  name?: string | null
+  email?: string | null
+  knownName?: string | null
+}
+
+export function personalizeGreeting(
+  greeting: string | null,
+  recipient?: GreetingRecipient | null,
+): string | null {
+  if (!greeting) return null
+  if (!GREETING_NAME_TOKEN.test(greeting)) return greeting
+
+  const names = greetingNames(recipient)
+  if (!names) {
+    const withoutToken = greeting
+      .replace(/\s*\{(?:name|first_name|full_name)\}/gi, '')
+      .replace(/[ \t]+([,.;:!?])/g, '$1')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim()
+
+    return withoutToken.replace(/^[,.;:!?]+$/, '') || null
+  }
+
+  return greeting
+    .replace(/\{(?:name|first_name)\}/gi, names.first)
+    .replace(/\{full_name\}/gi, names.full)
+}
+
+/**
+ * Swap in the name the user gave a sender, keeping the address.
+ *
+ * The greeting personalises itself from the From header, which is sometimes a
+ * company name or a machine address its owner never chose to be called. A
+ * correction replaces the name and nothing else: the address still feeds the
+ * address fallback, and it is what the recipient line shows.
+ */
+function recipientWithNameOverride(
+  recipient: GreetingRecipient | null,
+  override: string | null | undefined,
+): GreetingRecipient | null {
+  // The user's correction first, then what this message said, then what an
+  // earlier one did. The address only enters as the last resort, in
+  // `greetingNames`.
+  const name =
+    override?.trim() ||
+    recipient?.name?.trim() ||
+    recipient?.knownName?.trim() ||
+    null
+  if (!name && !recipient) return null
+
+  return {
+    name,
+    email: recipient?.email ?? null,
+  }
+}
+
+/** The two forms a greeting can want, or null when the recipient is anonymous. */
+function greetingNames(
+  recipient?: GreetingRecipient | null,
+): { first: string; full: string } | null {
+  const full = (recipient?.name ?? '')
+    .replace(/^["']|["']$/g, '')
+    .trim()
+  if (full) {
+    const first = full.split(/\s+/)[0] ?? full
+    return { first, full }
+  }
+
+  const local = (recipient?.email ?? '').split('@')[0] ?? ''
+  const part = local.split(/[._+-]/).find((piece) => /[a-z]/i.test(piece))
+  if (!part) return null
+
+  const first = part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+  return { first, full: first }
+}
+
 /**
  * Which greeting and signature a reply is composed with.
  *
@@ -250,6 +351,8 @@ export function resolveReplyStyle(input: {
     enabled: boolean
     greeting: string | null
     signature: string | null
+    /** The user's correction to the name a greeting uses, if they made one. */
+    name?: string | null
   } | null
   /** The user's own newest message in this thread, as the fallback. */
   lastOwnerMessage?: {
@@ -258,21 +361,33 @@ export function resolveReplyStyle(input: {
     detectedGreeting?: string | null
     detectedSignature?: string | null
   } | null
+  /**
+   * Who the reply is addressed to, for a greeting template with `{name}` in it.
+   * A saved greeting is shared; the name in it is not.
+   */
+  recipient?: GreetingRecipient | null
 }): ReplyStyle {
+  const last = input.lastOwnerMessage
+  const recipient = recipientWithNameOverride(
+    input.recipient ?? null,
+    input.sender?.name,
+  )
+
   if (input.sender?.enabled) {
     return {
-      greeting: input.sender.greeting ?? null,
+      greeting: personalizeGreeting(input.sender.greeting ?? null, recipient),
       signature: input.sender.signature ?? null,
     }
   }
 
-  const last = input.lastOwnerMessage
   return {
-    greeting:
+    greeting: personalizeGreeting(
       input.account.greeting ??
-      last?.detectedGreeting ??
-      last?.greeting ??
-      null,
+        last?.detectedGreeting ??
+        last?.greeting ??
+        null,
+      recipient,
+    ),
     signature:
       input.account.signature ??
       last?.detectedSignature ??
@@ -307,6 +422,16 @@ export type Conversation = {
   importance: number
   urgency: number
   intent: Intent
+
+  /**
+   * The colleague this thread was handed to, as a reference into this mailbox.
+   *
+   * Optional on the domain type because most constructions (tests, a freshly
+   * built thread) have no assignment; only the stored row carries one.
+   */
+  assignedTo?: string | null
+  assignedBy?: string | null
+  assignedAt?: Date | null
 
   messageCount: number
   attachmentCount: number
@@ -434,6 +559,8 @@ export type BuildContext = {
         enabled: boolean
         greeting: string | null
         signature: string | null
+        /** The user's correction to the name a greeting uses, if they made one. */
+        name?: string | null
       }
     >
   }
@@ -731,10 +858,19 @@ export function buildConversation(
       }
       const cleanedMessage = cleanMessage(m, context.ownerEmail, preferences)
       const style = context.replyStyles?.senders[senderEmail]
-      const greeting = style?.enabled
-        ? style.greeting
-        : (context.replyStyles?.account.greeting ??
-          lastDetectedOwnerStyle(sorted, context.ownerEmail, 'greeting'))
+      // A name the user corrected for this sender outranks the From header, and
+      // applies whether or not the sender has a reply style of their own.
+      const recipient = recipientWithNameOverride(
+        cleanedMessage.isFromOwner ? null : cleanedMessage.from,
+        style?.name,
+      )
+      const greeting = personalizeGreeting(
+        style?.enabled
+          ? style.greeting
+          : (context.replyStyles?.account.greeting ??
+            lastDetectedOwnerStyle(sorted, context.ownerEmail, 'greeting')),
+        recipient,
+      )
       const signature = style?.enabled
         ? style.signature
         : (context.replyStyles?.account.signature ??

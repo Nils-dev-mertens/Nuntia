@@ -13,10 +13,10 @@
 
 import { createHash } from 'node:crypto'
 
-import { asc, desc, inArray } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
-import { contacts } from '#/db/schema.ts'
+import { contacts, conversations } from '#/db/schema.ts'
 
 import { normaliseContactEmail } from './matching.ts'
 
@@ -100,6 +100,108 @@ export async function contactNamesFor(
   }
 
   return names
+}
+
+/**
+ * The newest name learned for one address, or null when mail never carried one.
+ *
+ * A reply's greeting is filled from the incoming message's From header, and that
+ * header is sometimes a bare address — a first-time client, a phone, a script.
+ * The address book already remembers what the person was called the last time
+ * they wrote with a name, so the greeting does not have to read a guess off the
+ * local part. Scoped to the mailboxes given: this is the user's own mail, never a
+ * directory lookup.
+ */
+export async function contactNameFor(
+  accountIds: string[],
+  email: string,
+): Promise<string | null> {
+  const address = normaliseContactEmail(email)
+  if (!address || accountIds.length === 0) return null
+
+  const rows = await db
+    .select({ name: contacts.name })
+    .from(contacts)
+    .where(
+      and(inArray(contacts.accountId, accountIds), eq(contacts.email, address)),
+    )
+    .orderBy(desc(contacts.updatedAt))
+    .limit(1)
+
+  const row = rows.at(0)
+  return row?.name?.trim() || null
+}
+
+/**
+ * What the user's own mail already knows about one person.
+ *
+ * The composer is the one place where this is worth asking before the message
+ * exists: what the last thread with them was about, whether the user still owes
+ * them an answer, and how many times they have talked at all. Everything comes
+ * from stored conversations, so somebody the user has never written to has no
+ * history and the composer says nothing.
+ */
+export type RecipientHistory = {
+  /** The name mail has carried for them, when it has carried one. */
+  name: string | null
+  /** Threads the user's mailboxes hold with this person. */
+  threadCount: number
+  /** Up to three newest threads, newest first. */
+  recent: Array<{
+    providerThreadId: string
+    subject: string
+    topic: string | null
+    lastMessageAt: Date
+    /** True when the newest message in the thread came from the user. */
+    awaitingReply: boolean
+  }>
+}
+
+/**
+ * Summarise the threads one address appears in, across the mailboxes given.
+ *
+ * Matching is on the participant value, not on the JSON text: an address has to
+ * equal what was stored, or `sarah@example.co` would match `sarah@example.com`
+ * and the composer would show somebody else's history under this person's name.
+ * Null means "no history", which is the honest answer for a first contact.
+ */
+export async function recipientHistoryFor(
+  accountIds: string[],
+  email: string,
+): Promise<RecipientHistory | null> {
+  const address = normaliseContactEmail(email)
+  if (!address || accountIds.length === 0) return null
+
+  const involvesThem = sql`exists (
+    select 1 from json_each(${conversations.participants})
+    where lower(json_extract(value, '$.email')) = ${address}
+  )`
+  const where = and(inArray(conversations.accountId, accountIds), involvesThem)
+
+  const [recent, totals, name] = await Promise.all([
+    db
+      .select({
+        providerThreadId: conversations.providerThreadId,
+        subject: conversations.subject,
+        topic: conversations.topic,
+        lastMessageAt: conversations.lastMessageAt,
+        awaitingReply: conversations.awaitingReply,
+      })
+      .from(conversations)
+      .where(where)
+      .orderBy(desc(conversations.lastMessageAt))
+      .limit(3),
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(conversations)
+      .where(where),
+    contactNameFor(accountIds, address),
+  ])
+
+  const threadCount = totals.at(0)?.count ?? 0
+  if (threadCount === 0) return null
+
+  return { name, threadCount, recent }
 }
 
 /**

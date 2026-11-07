@@ -68,9 +68,50 @@ describe('composeNewMessage', () => {
 
     expect(composed.html).toContain('5 &lt; 6 &amp; 7 &gt; 6')
   })
+
+  test('renders a styled signature in HTML and strips its markers in text', () => {
+    const composed = composeNewMessage({
+      body: 'Talk soon.',
+      greeting: null,
+      signature:
+        '**Bram de Vries**\n*Available Tue–Thu*\n[Book a call](https://example.com/meet)',
+    })
+
+    expect(composed.html).toContain('<strong>Bram de Vries</strong>')
+    expect(composed.html).toContain('<em>Available Tue–Thu</em>')
+    expect(composed.html).toContain(
+      '<a href="https://example.com/meet">Book a call</a>',
+    )
+    expect(composed.text).toContain('Bram de Vries')
+    expect(composed.text).not.toContain('**')
+    expect(composed.text).not.toContain('](')
+  })
+
+  test('never turns a non-http link into an anchor', () => {
+    const composed = composeNewMessage({
+      body: 'Hi.',
+      greeting: null,
+      signature: '[click](javascript:alert(1))',
+    })
+
+    expect(composed.html).not.toContain('<a ')
+    expect(composed.html).not.toContain('href=')
+  })
 })
 
 describe('composeReply', () => {
+  test('keeps a styled signature in the HTML part even without a rich quote', () => {
+    const composed = composeReply({
+      body: 'Sure.',
+      greeting: 'Hi,',
+      signature: '**Bram**',
+    })
+
+    expect(composed.html).toContain('<strong>Bram</strong>')
+    expect(composed.text).toContain('Bram')
+    expect(composed.text).not.toContain('**')
+  })
+
   test('is unchanged by the shared HTML body builder', () => {
     const composed = composeReply({
       body: 'Sure.',

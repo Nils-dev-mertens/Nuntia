@@ -2046,21 +2046,75 @@ table, and the migration sketch — is in [`docs/organizations.md`](docs/organiz
   seeds their defaults; the account type decides what is shared and who may see it. A solo support
   person is a valid pair, which is why one field cannot carry both.
 
-**Not decided yet, deliberately** — these change ownership, so guessing costs a migration of
-semantics rather than a UI edit:
+**Decided** — answers taken before the scoping migration, because each changes ownership and
+a guess would cost a migration of semantics rather than a UI edit:
 
-- Whether a member's own contacts sit **on top of** the organisation list, whether the organisation
-  can forbid a personal client, and what a CRM's `replace: true` means when several members have
-  written.
-- Roles: owner / admin / member, and whether "admin" remains `users.role` or becomes a
-  per-organisation role. Today `/admin` is one operator on the install.
-- Seats, invitations and billing. Each member needs an invite, which means invites stop being
-  install-wide, and the beta's funnel becomes per organisation rather than per person.
-- Which per-user things become organisation-scoped: `organization_rules` (probably yes), parsing
-  defaults and reply style (probably per member), sections (yes), `contact_contexts` (the kind
-  shared and the private notes per member, or the whole profile shared?).
-- What happens to assigned conversations and shared clients when a member leaves, since deleting
-  the user row currently cascades all of their mail.
+- **The client list is shared, the notes are not.** The organisation owns *who is a client* (the
+  `kind`), which is a company fact; relationship, topics, current work and importance stay the
+  member's own, because "Ana prefers short replies" is a person's note. A client imported once
+  therefore prioritises that address in every member's inbox without exposing anyone's notes.
+- **Roles live on the membership.** `memberships.role` is owner / admin / member, so an
+  organisation can have its own admins without becoming an install operator. `users.role` and
+  `LUMEN_ADMIN_EMAILS` stay as the install-level break-glass path, which is also what an
+  organisation-less install keeps using.
+- **Invites are organisation-bound and consume a seat.** An invite names the organisation it joins
+  and fills one seat there, so an approval cannot land a new member in the wrong workspace. The
+  bootstrap invite creates the first organisation with its redeemer as owner; `/join` checks
+  membership, not only identity, on the existing-user path.
+- **Assignment is a reference.** The assignee gets a view of the thread and the thread stays in the
+  owner's mailbox, with an explicit "assigned to" line. A copy would create two threads that
+  disagree, and there would be no way to tell which one is the conversation.
+- **A leaving member's mail is retained, unassigned.** Rows stay in the organisation and become
+  visible to its admins rather than cascading away with the user. Deleting a user therefore stops
+  being "delete their mail": transfer is possible, but it is never the silent default, because a
+  company losing a client history the day someone leaves is the one outcome worth designing out.
+
+- **One organisation per member.** `memberships.user_id` is unique, so the workspace id is
+  derived from the session's user rather than stored as an "active workspace". A switcher would
+  need that state before any query could trust it, and a beta does not have a second workspace to
+  switch to. A company workspace is therefore a separate account, not a second hat.
+- **AI settings are the organisation's for now.** `app_settings` becomes workspace-scoped, because
+  a company key is a company decision and a member should not have to bring their own. This is a
+  beta call: the moment an organisation has members who are not admins, the key's owner and
+  rotation become an admin job, and the settings page for it moves to `/organisation`.
+- **`/admin` stays the product owner's; the company gets `/organisation`.** `users.role` and
+  `LUMEN_ADMIN_EMAILS` keep opening `/admin`, which is install-level and never shows a company's
+  mail. An organisation owner or admin gets `/organisation` instead. Invite links split in two:
+  an **organisation invite** (joins that workspace, consumes a seat, member or admin) and a
+  **solo invite**, which is what exists today and creates a person's own workspace.
+- **Parsing and reply style stay per member.** `sender_profiles` stays keyed by the mailbox: "this
+  sender writes a signature" is one person's judgement about their own reading, and imposing it
+  on colleagues would silently change their threads.
+
+**Built so far (migrations `0032` and `0033`):** `organizations` and `memberships`, plus
+`organization_clients` — the workspace's client list, with the kind moved off
+`contact_contexts` so the notes stay the member's. The migration gives every existing user a solo
+workspace (`org:<userId>`) with them as owner and copies their kinds into it;
+`ensureWorkspace()` covers users created afterwards. The inbox and the manual import read and
+write the workspace list, so a colleague's import already prioritises the address in this inbox.
+
+`organization_ai_settings` moved the Jev/LLM keys, the models, the draft threshold and the two
+switches off `app_settings` (which keeps the per-member preferences: Gravatar and the inbox
+order), with the existing keys copied to the owner's workspace. `/organisation` is the workspace
+page: name, members and their roles, and the AI form. The policy is in
+`lib/organization/members.ts` — the owner changes roles, an owner or admin renames the workspace
+and edits the keys, a member reads the page — and the workspace is always resolved from the
+session, never from a value the browser sent. The last owner cannot demote themselves.
+
+**Shared filing and hand-overs (migrations `0034` and `0035`).** Custom inbox sections moved to
+the workspace (`organization_labels.organization_id`, with every existing label backfilled to its
+creator's workspace), so a company files mail once. Any member may save them — a section is only
+useful if the people doing the filing can change it — while state labels stay personal, because
+which state a thread is in is a reading rather than a shared decision.
+
+Assignment is a reference: `conversations.assigned_to` / `assigned_by` / `assigned_at`, set by the
+thread's owner for a member of their own workspace (`assignConversation`). The row never leaves the
+owner's mailbox; the assignee reaches it through one fallback read and sees it in an **Assigned to
+you** section, with the composer hidden because no reply can leave from a mailbox they do not own.
+Assigning to yourself clears it, and an assignee outside the workspace is refused.
+
+**Still to wire:** `organization_id` on `accounts`, `organization_rules` (it follows its label
+through `label_id`) and `invites`; and the invite split (organisation vs solo) with the seat check.
 
 **Why it blocks the client webhook.** `POST /api/client-hook/<token>` needs an owner. Per-user is
 the simple implementation and the wrong one for a corporation: four members importing the same CRM

@@ -14,11 +14,16 @@ import { Compose } from '#/components/compose.tsx'
 import type { ComposeInput } from '#/components/compose.tsx'
 import type { RecipientSuggestion } from '#/components/recipient-field.tsx'
 import { getSession, listAccounts, ownsAccount } from '#/lib/auth/index.ts'
-import { listContactSuggestions } from '#/lib/contacts/index.ts'
+import {
+  listContactSuggestions,
+  recipientHistoryFor,
+} from '#/lib/contacts/index.ts'
 import {
   sendNewMessage,
   resolveNewMessageStyle,
 } from '#/lib/mailbox/send-new.ts'
+import { listTeamMembers } from '#/lib/team/store.ts'
+import type { TeamMember } from '#/lib/team/types.ts'
 
 /**
  * Which mailboxes the message may leave from, and who the user has written to
@@ -32,6 +37,7 @@ const loadComposeState = createServerFn({ method: 'GET' }).handler(
         signedIn: true
         accounts: Array<{ id: string; email: string }>
         suggestions: RecipientSuggestion[]
+        teamMembers: TeamMember[]
       }
   > => {
     const session = await getSession()
@@ -53,6 +59,7 @@ const loadComposeState = createServerFn({ method: 'GET' }).handler(
         email: suggestion.email,
         name: suggestion.name,
       })),
+      teamMembers: await listTeamMembers(session.userId),
     }
   },
 )
@@ -92,6 +99,36 @@ const loadStylePreview = createServerFn({ method: 'GET' })
       }
     },
   )
+
+/**
+ * What the user's own mail already knows about the person in the To field.
+ *
+ * Scoped like the style preview, because the account id arrives from the
+ * browser: the lookup runs only for a mailbox this session owns, and only over
+ * this user's stored conversations. No history is a normal answer, not an error.
+ */
+const loadRecipientHistory = createServerFn({ method: 'GET' })
+  .validator((data: { accountId: string; email: string }) => data)
+  .handler(async ({ data }) => {
+    const session = await getSession()
+    if (!session) return null
+
+    try {
+      const accountId = data.accountId.trim().toLowerCase()
+      if (!(await ownsAccount(session.userId, accountId))) return null
+      if (!data.email.trim()) return null
+
+      const accounts = await listAccounts(session.userId)
+      return await recipientHistoryFor(
+        accounts.map((account) => account.id),
+        data.email,
+      )
+    } catch (error) {
+      // A context card is a nicety; failing to build one must not break the page.
+      console.warn('[compose] could not read the recipient history:', error)
+      return null
+    }
+  })
 
 const sendMessageAction = createServerFn({ method: 'POST' })
   .validator((data: ComposeInput) => data)
@@ -140,14 +177,16 @@ export const Route = createFileRoute('/compose')({
 })
 
 function ComposePage() {
-  const { accounts, suggestions } = Route.useLoaderData()
+  const { accounts, suggestions, teamMembers } = Route.useLoaderData()
   const router = useRouter()
 
   return (
     <Compose
       accounts={accounts}
       suggestions={suggestions}
+      teamMembers={teamMembers}
       loadStyle={(input) => loadStylePreview({ data: input })}
+      loadContext={(input) => loadRecipientHistory({ data: input })}
       submit={async (input) => {
         const result = await sendMessageAction({ data: input })
 

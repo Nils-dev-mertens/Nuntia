@@ -214,6 +214,30 @@ export async function listAccounts(
   }))
 }
 
+/**
+ * Every mailbox one person connected, given any one of them.
+ *
+ * Contacts are stored per mailbox but describe a person, so a name learned while
+ * mail arrived on one address has to be visible while writing from another. A
+ * row with no owner — a pre-accounts mailbox — stands alone.
+ */
+export async function listSiblingAccountIds(id: string): Promise<string[]> {
+  const accountId = id.toLowerCase()
+  const row = await db.query.accounts.findFirst({
+    where: eq(accounts.id, accountId),
+    columns: { userId: true },
+  })
+
+  if (!row?.userId) return [accountId]
+
+  const siblings = await db.query.accounts.findMany({
+    where: eq(accounts.userId, row.userId),
+    columns: { id: true },
+  })
+
+  return siblings.map((sibling) => sibling.id)
+}
+
 /** Which cursor a provider's incremental sync uses. */
 export type CursorKind = 'history' | 'received'
 
