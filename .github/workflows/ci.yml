@@ -30,6 +30,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # `src/routeTree.gen.ts` is generated and gitignored, so a fresh clone has
+      # none of it. Without it every `createFileRoute` falls back to the
+      # unregistered types — each path becomes "not assignable to 'undefined'"
+      # and every `useParams` a `never` — so the check has to run first.
+      - name: Generate the route tree
+        run: bun run generate-routes
+
       - name: Typecheck
         run: bun run typecheck
 
