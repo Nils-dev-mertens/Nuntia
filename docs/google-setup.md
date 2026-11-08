@@ -56,13 +56,18 @@ credentials problem but is not.
 On the Data Access page, add these three scopes:
 
 ```
-https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/gmail.modify
 https://www.googleapis.com/auth/gmail.send
 https://www.googleapis.com/auth/userinfo.email
 ```
 
-That set is deliberately minimal. There is no modify or delete scope, so a bug in Nuntia
-cannot destroy mail — the token physically cannot delete anything.
+`gmail.modify` is what lets Nuntia clear the mailbox's unread flag when you open a
+thread. Without it the write is refused with `insufficient authentication scopes`, and
+mail you have read keeps coming back as unread. The set still stops short of permanent
+deletion, so a bug in Nuntia cannot destroy mail.
+
+If a mailbox was connected with an older grant (`gmail.readonly`), sign in again from the
+reconnect banner — the token keeps working until then, only read marks are affected.
 
 ---
 

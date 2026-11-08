@@ -31,6 +31,38 @@ import type { ServerEntry } from '@tanstack/react-start/server-entry'
 import { initDatabase } from '#/db/index.ts'
 import { isQuietPath, log, redactPath } from '#/lib/log.ts'
 
+/**
+ * Crash logging.
+ *
+ * A 502 at the edge means this process was already gone when the request
+ * arrived, and the reason only ever reached stdout — which a container may not
+ * keep. Recording the stack next to the requests in `app.log` is what turns
+ * "e is not defined" into a file and a line.
+ *
+ * An uncaught exception still ends the process: a server that keeps answering
+ * after one is worse than a restart, because the supervisor is what recovers.
+ * An unhandled rejection is logged and survived — it is usually one background
+ * task, and taking the whole install down for it would be the 502 itself.
+ */
+function describeCrash(error: unknown): {
+  message: string
+  stack: string | null
+} {
+  if (error instanceof Error) {
+    return { message: error.message, stack: error.stack ?? null }
+  }
+  return { message: String(error), stack: null }
+}
+
+process.on('uncaughtException', (error) => {
+  log('error', 'uncaught-exception', describeCrash(error))
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (reason) => {
+  log('error', 'unhandled-rejection', describeCrash(reason))
+})
+
 const ready = initDatabase()
 
 /**

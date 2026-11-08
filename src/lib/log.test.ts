@@ -5,6 +5,7 @@
 
 import { afterAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -13,6 +14,7 @@ import {
   flushLog,
   isQuietPath,
   log,
+  readRecentErrors,
   redactPath,
 } from './log.ts'
 
@@ -76,5 +78,45 @@ describe('log', () => {
     expect(record.event).toBe('request')
     expect(record.path).toBe('/join/[code]')
     expect(line).not.toContain('ABCD')
+  })
+})
+
+describe('readRecentErrors', () => {
+  test('keeps only errors, oldest first, skipping malformed lines', async () => {
+    await writeFile(
+      appLogPath(),
+      [
+        JSON.stringify({
+          at: '2026-11-08T10:00:00.000Z',
+          level: 'info',
+          event: 'request',
+          path: '/admin',
+        }),
+        'not json',
+        JSON.stringify({
+          at: '2026-11-08T10:01:00.000Z',
+          level: 'error',
+          event: 'sync-failed',
+          account: 'ada@example.com',
+          message: 'boom',
+        }),
+        JSON.stringify({
+          at: '2026-11-08T10:02:00.000Z',
+          level: 'warn',
+          event: 'push',
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    )
+
+    const events = await readRecentErrors()
+
+    expect(events.map((event) => event.event)).toEqual(['sync-failed'])
+    expect(events[0]?.message).toBe('boom')
+  })
+
+  test('returns nothing for a missing log', async () => {
+    await rm(appLogPath(), { force: true })
+    expect(await readRecentErrors()).toEqual([])
   })
 })

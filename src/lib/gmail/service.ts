@@ -32,6 +32,7 @@ import {
   listAccounts,
   setDerivedVersion,
 } from '#/lib/auth/accounts.ts'
+import { hasReadScope } from '#/lib/auth/google.ts'
 import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
   activeDone,
@@ -102,6 +103,7 @@ import {
   removeAttachmentCache,
 } from '#/lib/gmail/attachments.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
+import { log } from '#/lib/log.ts'
 
 import { GmailAuthError } from '#/lib/gmail/client.ts'
 import { cursorKindFor } from '#/lib/mailbox/types.ts'
@@ -230,7 +232,8 @@ export type InboxPayload =
       /** Set when a sync was attempted and failed; the list is still usable. */
       syncError: string | null
       /**
-       * The mailboxes whose Google grant was rejected or revoked. Only these
+       * The mailboxes whose Google grant was rejected, revoked, or too narrow
+       * to write read marks. Only these
        * need the "Reconnect" action — one broken mailbox must not blank the
        * others.
        */
@@ -789,6 +792,7 @@ async function ownerRowForThread(
     id: account.id,
     email: account.email,
     provider: account.provider,
+    scopes: account.scopes,
   }))
   const merged = mergeAccountConversations(cluster, accounts).at(0)
   if (!merged) throw new Error('That conversation no longer exists.')
@@ -870,7 +874,22 @@ export async function setConversationUnread(
       )
     }
 
-    await client.setThreadUnread(conversation.providerThreadId, unread)
+    try {
+      await client.setThreadUnread(conversation.providerThreadId, unread)
+    } catch (error) {
+      // The one write this app makes to the mailbox's own state. When it fails
+      // the thread keeps its old flag, and the next sync brings the dot back —
+      // a missing scope, a revoked grant and a quota spike all look the same
+      // from the inbox, so the record has to name which one it was.
+      log('error', 'read-mark-failed', {
+        account: accountId,
+        threadId: conversation.providerThreadId,
+        unread,
+        authRequired: needsReconnect(error),
+        message: describeError(error),
+      })
+      throw error
+    }
   }
 
   await applyUnreadMark(accountId, conversation.providerThreadId, unread)
@@ -1640,6 +1659,14 @@ async function runSync(
       return outcome
     } catch (error) {
       console.error('[sync] failed:', error)
+      // `syncError` only reaches the browser for as long as the tab is open, and
+      // a crash takes it with it. The file keeps the reason next to the account
+      // that produced it, which is what a 502 leaves behind to work from.
+      log('error', 'sync-failed', {
+        account: accountId,
+        authRequired: needsReconnect(error),
+        message: describeError(error),
+      })
       const outcome: SyncOutcome = {
         error: describeError(error),
         authRequired: needsReconnect(error),
@@ -1824,6 +1851,7 @@ export async function loadInbox(
     id: account.id,
     email: account.email,
     provider: account.provider,
+    scopes: account.scopes,
   }))
   const emailById = new Map(
     accounts.map((account) => [account.id, account.email]),
@@ -1913,6 +1941,25 @@ export async function loadInbox(
     const afterSync = await getLastSyncedAt(account.id)
     if (afterSync && (!latestSyncedAt || afterSync > latestSyncedAt)) {
       latestSyncedAt = afterSync
+    }
+  }
+
+  // A Gmail grant made before `gmail.modify` was requested still syncs; only the
+  // read flag cannot be written. Flagging it here is what lets the banner offer
+  // the one action that fixes it — the alternative is a read mark that fails
+  // silently on every thread the user opens.
+  for (const account of accounts) {
+    if (
+      account.provider === 'google' &&
+      account.scopes !== null &&
+      !hasReadScope(account.scopes) &&
+      !authRequiredAccounts.some((entry) => entry.id === account.id)
+    ) {
+      authRequiredAccounts.push({
+        id: account.id,
+        email: account.email,
+        provider: account.provider,
+      })
     }
   }
 

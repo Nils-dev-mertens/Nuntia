@@ -406,6 +406,22 @@ export function wrapGmailError(error: unknown): Error {
     )
   }
 
+  // A grant made for fewer scopes than this install now asks for. Gmail answers
+  // `threads.modify` with 403 and "insufficient authentication scopes"; the
+  // mailbox keeps syncing, so this is the only sign that marking mail read can
+  // never work until the user signs in again.
+  if (
+    status === 403 &&
+    (reason === 'insufficientPermissions' ||
+      /insufficient (authentication )?scopes?|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(
+        message,
+      ))
+  ) {
+    return new GmailAuthError(
+      'Gmail did not grant the permission needed to mark mail as read. The user needs to sign in again.',
+    )
+  }
+
   if (status === 404) {
     return new GmailNotFoundError(
       'The requested Gmail resource no longer exists.',

@@ -17,16 +17,37 @@ import { codeChallenge, stashOAuthRoundTrip } from './oauth.ts'
 export { readState, readVerifier } from './oauth.ts'
 
 /**
+ * The scope that lets Nuntia write the read flag.
+ *
+ * `threads.modify` — what mark-as-read/unread uses — needs it. `readonly` is
+ * not enough: Gmail answers the write with 403 "insufficient authentication
+ * scopes", so reading worked while the unread dot never cleared.
+ */
+export const GMAIL_READ_SCOPE = 'https://www.googleapis.com/auth/gmail.modify'
+
+/**
  * Scopes for the MVP.
  *
- * Deliberately minimal: `gmail.readonly` plus `send` is enough to read threads
- * and reply. No modify/delete scope, so a bug cannot destroy mail.
+ * `modify` covers reading threads, `send` replies, and — the reason it replaced
+ * `readonly` — clearing the mailbox's unread flag. It deliberately stops short
+ * of permanent deletion, so a bug still cannot destroy mail.
  */
 export const SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
+  GMAIL_READ_SCOPE,
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/userinfo.email',
 ]
+
+/**
+ * Whether a stored grant carries the scope this install now needs.
+ *
+ * A grant made before `gmail.modify` was requested only covers reading and
+ * sending. The mailbox still syncs, so nothing fails loudly — the user simply
+ * has to sign in again before read marks can be written to Gmail.
+ */
+export function hasReadScope(scopes: string | null | undefined): boolean {
+  return (scopes ?? '').split(/\s+/).includes(GMAIL_READ_SCOPE)
+}
 
 function clientId(): string {
   const id = process.env.GOOGLE_CLIENT_ID

@@ -76,6 +76,20 @@ describe('wrapGmailError', () => {
     expect(error.name).toBe('Error')
   })
 
+  test('classifies a missing modify scope as needing a sign-in', () => {
+    // The real response for `threads.modify` against a `gmail.readonly` grant.
+    const error = wrapGmailError({
+      code: 403,
+      message: 'Request had insufficient authentication scopes.',
+      response: {
+        status: 403,
+        data: { error: { errors: [{ reason: 'insufficientPermissions' }] } },
+      },
+    })
+
+    expect(error).toBeInstanceOf(GmailAuthError)
+  })
+
   test('still maps 429 to a rate limit', () => {
     expect(
       wrapGmailError({ code: 429, message: 'Too many requests' }),

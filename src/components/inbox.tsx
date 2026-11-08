@@ -2370,8 +2370,9 @@ export function Inbox({
                 {authRequiredAccounts
                   .map((account) => account.email)
                   .join(', ')}{' '}
-                — you may have revoked it, or it expired. Sign in again to keep
-                syncing. The other mailboxes are unaffected.
+                — you may have revoked it, it expired, or its permissions
+                changed. Sign in again to keep syncing. The other mailboxes are
+                unaffected.
               </p>
               <span className="mt-3 flex flex-wrap gap-2">
                 {authRequiredAccounts.map((account) => (

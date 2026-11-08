@@ -196,10 +196,15 @@ export async function saveRefreshTokenEnvelope(
  * Ordered by connection time, which is what the UI shows and what the merge
  * uses as a stable tiebreak between two mailboxes holding the same thread.
  */
-export async function listAccounts(
-  userId: string,
-): Promise<
-  Array<{ id: string; email: string; provider: Provider; createdAt: Date }>
+export async function listAccounts(userId: string): Promise<
+  Array<{
+    id: string
+    email: string
+    provider: Provider
+    /** The grant's scope string, as the provider returned it. Null when unknown. */
+    scopes: string | null
+    createdAt: Date
+  }>
 > {
   const rows = await db.query.accounts.findMany({
     where: eq(accounts.userId, userId.toLowerCase()),
@@ -210,6 +215,7 @@ export async function listAccounts(
     id: r.id,
     email: r.email,
     provider: r.provider,
+    scopes: r.scopes,
     createdAt: r.createdAt,
   }))
 }

@@ -34,6 +34,8 @@ data/
 
 # Logs
 *.log
+# Bind-mounted by docker-compose.yml so the container writes app.log to the host
+logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

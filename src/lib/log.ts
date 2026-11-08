@@ -20,15 +20,45 @@
  * and then swallowed: logging must not be able to break the thing it describes.
  */
 
-import { appendFile, mkdir, rename, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 /** Rotate above this; one previous file is kept. */
 const MAX_LOG_BYTES = 2_000_000
 
+/** How many trailing lines `/admin` parses when it asks for the latest errors. */
+const MAX_READ_LINES = 2_000
+
 export type LogLevel = 'info' | 'warn' | 'error'
 
-export type LogFields = Record<string, string | number | boolean | null | undefined>
+export type LogFields = Record<
+  string,
+  string | number | boolean | null | undefined
+>
+
+/**
+ * A parsed line, as the admin page reads it back.
+ *
+ * A closed shape rather than a bag of `unknown`: the record crosses a server
+ * function boundary, where an index signature cannot be proven serializable.
+ * The optional fields are the ones the log actually writes — request lines and
+ * the failure events — not an open-ended payload.
+ */
+export type LogRecord = {
+  at: string
+  level: LogLevel
+  event: string
+  method?: string
+  path?: string
+  status?: number
+  ms?: number
+  message?: string
+  account?: string
+  threadId?: string
+  unread?: boolean
+  authRequired?: boolean
+  stack?: string | null
+}
 
 /** Directory the app log lives in. */
 export function appLogDir(): string {
@@ -84,7 +114,9 @@ async function append(line: string): Promise<void> {
   try {
     await mkdir(appLogDir(), { recursive: true })
 
-    const size = await stat(path).then((info) => info.size).catch(() => 0)
+    const size = await stat(path)
+      .then((info) => info.size)
+      .catch(() => 0)
     if (size > MAX_LOG_BYTES) {
       await rm(`${path}.1`, { force: true }).catch(() => {})
       await rename(path, `${path}.1`).catch(() => {})
@@ -119,7 +151,9 @@ export function log(
   if (level !== 'info') {
     // One line keeps it readable in a terminal; the file keeps the full record.
     const detail =
-      typeof fields.message === 'string' ? fields.message : JSON.stringify(fields)
+      typeof fields.message === 'string'
+        ? fields.message
+        : JSON.stringify(fields)
     const sink = level === 'error' ? console.error : console.warn
     sink(`[${event}] ${detail}`)
   }
@@ -138,4 +172,30 @@ export function log(
 /** Flush pending writes. For scripts that exit immediately after logging. */
 export function flushLog(): Promise<void> {
   return writeChain
+}
+
+/**
+ * The most recent errors, oldest first — what `/admin` shows.
+ *
+ * Only `level: 'error'` lines: a warning usually means something recovered, and
+ * mixing the two buries the failures the page exists to show. A malformed line
+ * is skipped rather than thrown on, and a missing file simply means nothing has
+ * failed yet. The tail is bounded so a rotated log cannot make every admin load
+ * re-parse megabytes.
+ */
+export async function readRecentErrors(limit = 50): Promise<LogRecord[]> {
+  const text = await readFile(appLogPath(), 'utf-8').catch(() => '')
+  const lines = text.split('\n').filter((line) => line.trim())
+
+  return lines
+    .slice(-MAX_READ_LINES)
+    .flatMap((line) => {
+      try {
+        const record = JSON.parse(line) as LogRecord
+        return record.level === 'error' ? [record] : []
+      } catch {
+        return []
+      }
+    })
+    .slice(-limit)
 }

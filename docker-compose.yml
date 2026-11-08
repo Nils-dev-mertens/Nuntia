@@ -19,6 +19,12 @@ services:
       # The database, its WAL sidecars, the request log and the attachment cache.
       # Losing this volume means every mailbox has to be re-authenticated.
       - lumen-data:/app/data
+      # The logs also live on the host, next to this file, so a 502 can be read
+      # with `tail -f logs/app.log` instead of `docker compose exec`. Remove this
+      # line and they stay inside the volume, only reachable through the
+      # container. This shadowing mount is why APP_LOG_DIR must keep its default
+      # (`data/logs`); pointing it elsewhere puts the files back in the volume.
+      - ./logs:/app/data/logs
 
 volumes:
   lumen-data:

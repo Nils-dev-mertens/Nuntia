@@ -12,6 +12,7 @@ dist-ssr
 
 # The database, its WAL sidecars, logs and backups
 data
+logs
 *.db
 *.db-shm
 *.db-wal

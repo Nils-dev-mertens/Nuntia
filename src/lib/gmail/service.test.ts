@@ -1,7 +1,33 @@
 import { describe, expect, test } from 'bun:test'
 
+import { hasReadScope } from '#/lib/auth/google.ts'
 import { GmailAuthError, GmailRateLimitError } from '#/lib/gmail/client.ts'
 import { describeActionFailure, needsReconnect } from '#/lib/gmail/service.ts'
+
+describe('hasReadScope', () => {
+  test('accepts a grant that includes gmail.modify', () => {
+    expect(
+      hasReadScope(
+        'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send',
+      ),
+    ).toBe(true)
+  })
+
+  test('rejects a legacy grant that only had gmail.readonly', () => {
+    // The stored scope string on every mailbox connected before the fix — the
+    // mailbox syncs, but `threads.modify` is refused until it signs in again.
+    expect(
+      hasReadScope(
+        'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send',
+      ),
+    ).toBe(false)
+  })
+
+  test('rejects a missing scope string rather than assuming it is fine', () => {
+    expect(hasReadScope(null)).toBe(false)
+    expect(hasReadScope('')).toBe(false)
+  })
+})
 
 describe('needsReconnect', () => {
   test('is true for a revoked or rejected grant', () => {

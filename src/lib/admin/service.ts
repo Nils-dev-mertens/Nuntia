@@ -27,6 +27,8 @@ import {
 import type { FeedbackStatus } from '#/db/schema.ts'
 
 import { aiLogPath, readRecentAiEvents } from '#/lib/ai/ai-log.ts'
+import { appLogPath, readRecentErrors } from '#/lib/log.ts'
+import type { LogRecord } from '#/lib/log.ts'
 import type { AiLogRecord } from '#/lib/ai/ai-log.ts'
 import { listInvites } from '#/lib/invites/repository.ts'
 import type { InviteSummary } from '#/lib/invites/repository.ts'
@@ -86,6 +88,14 @@ export type AdminData = {
    * per-user activity feed.
    */
   aiLog: { path: string; events: AiLogRecord[] }
+  /**
+   * The last failures written to `app.log`.
+   *
+   * Request handlers that threw, syncs that stopped, and read marks the mailbox
+   * refused — the material that used to need a shell on the server. The same
+   * file holds every request line, so only `error` records are read back.
+   */
+  errorLog: { path: string; events: LogRecord[] }
 }
 
 export async function loadAdminData(): Promise<AdminData> {
@@ -97,8 +107,9 @@ export async function loadAdminData(): Promise<AdminData> {
   ])
 
   const accountRows = await db.select().from(accounts)
-  const ownedAccounts = accountRows
-    .filter((row): row is typeof row & { userId: string } => Boolean(row.userId))
+  const ownedAccounts = accountRows.filter(
+    (row): row is typeof row & { userId: string } => Boolean(row.userId),
+  )
 
   const accountOwner = new Map(ownedAccounts.map((row) => [row.id, row.userId]))
   const mailboxesByUser = new Map<string, number>()
@@ -134,7 +145,10 @@ export async function loadAdminData(): Promise<AdminData> {
   for (const row of redemptionRows) invitesByUser.set(row.userId, row.inviteId)
 
   const eventRows = await db
-    .select({ userId: productEvents.userId, createdAt: productEvents.createdAt })
+    .select({
+      userId: productEvents.userId,
+      createdAt: productEvents.createdAt,
+    })
     .from(productEvents)
 
   const activeDays = new Map<string, Set<string>>()
@@ -193,6 +207,10 @@ export async function loadAdminData(): Promise<AdminData> {
     aiLog: {
       path: aiLogPath(),
       events: await readRecentAiEvents(20),
+    },
+    errorLog: {
+      path: appLogPath(),
+      events: await readRecentErrors(20),
     },
   }
 }

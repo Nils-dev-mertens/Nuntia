@@ -146,6 +146,11 @@ previous file kept:
   and a truncated error. No prompt, no body, no key. Readable at `/admin`; it is
   operator-only because records carry no user id.
 
+In the Compose setup the same directory is bind-mounted from `./logs` next to
+`docker-compose.yml`, so a deployed container's log is readable on the host
+(`tail -f logs/app.log`) instead of only inside the volume. That mount shadows
+`/app/data/logs`, which is why `APP_LOG_DIR` has to keep its default.
+
 Warnings and errors also go to stdout, so a foreground dev server or a
 container's output shows them without tailing the file.
 

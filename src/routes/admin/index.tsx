@@ -16,11 +16,7 @@
  */
 
 import { createServerFn } from '@tanstack/react-start'
-import {
-  createFileRoute,
-  notFound,
-  useRouter,
-} from '@tanstack/react-router'
+import { createFileRoute, notFound, useRouter } from '@tanstack/react-router'
 import { useState } from 'react'
 
 import { currentOperator } from '#/lib/admin/guard.ts'
@@ -34,15 +30,43 @@ import {
   revokeInvite,
 } from '#/lib/invites/repository.ts'
 import { inviteLink, notifyInvite } from '#/lib/invites/notify.ts'
-import {
-  approveRequest,
-  declineRequest,
-} from '#/lib/invites/requests.ts'
+import { approveRequest, declineRequest } from '#/lib/invites/requests.ts'
 import { FEEDBACK_STATUSES } from '#/db/schema.ts'
 import type { FeedbackStatus } from '#/db/schema.ts'
+import type { LogRecord } from '#/lib/log.ts'
+
+/**
+ * What one error line says, in the order an operator reads it.
+ *
+ * The records are deliberately varied — a request line has `method`/`path`, a
+ * sync failure has `account`, a read mark has `threadId` — so the fields worth
+ * showing are picked by name rather than dumping the JSON.
+ */
+function errorDetail(record: LogRecord): string {
+  const parts: string[] = []
+
+  for (const value of [
+    record.method,
+    record.path,
+    record.status,
+    record.account,
+    record.threadId,
+  ]) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      parts.push(String(value))
+    }
+  }
+
+  if (record.authRequired === true) parts.push('reconnect required')
+  if (typeof record.message === 'string') parts.push(record.message)
+
+  return parts.join(' · ')
+}
 
 const loadAdminPage = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ allowed: false } | { allowed: true; data: AdminData }> => {
+  async (): Promise<
+    { allowed: false } | { allowed: true; data: AdminData }
+  > => {
     const operator = await currentOperator()
     if (!operator) return { allowed: false }
 
@@ -64,7 +88,13 @@ const approveAction = createServerFn({ method: 'POST' })
   .handler(async ({ data }): Promise<InviteActionReply> => {
     const operator = await currentOperator()
     if (!operator) {
-      return { error: 'Not found.', code: null, link: null, sent: false, reason: null }
+      return {
+        error: 'Not found.',
+        code: null,
+        link: null,
+        sent: false,
+        reason: null,
+      }
     }
 
     const result = await approveRequest(data.requestId, operator.userId)
@@ -110,7 +140,13 @@ const createInviteAction = createServerFn({ method: 'POST' })
   .handler(async ({ data }): Promise<InviteActionReply> => {
     const operator = await currentOperator()
     if (!operator) {
-      return { error: 'Not found.', code: null, link: null, sent: false, reason: null }
+      return {
+        error: 'Not found.',
+        code: null,
+        link: null,
+        sent: false,
+        reason: null,
+      }
     }
 
     try {
@@ -171,7 +207,13 @@ const newLinkAction = createServerFn({ method: 'POST' })
   .handler(async ({ data }): Promise<InviteActionReply> => {
     const operator = await currentOperator()
     if (!operator) {
-      return { error: 'Not found.', code: null, link: null, sent: false, reason: null }
+      return {
+        error: 'Not found.',
+        code: null,
+        link: null,
+        sent: false,
+        reason: null,
+      }
     }
 
     const existing = await getInvite(data.inviteId)
@@ -331,10 +373,7 @@ function AdminPage() {
       <header className="flex items-baseline justify-between">
         <h1 className="text-2xl font-bold">Nuntia beta</h1>
         <div className="flex items-baseline gap-4 text-xs">
-          <a
-            href="/admin/forms"
-            className="text-primary hover:underline"
-          >
+          <a href="/admin/forms" className="text-primary hover:underline">
             Forms
           </a>
           <a href="/" className="text-muted-foreground hover:underline">
@@ -360,7 +399,9 @@ function AdminPage() {
           <p className="mt-1 font-mono text-xs">{created.code}</p>
           <p className="mt-1 break-all font-mono text-xs">{created.link}</p>
           {!created.sent && created.reason ? (
-            <p className="mt-1 text-xs text-muted-foreground">{created.reason}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {created.reason}
+            </p>
           ) : null}
           <p className="mt-2 text-xs text-muted-foreground">
             Stored encrypted and hashed — Copy link in the list below shows it
@@ -382,7 +423,10 @@ function AdminPage() {
               ['Returned', data.funnel.returned],
             ] as const
           ).map(([labelText, value]) => (
-            <div key={labelText} className="rounded-md border border-border p-2">
+            <div
+              key={labelText}
+              className="rounded-md border border-border p-2"
+            >
               <div className="text-xs text-muted-foreground">{labelText}</div>
               <div className="text-lg font-semibold">{value}</div>
             </div>
@@ -413,7 +457,10 @@ function AdminPage() {
                 <div>
                   <span className="font-medium">{request.email}</span>
                   {request.name ? (
-                    <span className="text-muted-foreground"> · {request.name}</span>
+                    <span className="text-muted-foreground">
+                      {' '}
+                      · {request.name}
+                    </span>
                   ) : null}
                   <span className="ml-2 text-xs text-muted-foreground">
                     {request.createdAt.toLocaleDateString()}
@@ -453,7 +500,10 @@ function AdminPage() {
       <section className="mt-8">
         <h2 className="text-sm font-semibold">Invites</h2>
 
-        <form onSubmit={(event) => void onCreate(event)} className="mt-2 space-y-2">
+        <form
+          onSubmit={(event) => void onCreate(event)}
+          className="mt-2 space-y-2"
+        >
           <div className="flex flex-wrap gap-2">
             <input
               value={label}
@@ -624,8 +674,8 @@ function AdminPage() {
         <p className="mt-1 text-xs text-muted-foreground">
           Every call to Jev or the topic model, newest last. A failure the rules
           paper over is recorded here too, which is what makes &ldquo;the AI did
-          nothing&rdquo; answerable. Operator-only: the records carry no user id,
-          so this cannot be scoped to one person.
+          nothing&rdquo; answerable. Operator-only: the records carry no user
+          id, so this cannot be scoped to one person.
         </p>
 
         {data.aiLog.events.length === 0 ? (
@@ -666,6 +716,41 @@ function AdminPage() {
 
         <p className="mt-3 text-[11px] text-muted-foreground">
           Full history: <code>{data.aiLog.path}</code>
+        </p>
+      </section>
+
+      <section className="mt-8">
+        <h2 className="text-sm font-semibold">Recent errors</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The last failures written to <code>app.log</code>, newest last: a
+          request that threw, a sync that stopped, or a read mark the mailbox
+          refused. This is what a 502 leaves behind, so it can be read without a
+          shell on the server.
+        </p>
+
+        {data.errorLog.events.length === 0 ? (
+          <p className="mt-3 text-xs text-muted-foreground">
+            Nothing has failed since the log was last rotated.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-1">
+            {data.errorLog.events.map((record, index) => (
+              <li
+                key={`${record.at}-${index}`}
+                className="flex items-baseline gap-2 text-[11px] text-destructive"
+              >
+                <time dateTime={record.at} className="shrink-0">
+                  {record.at.slice(11, 19)}
+                </time>
+                <span className="shrink-0 font-medium">{record.event}</span>
+                <span className="min-w-0 truncate">{errorDetail(record)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Full history: <code>{data.errorLog.path}</code>
         </p>
       </section>
 
