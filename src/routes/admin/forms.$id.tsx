@@ -16,6 +16,7 @@ import {
 } from '@tanstack/react-router'
 import { useState } from 'react'
 
+import { AdminShell } from '#/components/admin-shell.tsx'
 import { currentOperator } from '#/lib/admin/guard.ts'
 import {
   closeForm,
@@ -28,10 +29,7 @@ import {
   publishForm,
   saveFormDraft,
 } from '#/lib/forms/repository.ts'
-import type {
-  AdminForm,
-  FormResultsView,
-} from '#/lib/forms/repository.ts'
+import type { AdminForm, FormResultsView } from '#/lib/forms/repository.ts'
 import { FORM_LIMITS, FORM_SCALE_VALUES } from '#/lib/forms/validation.ts'
 import type { FormQuestionView } from '#/lib/forms/validation.ts'
 import { FormFields } from '#/components/form-fields.tsx'
@@ -146,7 +144,12 @@ const csvAction = createServerFn({ method: 'POST' })
       if (!operator) return { error: 'Not found.', filename: null, csv: null }
 
       const file = await getFormCsv(data.id)
-      if (!file) return { error: 'That form no longer exists.', filename: null, csv: null }
+      if (!file)
+        return {
+          error: 'That form no longer exists.',
+          filename: null,
+          csv: null,
+        }
 
       return { error: null, filename: file.filename, csv: file.csv }
     },
@@ -375,9 +378,7 @@ function FormBuilderPage() {
 
   async function onCopyLink() {
     try {
-      await navigator.clipboard.writeText(
-        `${window.location.origin}/ask/${id}`,
-      )
+      await navigator.clipboard.writeText(`${window.location.origin}/ask/${id}`)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 2_000)
     } catch {
@@ -394,36 +395,33 @@ function FormBuilderPage() {
       prompt: question.prompt.trim() || 'Untitled question',
       help: question.help.trim() || null,
       required: question.required,
-      options: question.options
-        .map((option) => option.trim())
-        .filter(Boolean),
+      options: question.options.map((option) => option.trim()).filter(Boolean),
       scaleLowLabel: question.scaleLowLabel.trim() || null,
       scaleHighLabel: question.scaleHighLabel.trim() || null,
     }),
   )
 
   return (
-    <div className="mx-auto max-w-3xl p-8">
-      <header className="flex flex-wrap items-baseline justify-between gap-3">
-        <div>
-          <Link
-            to="/admin/forms"
-            className="text-xs text-muted-foreground hover:underline"
-          >
-            ← All forms
-          </Link>
-          <h1 className="mt-1 text-2xl font-bold">
-            {readOnly ? form.title : 'Edit form'}
-          </h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {form.status === 'draft'
-              ? 'Draft — editable until you publish.'
-              : form.status === 'open'
-                ? 'Published — questions are frozen. Close it when you have enough answers.'
-                : `Closed${form.closedAt ? ` on ${form.closedAt.toLocaleDateString()}` : ''}.`}
-          </p>
-        </div>
-        <div className="flex flex-wrap items-baseline gap-3 text-xs">
+    <AdminShell
+      active="forms"
+      eyebrow={
+        <Link
+          to="/admin/forms"
+          className="text-xs text-muted-foreground hover:underline"
+        >
+          ← All forms
+        </Link>
+      }
+      title={readOnly ? form.title : 'Edit form'}
+      description={
+        form.status === 'draft'
+          ? 'Draft — editable until you publish.'
+          : form.status === 'open'
+            ? 'Published — questions are frozen. Close it when you have enough answers.'
+            : `Closed${form.closedAt ? ` on ${form.closedAt.toLocaleDateString()}` : ''}.`
+      }
+      actions={
+        <div className="flex flex-wrap items-center gap-3 text-xs">
           {form.status !== 'draft' ? (
             <button
               onClick={() => void onCopyLink()}
@@ -455,8 +453,8 @@ function FormBuilderPage() {
             </button>
           ) : null}
         </div>
-      </header>
-
+      }
+    >
       {error ? (
         <p
           role="alert"
@@ -471,28 +469,36 @@ function FormBuilderPage() {
         </p>
       ) : null}
 
-      <div className="mt-6 flex gap-2 text-sm">
+      <div
+        role="tablist"
+        aria-label="Form sections"
+        className="inline-flex gap-1 self-start rounded-lg border border-border bg-muted/40 p-1"
+      >
         <button
           onClick={() => setTab('questions')}
+          aria-selected={tab === 'questions'}
+          role="tab"
           className={
             tab === 'questions'
-              ? 'rounded-md bg-muted px-3 py-1 font-medium'
-              : 'rounded-md px-3 py-1 text-muted-foreground hover:underline'
+              ? 'rounded-md bg-card px-3 py-1 text-xs font-semibold text-foreground shadow-sm'
+              : 'rounded-md px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground'
           }
         >
           Questions
         </button>
         <button
           onClick={() => setTab('results')}
+          aria-selected={tab === 'results'}
+          role="tab"
           className={
             tab === 'results'
-              ? 'rounded-md bg-muted px-3 py-1 font-medium'
-              : 'rounded-md px-3 py-1 text-muted-foreground hover:underline'
+              ? 'rounded-md bg-card px-3 py-1 text-xs font-semibold text-foreground shadow-sm'
+              : 'rounded-md px-3 py-1 text-xs font-medium text-muted-foreground hover:text-foreground'
           }
         >
           Results{' '}
           {results ? (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-[11px] text-muted-foreground">
               ({results.counts.submitted})
             </span>
           ) : null}
@@ -500,7 +506,7 @@ function FormBuilderPage() {
       </div>
 
       {tab === 'questions' ? (
-        <div className="mt-6">
+        <div className="rounded-lg border border-border bg-card p-4">
           <label className="block text-xs text-muted-foreground">
             Title
             <input
@@ -590,10 +596,7 @@ function FormBuilderPage() {
 
           <ol className="mt-2 space-y-3">
             {questions.map((question, index) => (
-              <li
-                key={index}
-                className="rounded-md border border-border p-3"
-              >
+              <li key={index} className="rounded-md border border-border p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs text-muted-foreground">
                     {index + 1}.
@@ -677,15 +680,19 @@ function FormBuilderPage() {
                 question.type === 'multi-choice' ? (
                   <div className="mt-2 space-y-1">
                     {question.options.map((option, optionIndex) => (
-                      <div key={optionIndex} className="flex items-center gap-2">
+                      <div
+                        key={optionIndex}
+                        className="flex items-center gap-2"
+                      >
                         <input
                           value={option}
                           onChange={(event) =>
                             updateQuestion(index, {
-                              options: question.options.map((entry, position) =>
-                                position === optionIndex
-                                  ? event.target.value
-                                  : entry,
+                              options: question.options.map(
+                                (entry, position) =>
+                                  position === optionIndex
+                                    ? event.target.value
+                                    : entry,
                               ),
                             })
                           }
@@ -710,7 +717,8 @@ function FormBuilderPage() {
                         ) : null}
                       </div>
                     ))}
-                    {!readOnly && question.options.length < FORM_LIMITS.options ? (
+                    {!readOnly &&
+                    question.options.length < FORM_LIMITS.options ? (
                       <button
                         onClick={() =>
                           updateQuestion(index, {
@@ -809,12 +817,14 @@ function FormBuilderPage() {
           ) : null}
         </div>
       ) : (
-        <ResultsPanel
-          results={results}
-          onDownloadCsv={() => void onDownloadCsv()}
-        />
+        <div className="rounded-lg border border-border bg-card p-4">
+          <ResultsPanel
+            results={results}
+            onDownloadCsv={() => void onDownloadCsv()}
+          />
+        </div>
       )}
-    </div>
+    </AdminShell>
   )
 }
 
@@ -826,9 +836,7 @@ function ResultsPanel({
   onDownloadCsv: () => void
 }) {
   if (!results) {
-    return (
-      <p className="mt-6 text-sm text-muted-foreground">No results yet.</p>
-    )
+    return <p className="text-sm text-muted-foreground">No results yet.</p>
   }
 
   const { counts, tallies, status } = results
@@ -836,7 +844,7 @@ function ResultsPanel({
     counts.shown > 0 ? Math.round((counts.submitted / counts.shown) * 100) : 0
 
   return (
-    <div className="mt-6">
+    <div>
       <div className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
         {(
           [
@@ -884,8 +892,7 @@ function ResultsPanel({
               {tally.prompt}
             </h3>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {tally.answered}{' '}
-              {tally.answered === 1 ? 'answer' : 'answers'}
+              {tally.answered} {tally.answered === 1 ? 'answer' : 'answers'}
             </p>
 
             {tally.counts ? (
@@ -919,9 +926,7 @@ function ResultsPanel({
               <div className="mt-2">
                 <p className="text-sm">
                   Average{' '}
-                  <span className="font-semibold">
-                    {tally.average ?? '—'}
-                  </span>{' '}
+                  <span className="font-semibold">{tally.average ?? '—'}</span>{' '}
                   / 5
                 </p>
                 <ul className="mt-1 space-y-1">

@@ -19,6 +19,8 @@ import { createServerFn } from '@tanstack/react-start'
 import { createFileRoute, notFound, useRouter } from '@tanstack/react-router'
 import { useState } from 'react'
 
+import { AdminShell, adminSectionFrom } from '#/components/admin-shell.tsx'
+import type { AdminSectionKey } from '#/components/admin-shell.tsx'
 import { currentOperator } from '#/lib/admin/guard.ts'
 import { loadAdminData } from '#/lib/admin/service.ts'
 import type { AdminData } from '#/lib/admin/service.ts'
@@ -275,6 +277,14 @@ const feedbackStatusAction = createServerFn({ method: 'POST' })
   })
 
 export const Route = createFileRoute('/admin/')({
+  // The open section lives in the URL so a queue can be linked to, and so the
+  // Forms page can keep the same column and come back to one.
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { section?: AdminSectionKey } => {
+    const section = adminSectionFrom(search.section)
+    return section ? { section } : {}
+  },
   loader: async () => {
     const state = await loadAdminPage()
     if (!state.allowed) throw notFound()
@@ -286,6 +296,7 @@ export const Route = createFileRoute('/admin/')({
 
 function AdminPage() {
   const { data } = Route.useLoaderData()
+  const { section: panel = 'overview' } = Route.useSearch()
   const router = useRouter()
 
   const [error, setError] = useState<string | null>(null)
@@ -369,19 +380,21 @@ function AdminPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl p-8">
-      <header className="flex items-baseline justify-between">
-        <h1 className="text-2xl font-bold">Nuntia beta</h1>
-        <div className="flex items-baseline gap-4 text-xs">
-          <a href="/admin/forms" className="text-primary hover:underline">
-            Forms
-          </a>
-          <a href="/" className="text-muted-foreground hover:underline">
-            Back to the app
-          </a>
-        </div>
-      </header>
-
+    <AdminShell
+      active={panel}
+      counts={{
+        requests: data.requests.filter((row) => row.status === 'pending')
+          .length,
+      }}
+      actions={
+        panel === 'overview' ? (
+          <span className="text-xs text-muted-foreground">
+            {data.people.length} people · {data.requests.length} requests ·{' '}
+            {data.invites.length} invites
+          </span>
+        ) : undefined
+      }
+    >
       {error ? (
         <p
           role="alert"
@@ -410,402 +423,418 @@ function AdminPage() {
         </div>
       ) : null}
 
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">Funnel</h2>
-        <div className="mt-2 grid grid-cols-3 gap-2 text-sm md:grid-cols-6">
-          {(
-            [
-              ['Requested', data.funnel.requested],
-              ['Approved', data.funnel.approved],
-              ['Redeemed', data.funnel.redeemed],
-              ['Activated', data.funnel.activated],
-              ['Used', data.funnel.used],
-              ['Returned', data.funnel.returned],
-            ] as const
-          ).map(([labelText, value]) => (
-            <div
-              key={labelText}
-              className="rounded-md border border-border p-2"
-            >
-              <div className="text-xs text-muted-foreground">{labelText}</div>
-              <div className="text-lg font-semibold">{value}</div>
-            </div>
-          ))}
-        </div>
-      </section>
+      {panel === 'overview' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">Funnel</h2>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-sm md:grid-cols-6">
+            {(
+              [
+                ['Requested', data.funnel.requested],
+                ['Approved', data.funnel.approved],
+                ['Redeemed', data.funnel.redeemed],
+                ['Activated', data.funnel.activated],
+                ['Used', data.funnel.used],
+                ['Returned', data.funnel.returned],
+              ] as const
+            ).map(([labelText, value]) => (
+              <div
+                key={labelText}
+                className="rounded-md border border-border p-2"
+              >
+                <div className="text-xs text-muted-foreground">{labelText}</div>
+                <div className="text-lg font-semibold">{value}</div>
+              </div>
+            ))}
+          </div>{' '}
+        </section>
+      ) : null}
 
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">
-          Requests{' '}
-          <span className="font-normal text-muted-foreground">
-            ({data.requests.filter((row) => row.status === 'pending').length}{' '}
-            pending)
-          </span>
-        </h2>
+      {panel === 'requests' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">
+            Requests{' '}
+            <span className="font-normal text-muted-foreground">
+              ({data.requests.filter((row) => row.status === 'pending').length}{' '}
+              pending)
+            </span>
+          </h2>
 
-        <div className="mt-2 space-y-2">
-          {data.requests.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing yet.</p>
-          ) : null}
+          <div className="mt-2 space-y-2">
+            {data.requests.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing yet.</p>
+            ) : null}
 
-          {data.requests.map((request) => (
-            <article
-              key={request.id}
-              className="rounded-md border border-border p-3 text-sm"
-            >
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <div>
-                  <span className="font-medium">{request.email}</span>
-                  {request.name ? (
-                    <span className="text-muted-foreground">
-                      {' '}
-                      · {request.name}
+            {data.requests.map((request) => (
+              <article
+                key={request.id}
+                className="rounded-md border border-border p-3 text-sm"
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div>
+                    <span className="font-medium">{request.email}</span>
+                    {request.name ? (
+                      <span className="text-muted-foreground">
+                        {' '}
+                        · {request.name}
+                      </span>
+                    ) : null}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {request.createdAt.toLocaleDateString()}
                     </span>
-                  ) : null}
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    {request.createdAt.toLocaleDateString()}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {request.status}
+                    {request.source ? ` · ${request.source}` : ''}
                   </span>
                 </div>
-                <span className="text-xs text-muted-foreground">
-                  {request.status}
-                  {request.source ? ` · ${request.source}` : ''}
-                </span>
-              </div>
 
-              <p className="mt-2 whitespace-pre-wrap text-muted-foreground">
-                {request.note}
-              </p>
+                <p className="mt-2 whitespace-pre-wrap text-muted-foreground">
+                  {request.note}
+                </p>
 
-              {request.status === 'pending' ? (
-                <div className="mt-2 flex gap-2">
-                  <button
-                    onClick={() => void onApprove(request.id)}
-                    className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground"
-                  >
-                    Approve and email
-                  </button>
-                  <button
-                    onClick={() => void onDecline(request.id)}
-                    className="rounded-md border border-border px-3 py-1 text-xs"
-                  >
-                    Decline
-                  </button>
-                </div>
-              ) : null}
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">Invites</h2>
-
-        <form
-          onSubmit={(event) => void onCreate(event)}
-          className="mt-2 space-y-2"
-        >
-          <div className="flex flex-wrap gap-2">
-            <input
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
-              placeholder="Who it is for"
-              className="min-w-48 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-            />
-            <input
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="Email (optional, locks it)"
-              className="min-w-48 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-            />
-            <input
-              type="number"
-              min={1}
-              max={100}
-              value={uses}
-              onChange={(event) => setUses(Number(event.target.value))}
-              className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-            />
-            <button
-              type="submit"
-              className="rounded-md border border-border px-3 py-1.5 text-sm"
-            >
-              Create invite
-            </button>
+                {request.status === 'pending' ? (
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => void onApprove(request.id)}
+                      className="rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground"
+                    >
+                      Approve and email
+                    </button>
+                    <button
+                      onClick={() => void onDecline(request.id)}
+                      className="rounded-md border border-border px-3 py-1 text-xs"
+                    >
+                      Decline
+                    </button>
+                  </div>
+                ) : null}
+              </article>
+            ))}
           </div>
-        </form>
+        </section>
+      ) : null}
 
-        <div className="mt-3 overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="text-xs text-muted-foreground">
-              <tr>
-                <th className="py-1 pr-3">Label</th>
-                <th className="py-1 pr-3">Email</th>
-                <th className="py-1 pr-3">Redeemed</th>
-                <th className="py-1 pr-3">Activated</th>
-                <th className="py-1 pr-3">State</th>
-                <th className="py-1">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.invites.map((invite) => (
-                <tr key={invite.id} className="border-t border-border">
-                  <td className="py-1 pr-3">{invite.label ?? '—'}</td>
-                  <td className="py-1 pr-3">{invite.email ?? 'open'}</td>
-                  <td className="py-1 pr-3">
-                    {invite.redeemed}/{invite.maxUses}
-                  </td>
-                  <td className="py-1 pr-3">{invite.activated}</td>
-                  <td className="py-1 pr-3">
-                    {invite.revokedAt
-                      ? 'revoked'
-                      : invite.expiresAt &&
-                          invite.expiresAt.getTime() <= Date.now()
-                        ? 'expired'
-                        : invite.notifiedAt
-                          ? 'sent'
-                          : invite.notifyError
-                            ? 'send failed'
-                            : 'issued'}
-                  </td>
-                  <td className="py-1 whitespace-nowrap">
-                    {/* The code is stored encrypted as well as hashed, so the
+      {panel === 'invites' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">Invites</h2>
+
+          <form
+            onSubmit={(event) => void onCreate(event)}
+            className="mt-2 space-y-2"
+          >
+            <div className="flex flex-wrap gap-2">
+              <input
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
+                placeholder="Who it is for"
+                className="min-w-48 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <input
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="Email (optional, locks it)"
+                className="min-w-48 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={uses}
+                onChange={(event) => setUses(Number(event.target.value))}
+                className="w-20 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              />
+              <button
+                type="submit"
+                className="rounded-md border border-border px-3 py-1.5 text-sm"
+              >
+                Create invite
+              </button>
+            </div>
+          </form>
+
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="py-1 pr-3">Label</th>
+                  <th className="py-1 pr-3">Email</th>
+                  <th className="py-1 pr-3">Redeemed</th>
+                  <th className="py-1 pr-3">Activated</th>
+                  <th className="py-1 pr-3">State</th>
+                  <th className="py-1">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.invites.map((invite) => (
+                  <tr key={invite.id} className="border-t border-border">
+                    <td className="py-1 pr-3">{invite.label ?? '—'}</td>
+                    <td className="py-1 pr-3">{invite.email ?? 'open'}</td>
+                    <td className="py-1 pr-3">
+                      {invite.redeemed}/{invite.maxUses}
+                    </td>
+                    <td className="py-1 pr-3">{invite.activated}</td>
+                    <td className="py-1 pr-3">
+                      {invite.revokedAt
+                        ? 'revoked'
+                        : invite.expiresAt &&
+                            invite.expiresAt.getTime() <= Date.now()
+                          ? 'expired'
+                          : invite.notifiedAt
+                            ? 'sent'
+                            : invite.notifyError
+                              ? 'send failed'
+                              : 'issued'}
+                    </td>
+                    <td className="py-1 whitespace-nowrap">
+                      {/* The code is stored encrypted as well as hashed, so the
                         link can be handed over again without minting a new
                         one. Older invites (created before the key was set)
                         have no code and only offer a replacement. */}
-                    {invite.link ? (
+                      {invite.link ? (
+                        <button
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(invite.link!)
+                              setCopied(invite.id)
+                            } catch {
+                              setError(
+                                'The browser refused the clipboard — use New link and copy it from there.',
+                              )
+                            }
+                          }}
+                          className="text-xs text-primary hover:underline"
+                        >
+                          {copied === invite.id ? 'Copied' : 'Copy link'}
+                        </button>
+                      ) : null}
                       <button
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(invite.link!)
-                            setCopied(invite.id)
-                          } catch {
-                            setError(
-                              'The browser refused the clipboard — use New link and copy it from there.',
-                            )
-                          }
-                        }}
-                        className="text-xs text-primary hover:underline"
+                        onClick={() => void onNewLink(invite.id)}
+                        className="ml-3 text-xs text-primary hover:underline"
                       >
-                        {copied === invite.id ? 'Copied' : 'Copy link'}
+                        New link
                       </button>
-                    ) : null}
-                    <button
-                      onClick={() => void onNewLink(invite.id)}
-                      className="ml-3 text-xs text-primary hover:underline"
-                    >
-                      New link
-                    </button>
-                    {!invite.revokedAt ? (
+                      {!invite.revokedAt ? (
+                        <button
+                          onClick={async () => {
+                            const result = await revokeAction({
+                              data: { inviteId: invite.id },
+                            })
+                            if (result.error) setError(result.error)
+                            await refresh()
+                          }}
+                          className="ml-3 text-xs text-muted-foreground hover:underline"
+                        >
+                          Revoke
+                        </button>
+                      ) : null}
                       <button
                         onClick={async () => {
-                          const result = await revokeAction({
+                          if (
+                            !window.confirm(
+                              'Delete this invite? Its redemptions disappear from the funnel too.',
+                            )
+                          ) {
+                            return
+                          }
+
+                          const result = await deleteAction({
                             data: { inviteId: invite.id },
                           })
                           if (result.error) setError(result.error)
                           await refresh()
                         }}
-                        className="ml-3 text-xs text-muted-foreground hover:underline"
+                        className="ml-3 text-xs text-destructive hover:underline"
                       >
-                        Revoke
+                        Delete
                       </button>
-                    ) : null}
-                    <button
-                      onClick={async () => {
-                        if (
-                          !window.confirm(
-                            'Delete this invite? Its redemptions disappear from the funnel too.',
-                          )
-                        ) {
-                          return
-                        }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
-                        const result = await deleteAction({
-                          data: { inviteId: invite.id },
-                        })
-                        if (result.error) setError(result.error)
-                        await refresh()
-                      }}
-                      className="ml-3 text-xs text-destructive hover:underline"
-                    >
-                      Delete
-                    </button>
-                  </td>
+      {panel === 'people' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">People</h2>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr>
+                  <th className="py-1 pr-3">Person</th>
+                  <th className="py-1 pr-3">Role</th>
+                  <th className="py-1 pr-3">Mailboxes</th>
+                  <th className="py-1 pr-3">Threads</th>
+                  <th className="py-1 pr-3">Last active</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+              </thead>
+              <tbody>
+                {data.people.map((person) => (
+                  <tr key={person.id} className="border-t border-border">
+                    <td className="py-1 pr-3">{person.id}</td>
+                    <td className="py-1 pr-3">{person.role}</td>
+                    <td className="py-1 pr-3">{person.mailboxes}</td>
+                    <td className="py-1 pr-3">{person.threads}</td>
+                    <td className="py-1 pr-3">
+                      {person.lastActiveAt
+                        ? person.lastActiveAt.toLocaleDateString()
+                        : 'never'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">People</h2>
-        <div className="mt-2 overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="text-xs text-muted-foreground">
-              <tr>
-                <th className="py-1 pr-3">Person</th>
-                <th className="py-1 pr-3">Role</th>
-                <th className="py-1 pr-3">Mailboxes</th>
-                <th className="py-1 pr-3">Threads</th>
-                <th className="py-1 pr-3">Last active</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.people.map((person) => (
-                <tr key={person.id} className="border-t border-border">
-                  <td className="py-1 pr-3">{person.id}</td>
-                  <td className="py-1 pr-3">{person.role}</td>
-                  <td className="py-1 pr-3">{person.mailboxes}</td>
-                  <td className="py-1 pr-3">{person.threads}</td>
-                  <td className="py-1 pr-3">
-                    {person.lastActiveAt
-                      ? person.lastActiveAt.toLocaleDateString()
-                      : 'never'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">AI activity</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Every call to Jev or the topic model, newest last. A failure the rules
-          paper over is recorded here too, which is what makes &ldquo;the AI did
-          nothing&rdquo; answerable. Operator-only: the records carry no user
-          id, so this cannot be scoped to one person.
-        </p>
-
-        {data.aiLog.events.length === 0 ? (
-          <p className="mt-3 text-xs text-muted-foreground">
-            Nothing logged yet. Sync or re-analyse a conversation.
+      {panel === 'activity' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">AI activity</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Every call to Jev or the topic model, newest last. A failure the
+            rules paper over is recorded here too, which is what makes
+            &ldquo;the AI did nothing&rdquo; answerable. Operator-only: the
+            records carry no user id, so this cannot be scoped to one person.
           </p>
-        ) : (
-          <ul className="mt-3 space-y-1">
-            {data.aiLog.events.map((event, index) => (
-              <li
-                key={`${event.at}-${index}`}
-                className={
-                  event.outcome === 'ok'
-                    ? 'flex items-baseline gap-2 text-[11px] text-muted-foreground'
-                    : 'flex items-baseline gap-2 text-[11px] text-destructive'
-                }
-              >
-                <time dateTime={event.at} className="shrink-0">
-                  {event.at.slice(11, 19)}
-                </time>
-                <span className="shrink-0 font-medium">{event.service}</span>
-                <span className="shrink-0">
-                  {event.outcome}
-                  {event.status ? ` ${event.status}` : ''}
-                </span>
-                {event.model ? (
-                  <span className="shrink-0 text-muted-foreground/70">
-                    {event.model}
-                  </span>
-                ) : null}
-                {event.detail ? (
-                  <span className="min-w-0 truncate">{event.detail}</span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
 
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          Full history: <code>{data.aiLog.path}</code>
-        </p>
-      </section>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">Recent errors</h2>
-        <p className="mt-1 text-xs text-muted-foreground">
-          The last failures written to <code>app.log</code>, newest last: a
-          request that threw, a sync that stopped, or a read mark the mailbox
-          refused. This is what a 502 leaves behind, so it can be read without a
-          shell on the server.
-        </p>
-
-        {data.errorLog.events.length === 0 ? (
-          <p className="mt-3 text-xs text-muted-foreground">
-            Nothing has failed since the log was last rotated.
-          </p>
-        ) : (
-          <ul className="mt-3 space-y-1">
-            {data.errorLog.events.map((record, index) => (
-              <li
-                key={`${record.at}-${index}`}
-                className="flex items-baseline gap-2 text-[11px] text-destructive"
-              >
-                <time dateTime={record.at} className="shrink-0">
-                  {record.at.slice(11, 19)}
-                </time>
-                <span className="shrink-0 font-medium">{record.event}</span>
-                <span className="min-w-0 truncate">{errorDetail(record)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        <p className="mt-3 text-[11px] text-muted-foreground">
-          Full history: <code>{data.errorLog.path}</code>
-        </p>
-      </section>
-
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold">Feedback</h2>
-        <div className="mt-2 space-y-2">
-          {data.feedback.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Nothing yet.</p>
-          ) : null}
-
-          {data.feedback.map((row) => (
-            <article
-              key={row.id}
-              className="rounded-md border border-border p-3 text-sm"
-            >
-              <div className="flex items-baseline justify-between gap-2 text-xs text-muted-foreground">
-                <span>
-                  {row.email ?? row.userId}
-                  {row.rating ? ` · ${row.rating}/5` : ''}
-                </span>
-                <span>{row.createdAt.toLocaleDateString()}</span>
-              </div>
-              <p className="mt-1 whitespace-pre-wrap">{row.message}</p>
-              {row.context ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {row.context}
-                </p>
-              ) : null}
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <select
-                  value={row.status}
-                  onChange={async (event) => {
-                    const result = await feedbackStatusAction({
-                      data: {
-                        id: row.id,
-                        status: event.target.value as FeedbackStatus,
-                        note: null,
-                      },
-                    })
-                    if (result.error) setError(result.error)
-                    await refresh()
-                  }}
-                  className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+          {data.aiLog.events.length === 0 ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Nothing logged yet. Sync or re-analyse a conversation.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-1">
+              {data.aiLog.events.map((event, index) => (
+                <li
+                  key={`${event.at}-${index}`}
+                  className={
+                    event.outcome === 'ok'
+                      ? 'flex items-baseline gap-2 text-[11px] text-muted-foreground'
+                      : 'flex items-baseline gap-2 text-[11px] text-destructive'
+                  }
                 >
-                  {FEEDBACK_STATUSES.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-    </div>
+                  <time dateTime={event.at} className="shrink-0">
+                    {event.at.slice(11, 19)}
+                  </time>
+                  <span className="shrink-0 font-medium">{event.service}</span>
+                  <span className="shrink-0">
+                    {event.outcome}
+                    {event.status ? ` ${event.status}` : ''}
+                  </span>
+                  {event.model ? (
+                    <span className="shrink-0 text-muted-foreground/70">
+                      {event.model}
+                    </span>
+                  ) : null}
+                  {event.detail ? (
+                    <span className="min-w-0 truncate">{event.detail}</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Full history: <code>{data.aiLog.path}</code>
+          </p>
+        </section>
+      ) : null}
+
+      {panel === 'errors' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">Recent errors</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            The last failures written to <code>app.log</code>, newest last: a
+            request that threw, a sync that stopped, or a read mark the mailbox
+            refused. This is what a 502 leaves behind, so it can be read without
+            a shell on the server.
+          </p>
+
+          {data.errorLog.events.length === 0 ? (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Nothing has failed since the log was last rotated.
+            </p>
+          ) : (
+            <ul className="mt-3 space-y-1">
+              {data.errorLog.events.map((record, index) => (
+                <li
+                  key={`${record.at}-${index}`}
+                  className="flex items-baseline gap-2 text-[11px] text-destructive"
+                >
+                  <time dateTime={record.at} className="shrink-0">
+                    {record.at.slice(11, 19)}
+                  </time>
+                  <span className="shrink-0 font-medium">{record.event}</span>
+                  <span className="min-w-0 truncate">
+                    {errorDetail(record)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            Full history: <code>{data.errorLog.path}</code>
+          </p>
+        </section>
+      ) : null}
+
+      {panel === 'feedback' ? (
+        <section className="rounded-lg border border-border bg-card p-4">
+          <h2 className="text-sm font-semibold">Feedback</h2>
+          <div className="mt-2 space-y-2">
+            {data.feedback.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Nothing yet.</p>
+            ) : null}
+
+            {data.feedback.map((row) => (
+              <article
+                key={row.id}
+                className="rounded-md border border-border p-3 text-sm"
+              >
+                <div className="flex items-baseline justify-between gap-2 text-xs text-muted-foreground">
+                  <span>
+                    {row.email ?? row.userId}
+                    {row.rating ? ` · ${row.rating}/5` : ''}
+                  </span>
+                  <span>{row.createdAt.toLocaleDateString()}</span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap">{row.message}</p>
+                {row.context ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {row.context}
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <select
+                    value={row.status}
+                    onChange={async (event) => {
+                      const result = await feedbackStatusAction({
+                        data: {
+                          id: row.id,
+                          status: event.target.value as FeedbackStatus,
+                          note: null,
+                        },
+                      })
+                      if (result.error) setError(result.error)
+                      await refresh()
+                    }}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs"
+                  >
+                    {FEEDBACK_STATUSES.map((status) => (
+                      <option key={status} value={status}>
+                        {status}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </AdminShell>
   )
 }

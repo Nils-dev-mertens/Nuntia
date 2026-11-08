@@ -57,6 +57,7 @@ export function Compose({
   suggestions,
   submit,
   loadStyle,
+  embedded = false,
 }: {
   accounts: ComposeAccount[]
   /** Addresses from the user's own mail, newest first. */
@@ -71,6 +72,8 @@ export function Compose({
     accountId: string
     recipient: string | null
   }) => Promise<ComposeStyle>
+  /** Inside the inbox window: no page frame, no second "New message" title. */
+  embedded?: boolean
 }) {
   const [accountId, setAccountId] = useState(accounts[0]?.id ?? '')
   const [to, setTo] = useState('')
@@ -220,20 +223,28 @@ export function Compose({
   const addsSomething = Boolean(style.greeting || style.signature)
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-2xl flex-col p-8">
-      <header className="flex items-baseline justify-between gap-4">
-        <h1 className="text-2xl font-bold">New message</h1>
-        <a
-          href="/"
-          className="text-xs font-medium text-primary hover:underline"
-        >
-          ← Back to inbox
-        </a>
-      </header>
+    <div
+      className={
+        embedded
+          ? 'flex flex-col p-4'
+          : 'mx-auto flex min-h-screen max-w-2xl flex-col p-8'
+      }
+    >
+      {embedded ? null : (
+        <header className="flex items-baseline justify-between gap-4">
+          <h1 className="text-2xl font-bold">New message</h1>
+          <a
+            href="/"
+            className="text-xs font-medium text-primary hover:underline"
+          >
+            ← Back to inbox
+          </a>
+        </header>
+      )}
 
       <form
         onSubmit={(event) => void onSubmit(event)}
-        className="mt-6 space-y-2"
+        className={embedded ? 'space-y-2' : 'mt-6 space-y-2'}
       >
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="w-12 shrink-0">From</span>
@@ -325,11 +336,17 @@ export function Compose({
           />
         </label>
 
+        {/*
+         * Not `required`: an attachment-only message is allowed below, and the
+         * browser's own validation would have blocked that send before the
+         * check could run.
+         */}
         <textarea
-          required
           value={body}
           onChange={(event) => setBody(event.target.value)}
           onKeyDown={(event) => {
+            // An IME uses Enter to accept a candidate; that must not send.
+            if (event.nativeEvent.isComposing) return
             // Ctrl/Cmd+Enter sends; a plain Enter must stay a newline here.
             if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
               event.preventDefault()

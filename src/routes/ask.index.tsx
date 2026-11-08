@@ -6,27 +6,13 @@
  * dismissed question is still one click away if the person changes their mind.
  */
 
-import { createServerFn } from '@tanstack/react-start'
 import { Link, createFileRoute, redirect } from '@tanstack/react-router'
 
-import { getSession } from '#/lib/auth/index.ts'
-import { listOpenFormsForUser } from '#/lib/forms/repository.ts'
-import type { OpenForm } from '#/lib/forms/repository.ts'
-
-const loadOpenForms = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<
-    { signedIn: false } | { signedIn: true; forms: OpenForm[] }
-  > => {
-    const session = await getSession()
-    if (!session) return { signedIn: false }
-
-    return { signedIn: true, forms: await listOpenFormsForUser(session.userId) }
-  },
-)
+import { listOpenQuestions } from '#/lib/forms/ask-actions.ts'
 
 export const Route = createFileRoute('/ask/')({
   loader: async () => {
-    const state = await loadOpenForms()
+    const state = await listOpenQuestions()
     if (!state.signedIn) throw redirect({ to: '/sign-in' })
 
     return { forms: state.forms }

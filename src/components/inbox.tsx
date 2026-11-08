@@ -7,7 +7,13 @@
 
 import { Fragment, useEffect, useRef, useState } from 'react'
 import type { MouseEvent, ReactNode } from 'react'
-import { Check, ChevronDown, ChevronRight, GripVertical } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  GripVertical,
+} from 'lucide-react'
 
 import type { ConversationState } from '#/db/schema.ts'
 import type {
@@ -121,6 +127,40 @@ function byImportance(a: ConversationSummary, b: ConversationSummary): number {
   const band = importanceBand(b.importance) - importanceBand(a.importance)
   if (band !== 0) return band
   return Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt)
+}
+
+/**
+ * Newest mail first, importance ignored.
+ *
+ * The inbox's default order is for triage: the mail that needs a decision sits
+ * on top even when it arrived yesterday. This is the other honest question —
+ * what came in last — so a thread answered late cannot hide above one that has
+ * just landed, and the sections stay put: only the order inside them changes.
+ */
+function byDate(a: ConversationSummary, b: ConversationSummary): number {
+  return Date.parse(b.lastMessageAt) - Date.parse(a.lastMessageAt)
+}
+
+/** Which of the two orders the list is showing. */
+type InboxSort = 'importance' | 'chronological'
+
+/**
+ * The chosen order survives a reload.
+ *
+ * A preference rather than page state: someone who reads their mail
+ * newest-first should not have to say so on every visit, and someone who triages
+ * by importance should get that default without asking.
+ */
+const SORT_STORAGE_KEY = 'nuntia.inbox.sort'
+
+/** The stored order, or null when there is none or it is not one we know. */
+function readStoredSort(): InboxSort | null {
+  try {
+    const value = window.localStorage.getItem(SORT_STORAGE_KEY)
+    return value === 'importance' || value === 'chronological' ? value : null
+  } catch {
+    return null
+  }
 }
 
 /** The threads the user has handled, in their own section. */
@@ -323,6 +363,10 @@ function AutomatedRow({
       <Link
         to="/conversations/$providerThreadId"
         params={{ providerThreadId: conversation.providerThreadId }}
+        // Opening a thread must not scroll the list back to the top: the row
+        // that was clicked is the one thing that tells you where you are, and
+        // reading three threads in a row is a normal thing to do.
+        resetScroll={false}
         onContextMenu={(event) => onRowMenu(event, conversation)}
         onMouseEnter={() => onRowPreview(conversation)}
         onFocus={() => onRowPreview(conversation)}
@@ -434,6 +478,10 @@ function ConversationRow({
       <Link
         to="/conversations/$providerThreadId"
         params={{ providerThreadId: conversation.providerThreadId }}
+        // Opening a thread must not scroll the list back to the top: the row
+        // that was clicked is the one thing that tells you where you are, and
+        // reading three threads in a row is a normal thing to do.
+        resetScroll={false}
         onContextMenu={(event) => onRowMenu(event, conversation)}
         onMouseEnter={() => onRowPreview(conversation)}
         onFocus={() => onRowPreview(conversation)}
@@ -1197,6 +1245,7 @@ function MailPreviewCard({
           <Link
             to="/conversations/$providerThreadId"
             params={{ providerThreadId: preview.providerThreadId }}
+            resetScroll={false}
             className="inline-flex h-8 shrink-0 items-center rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
           >
             Open
@@ -1218,8 +1267,14 @@ export function Inbox({
   payload,
   formPrompt = null,
   openFormCount = 0,
+  embedded = false,
+  section,
+  onSectionChange,
+  hidePreview = false,
+  onCompose,
   onResync,
   onDismissForm,
+  onOpenQuestions,
   onSearch,
   onSetDone,
   onSetState,
@@ -1235,9 +1290,31 @@ export function Inbox({
   formPrompt?: InboxFormPrompt | null
   /** How many forms are open, including dismissed and already-answered ones. */
   openFormCount?: number
+  /**
+   * Render inside the app shell.
+   *
+   * The shell already carries the brand, the message button and the section
+   * list, so the page's own header is reduced to what only the list knows; on a
+   * narrow screen, where the shell's sidebar is hidden, it comes back.
+   */
+  embedded?: boolean
+  /** The section being viewed, when the shell's sidebar owns the choice. */
+  section?: string
+  onSectionChange?: (key: string) => void
+  /**
+   * Hide the hover preview column.
+   *
+   * The thread panel takes that side when a conversation is open; two right-hand
+   * columns would leave the list with no room of its own.
+   */
+  hidePreview?: boolean
+  /** Opens the compose window; without it the page link is used instead. */
+  onCompose?: () => void
   /** Present when the app can rebuild from Gmail; absent in isolation/tests. */
   onResync?: () => Promise<{ error: string | null }>
   onDismissForm?: (formId: string) => Promise<{ error: string | null }>
+  /** Opens the in-app questions window; without it the page link is used. */
+  onOpenQuestions?: (formId?: string) => void
   /**
    * Search every synced thread, including the ones the ten-per-section view is
    * hiding. Absent in isolation, where the box is not rendered: a search field
@@ -1309,6 +1386,30 @@ export function Inbox({
   const [resyncError, setResyncError] = useState<string | null>(null)
   const [hiddenPromptId, setHiddenPromptId] = useState<string | null>(null)
   const [promptError, setPromptError] = useState<string | null>(null)
+  // Importance is the default because the inbox is a triage list; chronological
+  // is the view for "what actually arrived lately", and it is remembered for
+  // the session only, so the next full load starts from the useful default.
+  const [sort, setSort] = useState<InboxSort>('importance')
+  const bySort = sort === 'chronological' ? byDate : byImportance
+  // Read after mount, not in the initializer: the server has no localStorage,
+  // so a stored "chronological" picked up while hydrating would render
+  // different `aria-pressed` states than the HTML being hydrated. Starting from
+  // the default and correcting in an effect keeps the two renders identical.
+  useEffect(() => {
+    const stored = readStoredSort()
+    if (stored) setSort(stored)
+  }, [])
+
+  /** Change the order, and remember the choice for the next visit. */
+  const chooseSort = (next: InboxSort) => {
+    setSort(next)
+    try {
+      window.localStorage.setItem(SORT_STORAGE_KEY, next)
+    } catch {
+      // Storage can be refused (private mode, a blocked cookie policy). The
+      // order still changes for this page, which is the half that matters now.
+    }
+  }
   const [searchInput, setSearchInput] = useState('')
   const [searchResults, setSearchResults] = useState<{
     query: string
@@ -1319,7 +1420,14 @@ export function Inbox({
   // The request that is allowed to land. A slow answer for an old query must not
   // replace the results for what is in the box now.
   const searchRequest = useRef(0)
-  const [sectionFilter, setSectionFilter] = useState('all')
+  // Controlled when the shell's sidebar drives it: the section now lives beside
+  // the list rather than above it, and the list only has to agree with it.
+  const [localSectionFilter, setLocalSectionFilter] = useState('all')
+  const sectionFilter = section ?? localSectionFilter
+  const setSectionFilter = (key: string) => {
+    setLocalSectionFilter(key)
+    onSectionChange?.(key)
+  }
   const [expandedSections, setExpandedSections] = useState<
     Record<string, boolean>
   >({})
@@ -1568,7 +1676,7 @@ export function Inbox({
    * blanking it would make the column flicker in every gap between cards.
    */
   const showPreview = (conversation: ConversationSummary) => {
-    if (!onPreview) return
+    if (!onPreview || hidePreview) return
     // The column is hidden below `lg`, so there is nothing to fill and no point
     // spending a request on a tap that navigates anyway.
     if (!window.matchMedia('(min-width: 1024px)').matches) return
@@ -1865,9 +1973,7 @@ export function Inbox({
   const sectionsByToken = new Map<string, InboxSection>()
 
   for (const state of STATE_ORDER) {
-    const items = byState(organizationGroups.ungrouped, state).sort(
-      byImportance,
-    )
+    const items = byState(organizationGroups.ungrouped, state).sort(bySort)
     if (items.length === 0) continue
     const section = stateSection(state, items)
     sectionsByToken.set(section.key, section)
@@ -1880,7 +1986,7 @@ export function Inbox({
       title: group.name,
       description: group.description || null,
       dotClass: 'bg-foreground/30',
-      items: [...group.items].sort(byImportance),
+      items: [...group.items].sort(bySort),
       custom: true,
     })
   }
@@ -1928,21 +2034,80 @@ export function Inbox({
     activeFilter === 'all'
       ? sections
       : sections.filter((section) => section.key === activeFilter)
+  /**
+   * Chronological is the traditional inbox: one list, no headings.
+   *
+   * The labels still exist — they filter, and they decide where a thread sits in
+   * importance mode — but this view is about what arrived when, so grouping
+   * would interrupt the only order it promises. Done stays out of it for the same
+   * reason it stays out of the Inbox count: it is mail the user has dealt with.
+   */
+  const flatItems =
+    sort === 'chronological'
+      ? (activeFilter === 'all'
+          ? sections
+              .filter((section) => !section.muted)
+              .flatMap((section) => section.items)
+          : (sections.find((section) => section.key === activeFilter)?.items ??
+            [])
+        )
+          .slice()
+          .sort(byDate)
+      : null
+
   // The order a Shift range follows: what is on screen, top to bottom, with the
   // same per-section cap the list renders under.
-  const renderedOrder = shownSections.flatMap((section) => {
-    const showsAll =
-      activeFilter === section.key ||
-      searchActive ||
-      expandedSections[section.key] === true
-    const items = showsAll
-      ? section.items
-      : section.items.slice(0, SECTION_PAGE_SIZE)
-    return items.map((conversation) => conversation.providerThreadId)
-  })
+  const renderedOrder = flatItems
+    ? flatItems.map((conversation) => conversation.providerThreadId)
+    : shownSections.flatMap((section) => {
+        const showsAll =
+          activeFilter === section.key ||
+          searchActive ||
+          expandedSections[section.key] === true
+        const items = showsAll
+          ? section.items
+          : section.items.slice(0, SECTION_PAGE_SIZE)
+        return items.map((conversation) => conversation.providerThreadId)
+      })
   const hasDoneSection = shownSections.some((section) => section.key === 'done')
   const draggedSectionTitle =
     sections.find((section) => section.key === dragKey)?.title ?? 'this label'
+
+  /**
+   * One row, used by both presentations.
+   *
+   * The chronological list and the labelled sections differ only in grouping, so
+   * the row's props are assembled once instead of drifting apart in two copies.
+   */
+  const rowFor = (conversation: ConversationSummary) =>
+    conversation.isAutomated ? (
+      <AutomatedRow
+        key={conversation.id}
+        conversation={conversation}
+        showAccount={accounts.length > 1}
+        onRowMenu={openRowMenu}
+        onRowPreview={showPreview}
+        active={preview?.id === conversation.providerThreadId}
+        selectable={selectable}
+        selected={selected.has(conversation.providerThreadId)}
+        showSelector={showSelectors}
+        onSelect={selectRow}
+      />
+    ) : (
+      <ConversationRow
+        key={conversation.id}
+        conversation={conversation}
+        stateLabel={stateLabels[conversation.state].name}
+        showAccount={accounts.length > 1}
+        onRowMenu={openRowMenu}
+        onRowPreview={showPreview}
+        active={preview?.id === conversation.providerThreadId}
+        selectable={selectable}
+        selected={selected.has(conversation.providerThreadId)}
+        showSelector={showSelectors}
+        onSelect={selectRow}
+      />
+    )
 
   /**
    * The strip shown while a label is being dragged: dropping here puts it at the
@@ -1971,10 +2136,18 @@ export function Inbox({
   ) : null
 
   return (
-    <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]">
+    <div
+      className={cn(
+        'mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]',
+        // Inside the shell the sidebar is the page frame; the list keeps only
+        // its own gutters, and the preview column supplies the right edge.
+        embedded &&
+          'max-w-none px-4 py-4 sm:px-5 sm:py-5 lg:max-w-none lg:px-6 2xl:max-w-none',
+      )}
+    >
       <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold">Nuntia</h1>
+        <div className={embedded ? 'lg:hidden' : undefined}>
+          <h1 className="font-display text-3xl font-bold">Nuntia</h1>
           {/*
            * The two marks, in words, once — because the dot and the tag are only
            * obvious to whoever wrote them. One is a fact the app noticed, the
@@ -1998,18 +2171,33 @@ export function Inbox({
             prompt, but accounts are global, so signing in again connects the
             new mailbox alongside the existing ones instead of replacing them. */}
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="hidden min-w-0 max-w-56 truncate text-xs text-muted-foreground sm:block">
+          <span className="hidden min-w-0 max-w-56 truncate text-xs text-muted-foreground sm:block lg:hidden">
             {accounts.map((account) => account.email).join(' · ')}
           </span>
-          <Link
-            to="/compose"
-            className={cn(
-              'inline-flex h-9 shrink-0 items-center rounded-md bg-primary px-3',
-              'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
-            )}
-          >
-            New message
-          </Link>
+          {/* One button, two homes: the compose window inside the shell, the
+              page link for installs that render the list on its own. */}
+          {onCompose ? (
+            <button
+              type="button"
+              onClick={onCompose}
+              className={cn(
+                'inline-flex h-9 shrink-0 items-center rounded-md bg-primary px-3',
+                'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
+              )}
+            >
+              New message
+            </button>
+          ) : (
+            <Link
+              to="/compose"
+              className={cn(
+                'inline-flex h-9 shrink-0 items-center rounded-md bg-primary px-3',
+                'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
+              )}
+            >
+              New message
+            </Link>
+          )}
           {/* Account-level actions, collapsed: they are rare next to reading the
               list, and laid out flat they were wider than the page. */}
           <details className="relative shrink-0">
@@ -2065,12 +2253,22 @@ export function Inbox({
                 Add Outlook mailbox
               </OutlookButton>
               {openFormCount > 0 ? (
-                <Link
-                  to="/ask"
-                  className="block rounded-md px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
-                >
-                  Questions ({openFormCount})
-                </Link>
+                onOpenQuestions ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenQuestions()}
+                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                  >
+                    Questions ({openFormCount})
+                  </button>
+                ) : (
+                  <Link
+                    to="/ask"
+                    className="block rounded-md px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                  >
+                    Questions ({openFormCount})
+                  </Link>
+                )
               ) : null}
               {/* The beta's one standing invitation to say something. A link, not
                   a popup: the point is that it is there when something goes wrong. */}
@@ -2125,6 +2323,7 @@ export function Inbox({
           <Link
             to="/conversations/$providerThreadId"
             params={{ providerThreadId: menu.conversation.providerThreadId }}
+            resetScroll={false}
             role="menuitem"
             onClick={() => setMenu(null)}
             className="block rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none"
@@ -2339,13 +2538,23 @@ export function Inbox({
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-3">
-                  <Link
-                    to="/ask/$id"
-                    params={{ id: formPrompt.id }}
-                    className="text-primary hover:underline"
-                  >
-                    Answer
-                  </Link>
+                  {onOpenQuestions ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenQuestions(formPrompt.id)}
+                      className="text-primary hover:underline"
+                    >
+                      Answer
+                    </button>
+                  ) : (
+                    <Link
+                      to="/ask/$id"
+                      params={{ id: formPrompt.id }}
+                      className="text-primary hover:underline"
+                    >
+                      Answer
+                    </Link>
+                  )}
                   <button
                     onClick={() => void handleDismissPrompt()}
                     className="text-xs text-muted-foreground hover:underline"
@@ -2433,15 +2642,15 @@ export function Inbox({
            * search box off the screen with the results and left the user with no
            * way to clear the query.
            */}
-          {onSearch || sections.length > 1 ? (
-            <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          {onSearch || sections.length > 0 ? (
+            <div className="@container mt-6 flex flex-col gap-3">
               {/* Pills rather than a select: the counts are the point, and a
                 drop-down hid every section but the chosen one. */}
               {sections.length > 1 ? (
                 <div
                   role="group"
                   aria-label="Show one section"
-                  className="flex items-center gap-1 overflow-x-auto rounded-lg border border-border bg-muted/40 p-1"
+                  className="flex flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/40 p-1"
                 >
                   <button
                     type="button"
@@ -2490,32 +2699,82 @@ export function Inbox({
                 <span />
               )}
 
-              {onSearch ? (
-                <div className="flex w-full items-center gap-2 sm:w-auto sm:justify-end">
-                  <input
-                    type="search"
-                    aria-label="Search all mail"
-                    placeholder="Search all mail…"
-                    value={searchInput}
-                    onChange={(event) => setSearchInput(event.target.value)}
-                    className="h-9 w-full rounded-md border border-border bg-background px-2.5 text-xs text-foreground outline-none focus:border-foreground/30 sm:w-64"
-                  />
-                  {searching ? (
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      Searching…
-                    </span>
-                  ) : null}
-                  {searchActive ? (
-                    <button
-                      type="button"
-                      onClick={() => setSearchInput('')}
-                      className="shrink-0 text-xs text-muted-foreground hover:underline"
-                    >
-                      Clear
-                    </button>
-                  ) : null}
+              {/* Under the labels: choosing a section is the first cut, so the
+                order and the search sit on the row beneath it instead of
+                competing with the pills for the same line. */}
+              {/*
+               * Keyed on the width of this column, not the window: with a thread
+               * open the list is a 22rem strip, where the order and the search
+               * only fit stacked. Full width they sit side by side again.
+               */}
+              <div className="flex flex-col gap-2 @3xl:flex-row @3xl:items-center @3xl:justify-between">
+                {/* The order is a choice, not a hidden rule: the label says which
+                one is live, and the two options sit side by side because the
+                difference between them is the thing being decided. */}
+                <div
+                  role="group"
+                  aria-label="Order the mail"
+                  className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1"
+                >
+                  <span className="px-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                    Order
+                  </span>
+                  <button
+                    type="button"
+                    aria-pressed={sort === 'importance'}
+                    onClick={() => chooseSort('importance')}
+                    className={cn(
+                      'inline-flex h-7 shrink-0 items-center rounded-md px-2.5 text-xs font-medium transition-colors',
+                      sort === 'importance'
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    Importance
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={sort === 'chronological'}
+                    onClick={() => chooseSort('chronological')}
+                    className={cn(
+                      'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+                      sort === 'chronological'
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    <Clock aria-hidden="true" className="size-3" />
+                    Chronological
+                  </button>
                 </div>
-              ) : null}
+
+                {onSearch ? (
+                  <div className="flex w-full items-center gap-2 @3xl:w-auto @3xl:justify-end">
+                    <input
+                      type="search"
+                      aria-label="Search all mail"
+                      placeholder="Search all mail…"
+                      value={searchInput}
+                      onChange={(event) => setSearchInput(event.target.value)}
+                      className="h-9 w-full rounded-md border border-border bg-background px-2.5 text-xs text-foreground outline-none focus:border-foreground/30 @3xl:w-64"
+                    />
+                    {searching ? (
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        Searching…
+                      </span>
+                    ) : null}
+                    {searchActive ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchInput('')}
+                        className="shrink-0 text-xs text-muted-foreground hover:underline"
+                      >
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
 
@@ -2614,7 +2873,9 @@ export function Inbox({
 
           {sections.some((section) => !section.muted) ? (
             <p className="mt-3 text-[11px] text-muted-foreground">
-              Sorted by importance, highest first, then newest.
+              {sort === 'chronological'
+                ? 'Chronological — every conversation in one list, newest first, importance ignored.'
+                : 'Sorted by importance, highest first, then newest.'}
             </p>
           ) : null}
 
@@ -2654,220 +2915,192 @@ export function Inbox({
             </div>
           ) : null}
 
-          <div className="mt-8 space-y-8">
-            {shownSections.map((section) => {
-              const isFiltered = activeFilter === section.key
-              // The cap belongs to the compact all-sections view. A section on
-              // its own, or a search's matches, shows everything it found.
-              const showsAll =
-                isFiltered ||
-                searchActive ||
-                expandedSections[section.key] === true
-              const shown = showsAll
-                ? section.items
-                : section.items.slice(0, SECTION_PAGE_SIZE)
-              // Only a custom label folds: the state sections are the page's
-              // spine, and hiding one of them would hide work silently.
-              const collapsed =
-                section.custom === true && collapsedLabels[section.key] === true
+          {flatItems ? (
+            <div className="mt-8">
+              <p className="mb-3 text-[11px] text-muted-foreground">
+                {flatItems.length}{' '}
+                {flatItems.length === 1 ? 'conversation' : 'conversations'} ·
+                newest first, no sections.
+              </p>
+              <ul className="space-y-3">{flatItems.map(rowFor)}</ul>
+            </div>
+          ) : (
+            <div className="mt-8 space-y-8">
+              {shownSections.map((section) => {
+                const isFiltered = activeFilter === section.key
+                // The cap belongs to the compact all-sections view. A section on
+                // its own, or a search's matches, shows everything it found.
+                const showsAll =
+                  isFiltered ||
+                  searchActive ||
+                  expandedSections[section.key] === true
+                const shown = showsAll
+                  ? section.items
+                  : section.items.slice(0, SECTION_PAGE_SIZE)
+                // Only a custom label folds: the state sections are the page's
+                // spine, and hiding one of them would hide work silently.
+                const collapsed =
+                  section.custom === true &&
+                  collapsedLabels[section.key] === true
 
-              return (
-                <Fragment key={section.key}>
-                  {dragKey && section.key === 'done' ? endDropZone : null}
-                  <section
-                    onDragOver={(event) => {
-                      if (!dragKey || dragKey === section.key) return
-                      event.preventDefault()
-                      event.dataTransfer.dropEffect = 'move'
-                      setDropTarget(section.key)
-                    }}
-                    onDragLeave={(event) => {
-                      const next = event.relatedTarget as Node | null
-                      if (next && event.currentTarget.contains(next)) return
-                      setDropTarget((current) =>
-                        current === section.key ? null : current,
-                      )
-                    }}
-                    onDrop={(event) => {
-                      if (!dragKey) return
-                      event.preventDefault()
-                      void dropSection(dragKey, section.key)
-                    }}
-                    className={cn(
-                      dropTarget === section.key &&
-                        dragKey !== section.key &&
-                        'border-t-2 border-primary pt-2',
-                    )}
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-4">
-                      {section.custom ? (
-                        <div className="flex min-w-0 items-center gap-1">
-                          {onReorderSections ? (
-                            <span
-                              draggable
-                              onDragStart={(event) => {
-                                event.dataTransfer.effectAllowed = 'move'
-                                event.dataTransfer.setData(
-                                  'text/plain',
-                                  section.key,
-                                )
-                                setDragKey(section.key)
-                                setDropTarget(null)
-                                setOrderError(null)
-                              }}
-                              onDragEnd={() => {
-                                setDragKey(null)
-                                setDropTarget(null)
-                              }}
-                              title="Drag to reorder this label"
-                              aria-hidden="true"
-                              className={cn(
-                                'shrink-0 cursor-grab text-muted-foreground/70 hover:text-foreground active:cursor-grabbing',
-                                dragKey === section.key && 'text-foreground',
-                              )}
+                return (
+                  <Fragment key={section.key}>
+                    {dragKey && section.key === 'done' ? endDropZone : null}
+                    <section
+                      onDragOver={(event) => {
+                        if (!dragKey || dragKey === section.key) return
+                        event.preventDefault()
+                        event.dataTransfer.dropEffect = 'move'
+                        setDropTarget(section.key)
+                      }}
+                      onDragLeave={(event) => {
+                        const next = event.relatedTarget as Node | null
+                        if (next && event.currentTarget.contains(next)) return
+                        setDropTarget((current) =>
+                          current === section.key ? null : current,
+                        )
+                      }}
+                      onDrop={(event) => {
+                        if (!dragKey) return
+                        event.preventDefault()
+                        void dropSection(dragKey, section.key)
+                      }}
+                      className={cn(
+                        dropTarget === section.key &&
+                          dragKey !== section.key &&
+                          'border-t-2 border-primary pt-2',
+                      )}
+                    >
+                      <div className="mb-1 flex items-center justify-between gap-4">
+                        {section.custom ? (
+                          <div className="flex min-w-0 items-center gap-1">
+                            {onReorderSections ? (
+                              <span
+                                draggable
+                                onDragStart={(event) => {
+                                  event.dataTransfer.effectAllowed = 'move'
+                                  event.dataTransfer.setData(
+                                    'text/plain',
+                                    section.key,
+                                  )
+                                  setDragKey(section.key)
+                                  setDropTarget(null)
+                                  setOrderError(null)
+                                }}
+                                onDragEnd={() => {
+                                  setDragKey(null)
+                                  setDropTarget(null)
+                                }}
+                                title="Drag to reorder this label"
+                                aria-hidden="true"
+                                className={cn(
+                                  'shrink-0 cursor-grab text-muted-foreground/70 hover:text-foreground active:cursor-grabbing',
+                                  dragKey === section.key && 'text-foreground',
+                                )}
+                              >
+                                <GripVertical className="size-3.5" />
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              aria-expanded={!collapsed}
+                              onClick={() =>
+                                setCollapsedLabels((current) => ({
+                                  ...current,
+                                  [section.key]: current[section.key] !== true,
+                                }))
+                              }
+                              className="flex min-w-0 items-center gap-1 text-xs font-semibold tracking-wide text-foreground/80 uppercase hover:text-foreground"
                             >
-                              <GripVertical className="size-3.5" />
+                              {collapsed ? (
+                                <ChevronRight
+                                  aria-hidden="true"
+                                  className="size-3.5 shrink-0"
+                                />
+                              ) : (
+                                <ChevronDown
+                                  aria-hidden="true"
+                                  className="size-3.5 shrink-0"
+                                />
+                              )}
+                              <span className="truncate">{section.title}</span>
+                            </button>
+                          </div>
+                        ) : (
+                          <h2
+                            className={cn(
+                              'text-sm font-semibold tracking-wide uppercase',
+                              section.muted
+                                ? 'text-muted-foreground'
+                                : 'text-foreground',
+                            )}
+                          >
+                            {section.title}
+                          </h2>
+                        )}
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {savingOrder ? (
+                            <span className="text-[11px] text-muted-foreground">
+                              Saving…
                             </span>
                           ) : null}
-                          <button
-                            type="button"
-                            aria-expanded={!collapsed}
-                            onClick={() =>
-                              setCollapsedLabels((current) => ({
-                                ...current,
-                                [section.key]: current[section.key] !== true,
-                              }))
-                            }
-                            className="flex min-w-0 items-center gap-1 text-xs font-semibold tracking-wide text-foreground/80 uppercase hover:text-foreground"
-                          >
-                            {collapsed ? (
-                              <ChevronRight
-                                aria-hidden="true"
-                                className="size-3.5 shrink-0"
-                              />
-                            ) : (
-                              <ChevronDown
-                                aria-hidden="true"
-                                className="size-3.5 shrink-0"
-                              />
-                            )}
-                            <span className="truncate">{section.title}</span>
-                          </button>
-                        </div>
-                      ) : (
-                        <h2
-                          className={cn(
-                            'text-sm font-semibold tracking-wide uppercase',
-                            section.muted
-                              ? 'text-muted-foreground'
-                              : 'text-foreground',
-                          )}
-                        >
-                          {section.title}
-                        </h2>
-                      )}
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        {savingOrder ? (
-                          <span className="text-[11px] text-muted-foreground">
-                            Saving…
+                          <span className="text-xs text-muted-foreground tabular-nums">
+                            {section.items.length}
                           </span>
-                        ) : null}
-                        <span className="text-xs text-muted-foreground tabular-nums">
-                          {section.items.length}
-                        </span>
+                        </div>
                       </div>
-                    </div>
-                    {/* The label's meaning, in the user's words — the reason a
+                      {/* The label's meaning, in the user's words — the reason a
                       section explains itself rather than only naming itself. */}
-                    {collapsed ? null : section.description ? (
-                      <p className="mb-3 text-xs text-muted-foreground">
-                        {section.description}
-                      </p>
-                    ) : (
-                      <div className="mb-3" />
-                    )}
+                      {collapsed ? null : section.description ? (
+                        <p className="mb-3 text-xs text-muted-foreground">
+                          {section.description}
+                        </p>
+                      ) : (
+                        <div className="mb-3" />
+                      )}
 
-                    {collapsed ? null : (
-                      <ul className="space-y-3">
-                        {shown.map((conversation) =>
-                          // Same feed, same grouping — only the presentation differs.
-                          // A failed build is still `needs-action`; it just is not a
-                          // chat.
-                          conversation.isAutomated ? (
-                            <AutomatedRow
-                              key={conversation.id}
-                              conversation={conversation}
-                              showAccount={accounts.length > 1}
-                              onRowMenu={openRowMenu}
-                              onRowPreview={showPreview}
-                              active={
-                                preview?.id === conversation.providerThreadId
-                              }
-                              selectable={selectable}
-                              selected={selected.has(
-                                conversation.providerThreadId,
-                              )}
-                              showSelector={showSelectors}
-                              onSelect={selectRow}
-                            />
-                          ) : (
-                            <ConversationRow
-                              key={conversation.id}
-                              conversation={conversation}
-                              stateLabel={stateLabels[conversation.state].name}
-                              showAccount={accounts.length > 1}
-                              onRowMenu={openRowMenu}
-                              onRowPreview={showPreview}
-                              active={
-                                preview?.id === conversation.providerThreadId
-                              }
-                              selectable={selectable}
-                              selected={selected.has(
-                                conversation.providerThreadId,
-                              )}
-                              showSelector={showSelectors}
-                              onSelect={selectRow}
-                            />
-                          ),
-                        )}
-                      </ul>
-                    )}
+                      {collapsed ? null : (
+                        <ul className="space-y-3">{shown.map(rowFor)}</ul>
+                      )}
 
-                    {!collapsed &&
-                    !isFiltered &&
-                    !searchActive &&
-                    section.items.length > SECTION_PAGE_SIZE ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setExpandedSections((current) => ({
-                            ...current,
-                            [section.key]: current[section.key] !== true,
-                          }))
-                        }
-                        className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
-                      >
-                        {expandedSections[section.key]
-                          ? 'Show fewer'
-                          : `Show all ${section.items.length}`}
-                      </button>
-                    ) : null}
-                  </section>
-                </Fragment>
-              )
-            })}
-            {dragKey && !hasDoneSection ? endDropZone : null}
-          </div>
+                      {!collapsed &&
+                      !isFiltered &&
+                      !searchActive &&
+                      section.items.length > SECTION_PAGE_SIZE ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedSections((current) => ({
+                              ...current,
+                              [section.key]: current[section.key] !== true,
+                            }))
+                          }
+                          className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
+                        >
+                          {expandedSections[section.key]
+                            ? 'Show fewer'
+                            : `Show all ${section.items.length}`}
+                        </button>
+                      ) : null}
+                    </section>
+                  </Fragment>
+                )
+              })}
+              {dragKey && !hasDoneSection ? endDropZone : null}
+            </div>
+          )}
         </div>
 
-        <aside className="hidden lg:sticky lg:top-6 lg:block lg:w-96 lg:shrink-0 xl:w-[26rem] 2xl:w-[32rem]">
-          <MailPreviewCard
-            preview={preview?.data ?? null}
-            loading={previewLoading}
-            error={previewError}
-            stateLabels={stateLabels}
-          />
-        </aside>
+        {hidePreview ? null : (
+          <aside className="hidden lg:sticky lg:top-6 lg:block lg:w-96 lg:shrink-0 xl:w-[26rem] 2xl:w-[32rem]">
+            <MailPreviewCard
+              preview={preview?.data ?? null}
+              loading={previewLoading}
+              error={previewError}
+              stateLabels={stateLabels}
+            />
+          </aside>
+        )}
       </div>
     </div>
   )

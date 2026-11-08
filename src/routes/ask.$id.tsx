@@ -7,53 +7,26 @@
  * shown, which is the denominator the response rate is measured against.
  */
 
-import { createServerFn } from '@tanstack/react-start'
-import { Link, createFileRoute, redirect, useRouter } from '@tanstack/react-router'
+import {
+  Link,
+  createFileRoute,
+  redirect,
+  useRouter,
+} from '@tanstack/react-router'
 import { useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 
-import { getSession } from '#/lib/auth/index.ts'
 import {
-  getFormForUser,
-  markFormShown,
-  submitForm,
-} from '#/lib/forms/repository.ts'
-import type { UserForm } from '#/lib/forms/repository.ts'
+  loadQuestionForm,
+  submitQuestionAnswers,
+} from '#/lib/forms/ask-actions.ts'
 import type { FormAnswerInput } from '#/lib/forms/validation.ts'
 import { FormFields } from '#/components/form-fields.tsx'
 import type { FormAnswers } from '#/components/form-fields.tsx'
 
-const loadForm = createServerFn({ method: 'GET' })
-  .validator((data: { id: string }) => data)
-  .handler(
-    async ({
-      data,
-    }): Promise<{ signedIn: false } | { signedIn: true; form: UserForm }> => {
-      const session = await getSession()
-      if (!session) return { signedIn: false }
-
-      const form = await getFormForUser(data.id, session.userId)
-      if (form.state === 'open') {
-        await markFormShown(data.id, session.userId)
-      }
-
-      return { signedIn: true, form }
-    },
-  )
-
-const submitAnswers = createServerFn({ method: 'POST' })
-  .validator((data: { id: string; answers: FormAnswerInput[] }) => data)
-  .handler(async ({ data }): Promise<{ error: string | null }> => {
-    const session = await getSession()
-    if (!session) return { error: 'You are not signed in.' }
-
-    const result = await submitForm(data.id, session.userId, data.answers)
-    return { error: result.ok ? null : result.error }
-  })
-
 export const Route = createFileRoute('/ask/$id')({
   loader: async ({ params }) => {
-    const state = await loadForm({ data: { id: params.id } })
+    const state = await loadQuestionForm({ data: { id: params.id } })
     if (!state.signedIn) throw redirect({ to: '/sign-in' })
 
     return { form: state.form }
@@ -102,7 +75,9 @@ function AskFormPage() {
         }
       })
 
-      const result = await submitAnswers({ data: { id, answers: payload } })
+      const result = await submitQuestionAnswers({
+        data: { id, answers: payload },
+      })
 
       if (result.error) {
         setError(result.error)
@@ -130,10 +105,13 @@ function AskFormPage() {
             : 'You already answered this one. Thank you.'}
         </p>
         <p className="mt-4 text-xs text-muted-foreground">
-          You can change an answer until the form closes by opening it again from
-          the Questions link.
+          You can change an answer until the form closes by opening it again
+          from the Questions link.
         </p>
-        <Link to="/" className="mt-6 inline-block text-sm text-primary hover:underline">
+        <Link
+          to="/"
+          className="mt-6 inline-block text-sm text-primary hover:underline"
+        >
           Back to the inbox
         </Link>
       </Shell>

@@ -12,9 +12,10 @@
  */
 
 import { Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  ChevronDown,
   ChevronRight,
   File,
   Image,
@@ -579,108 +580,137 @@ type MediaAttachment = ConversationDetail['attachments'][number]
 function MediaOverview({
   attachments,
   providerThreadId,
-  id,
-  onClose,
   hashFailures,
   checking,
 }: {
   attachments: MediaAttachment[]
   providerThreadId: string
-  id: string
-  onClose?: () => void
   hashFailures: number
   checking: boolean
 }) {
-  return (
-    <>
-      <header className="flex items-start justify-between gap-3 border-b border-border px-4 py-4">
-        <div className="min-w-0">
-          <h2 className="font-semibold text-foreground">Thread media</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            {attachments.length} {attachments.length === 1 ? 'file' : 'files'}{' '}
-            across this conversation
-            {checking ? ' · Checking repeated media…' : ''}
-          </p>
-          {hashFailures > 0 ? (
-            <p className="mt-1 text-xs text-muted-foreground">
-              {hashFailures} {hashFailures === 1 ? 'media file' : 'media files'}{' '}
-              could not be checked and remain listed.
-            </p>
-          ) : null}
-        </div>
-        {onClose ? (
-          <button
-            type="button"
-            aria-label="Close media and attachments"
-            onClick={onClose}
-            className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
-        ) : null}
-      </header>
-      <ul id={id} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-        {attachments.map((attachment) => {
-          const image = attachment.mimeType.startsWith('image/')
-          const href = attachmentHref(providerThreadId, attachment)
-          const sender = attachment.sender
-          const sentAt = attachment.sentAt
+  // Collapsed per view: a thread with twenty screenshots should not push the
+  // person's context off the screen, and the two can be read on their own.
+  const [open, setOpen] = useState(true)
+  const bodyId = useId()
 
-          return (
-            <li
-              key={`${attachment.providerMessageId}:${attachment.providerAttachmentId}`}
-            >
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer"
-                title={`Open ${attachment.filename}`}
-                className="group block overflow-hidden rounded-lg border border-border bg-background transition-colors hover:border-foreground/30"
-              >
-                {image ? (
-                  <img
-                    src={href}
-                    alt={attachment.filename}
-                    loading="lazy"
-                    className="max-h-40 w-full bg-muted/30 object-contain"
-                  />
+  return (
+    <section className="border-b border-border last:border-b-0">
+      <div className={open ? 'px-4 py-3' : 'px-3 py-1.5'}>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((current) => !current)}
+          className="flex w-full min-w-0 items-start gap-2 text-left"
+        >
+          {open ? (
+            <ChevronDown
+              aria-hidden="true"
+              className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+            />
+          ) : (
+            <ChevronRight
+              aria-hidden="true"
+              className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+            />
+          )}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-xs font-semibold text-foreground">
+              Thread media
+              {!open ? (
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {attachments.length}{' '}
+                  {attachments.length === 1 ? 'file' : 'files'}
+                </span>
+              ) : null}
+            </span>
+            {open ? (
+              <>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  {attachments.length}{' '}
+                  {attachments.length === 1 ? 'file' : 'files'} across this
+                  conversation
+                  {checking ? ' · Checking repeated media…' : ''}
+                </span>
+                {hashFailures > 0 ? (
+                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                    {hashFailures}{' '}
+                    {hashFailures === 1 ? 'media file' : 'media files'} could
+                    not be checked and remain listed.
+                  </span>
                 ) : null}
-                <div className="flex items-start gap-2.5 p-3">
-                  <span className="mt-0.5 rounded-md bg-muted p-1.5 text-muted-foreground">
-                    {image ? (
-                      <Image className="size-4" />
-                    ) : (
-                      <File className="size-4" />
-                    )}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-foreground group-hover:underline">
-                      {attachment.filename}
+              </>
+            ) : null}
+          </span>
+        </button>
+      </div>
+      {open ? (
+        <ul
+          id={bodyId}
+          className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3"
+        >
+          {attachments.map((attachment) => {
+            const image = attachment.mimeType.startsWith('image/')
+            const href = attachmentHref(providerThreadId, attachment)
+            const sender = attachment.sender
+            const sentAt = attachment.sentAt
+
+            return (
+              <li
+                key={`${attachment.providerMessageId}:${attachment.providerAttachmentId}`}
+              >
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`Open ${attachment.filename}`}
+                  className="group block overflow-hidden rounded-lg border border-border bg-background transition-colors hover:border-foreground/30"
+                >
+                  {image ? (
+                    <img
+                      src={href}
+                      alt={attachment.filename}
+                      loading="lazy"
+                      className="max-h-40 w-full bg-muted/30 object-contain"
+                    />
+                  ) : null}
+                  <div className="flex items-start gap-2.5 p-3">
+                    <span className="mt-0.5 rounded-md bg-muted p-1.5 text-muted-foreground">
+                      {image ? (
+                        <Image className="size-4" />
+                      ) : (
+                        <File className="size-4" />
+                      )}
                     </span>
-                    <span className="mt-1 block truncate text-xs text-muted-foreground">
-                      {attachment.mimeType}
-                      {formatBytes(attachment.sizeBytes)
-                        ? ` · ${formatBytes(attachment.sizeBytes)}`
-                        : ''}
-                    </span>
-                    {sender && sentAt ? (
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-foreground group-hover:underline">
+                        {attachment.filename}
+                      </span>
                       <span className="mt-1 block truncate text-xs text-muted-foreground">
-                        {sender.name ?? sender.email} · {formatTime(sentAt)}
+                        {attachment.mimeType}
+                        {formatBytes(attachment.sizeBytes)
+                          ? ` · ${formatBytes(attachment.sizeBytes)}`
+                          : ''}
                       </span>
-                    ) : null}
-                    {attachment.isInline ? (
-                      <span className="mt-1 block text-[10px] text-muted-foreground/80">
-                        Inline media
-                      </span>
-                    ) : null}
-                  </span>
-                </div>
-              </a>
-            </li>
-          )
-        })}
-      </ul>
-    </>
+                      {sender && sentAt ? (
+                        <span className="mt-1 block truncate text-xs text-muted-foreground">
+                          {sender.name ?? sender.email} · {formatTime(sentAt)}
+                        </span>
+                      ) : null}
+                      {attachment.isInline ? (
+                        <span className="mt-1 block text-[10px] text-muted-foreground/80">
+                          Inline media
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                </a>
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+    </section>
   )
 }
 
@@ -780,6 +810,12 @@ function ContactContextEditor({
     }
   }
 
+  // Separate from the media panel on purpose: the notes about a person are what
+  // a reply is written against, while the media is a reference. Each folds away
+  // without taking the other with it.
+  const [open, setOpen] = useState(true)
+  const bodyId = useId()
+
   const hasContext = Boolean(
     initialContext?.roleCompany ||
     initialContext?.relationship ||
@@ -790,191 +826,233 @@ function ContactContextEditor({
   )
 
   return (
-    <section className="border-b border-border bg-muted/20 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h2 className="text-xs font-semibold text-foreground">
-            About this person
-          </h2>
-          <p className="truncate text-xs text-muted-foreground">{email}</p>
-        </div>
+    <section className="border-b border-border bg-muted/20 last:border-b-0">
+      <div
+        className={
+          open
+            ? 'flex items-start justify-between gap-3 px-4 py-3'
+            : 'flex items-center justify-between gap-3 px-3 py-1.5'
+        }
+      >
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((current) => !current)}
+          className="flex min-w-0 items-start gap-2 text-left"
+        >
+          {open ? (
+            <ChevronDown
+              aria-hidden="true"
+              className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+            />
+          ) : (
+            <ChevronRight
+              aria-hidden="true"
+              className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+            />
+          )}
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-xs font-semibold text-foreground">
+              About this person
+              {!open ? (
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {email}
+                </span>
+              ) : null}
+            </span>
+            {open ? (
+              <span className="block truncate text-xs text-muted-foreground">
+                {email}
+              </span>
+            ) : null}
+          </span>
+        </button>
         {!editing ? (
           <button
             type="button"
             onClick={() => setEditing(true)}
-            className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+            className="shrink-0 rounded-md border border-border px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-muted"
           >
             {hasContext ? 'Edit context' : 'Add context'}
           </button>
         ) : null}
       </div>
-      {editing ? (
-        <form className="mt-3 space-y-2" onSubmit={(event) => void save(event)}>
-          <label className="block text-xs text-muted-foreground">
-            Role / company
-            <input
-              value={roleCompany}
-              onChange={(event) => setRoleCompany(event.target.value)}
-              maxLength={160}
-              placeholder="CEO of Acme"
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
-            />
-          </label>
-          <label className="block text-xs text-muted-foreground">
-            Importance to you (1–10)
-            <select
-              value={importance === null ? '' : String(importance)}
-              onChange={(event) =>
-                setImportance(
-                  event.target.value ? Number(event.target.value) : null,
-                )
-              }
-              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+      {open ? (
+        <div id={bodyId} className="px-4 pb-4">
+          {editing ? (
+            <form
+              className="mt-3 space-y-2"
+              onSubmit={(event) => void save(event)}
             >
-              <option value="">Not rated</option>
-              {Array.from({ length: 10 }, (_, index) => index + 1).map(
-                (score) => (
-                  <option key={score} value={score}>
-                    {score}/10
-                    {score === 10
-                      ? ' · Very important'
-                      : score === 1
-                        ? ' · Low importance'
-                        : ''}
-                  </option>
-                ),
-              )}
-            </select>
-          </label>
-          <label className="block text-xs text-muted-foreground">
-            Relationship
-            <textarea
-              value={relationship}
-              onChange={(event) => setRelationship(event.target.value)}
-              maxLength={500}
-              rows={2}
-              placeholder="How you know or work with them"
-              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
-            />
-          </label>
-          <label className="block text-xs text-muted-foreground">
-            Topics discussed
-            <textarea
-              value={topics}
-              onChange={(event) => setTopics(event.target.value)}
-              maxLength={1000}
-              rows={2}
-              placeholder="Partnership, hiring, product launch…"
-              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
-            />
-          </label>
-          <label className="block text-xs text-muted-foreground">
-            Currently working on
-            <textarea
-              value={currentWork}
-              onChange={(event) => setCurrentWork(event.target.value)}
-              maxLength={1000}
-              rows={2}
-              placeholder="Current projects or priorities"
-              className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
-            />
-          </label>
-          {error ? (
-            <p role="alert" className="text-xs text-destructive">
-              {error}
+              <label className="block text-xs text-muted-foreground">
+                Role / company
+                <input
+                  value={roleCompany}
+                  onChange={(event) => setRoleCompany(event.target.value)}
+                  maxLength={160}
+                  placeholder="CEO of Acme"
+                  className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+                />
+              </label>
+              <label className="block text-xs text-muted-foreground">
+                Importance to you (1–10)
+                <select
+                  value={importance === null ? '' : String(importance)}
+                  onChange={(event) =>
+                    setImportance(
+                      event.target.value ? Number(event.target.value) : null,
+                    )
+                  }
+                  className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+                >
+                  <option value="">Not rated</option>
+                  {Array.from({ length: 10 }, (_, index) => index + 1).map(
+                    (score) => (
+                      <option key={score} value={score}>
+                        {score}/10
+                        {score === 10
+                          ? ' · Very important'
+                          : score === 1
+                            ? ' · Low importance'
+                            : ''}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </label>
+              <label className="block text-xs text-muted-foreground">
+                Relationship
+                <textarea
+                  value={relationship}
+                  onChange={(event) => setRelationship(event.target.value)}
+                  maxLength={500}
+                  rows={2}
+                  placeholder="How you know or work with them"
+                  className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+                />
+              </label>
+              <label className="block text-xs text-muted-foreground">
+                Topics discussed
+                <textarea
+                  value={topics}
+                  onChange={(event) => setTopics(event.target.value)}
+                  maxLength={1000}
+                  rows={2}
+                  placeholder="Partnership, hiring, product launch…"
+                  className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+                />
+              </label>
+              <label className="block text-xs text-muted-foreground">
+                Currently working on
+                <textarea
+                  value={currentWork}
+                  onChange={(event) => setCurrentWork(event.target.value)}
+                  maxLength={1000}
+                  rows={2}
+                  placeholder="Current projects or priorities"
+                  className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
+                />
+              </label>
+              {error ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {error}
+                </p>
+              ) : null}
+              {aiSuggested ? (
+                <p className="text-xs text-muted-foreground">
+                  AI suggestions are unsaved. Review and edit them before
+                  saving.
+                </p>
+              ) : null}
+              <div className="flex flex-wrap justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={busy || aiBusy}
+                  onClick={() => void suggest()}
+                  className="mr-auto rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  {aiBusy ? 'Suggesting…' : 'Suggest with AI'}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy || aiBusy}
+                  onClick={() => {
+                    setRoleCompany(initialContext?.roleCompany ?? '')
+                    setRelationship(initialContext?.relationship ?? '')
+                    setTopics(initialContext?.topics ?? '')
+                    setCurrentWork(initialContext?.currentWork ?? '')
+                    setImportance(initialContext?.importance ?? null)
+                    setEditing(false)
+                    setAiSuggested(false)
+                    setError(null)
+                  }}
+                  className="rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy || aiBusy}
+                  className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {busy ? 'Saving…' : 'Save context'}
+                </button>
+              </div>
+            </form>
+          ) : hasContext ? (
+            <>
+              {initialContext?.importance !== null &&
+              initialContext?.importance !== undefined ? (
+                <span
+                  title="Your importance rating for this correspondent; used as context when classifying their mail."
+                  className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+                >
+                  Contact importance · {initialContext.importance}/10
+                </span>
+              ) : null}
+              <dl className="mt-3 space-y-2 text-sm">
+                {[
+                  ['Role / company', initialContext?.roleCompany],
+                  ['Relationship', initialContext?.relationship],
+                  ['Topics discussed', initialContext?.topics],
+                  ['Currently working on', initialContext?.currentWork],
+                ].map(([label, value]) =>
+                  value ? (
+                    <div key={label}>
+                      <dt className="text-[10px] font-medium text-muted-foreground">
+                        {label}
+                      </dt>
+                      <dd className="whitespace-pre-wrap text-xs text-foreground">
+                        {value}
+                      </dd>
+                    </div>
+                  ) : null,
+                )}
+              </dl>
+            </>
+          ) : initialContext?.importance !== null &&
+            initialContext?.importance !== undefined ? (
+            <>
+              <span className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                Contact importance · {initialContext.importance}/10
+              </span>
+              <button
+                type="button"
+                onClick={() => setEditing(true)}
+                className="ml-2 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+              >
+                Edit context
+              </button>
+            </>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              Add private notes or ask AI for a draft based on this thread.
+              Review suggestions before saving.
             </p>
-          ) : null}
-          {aiSuggested ? (
-            <p className="text-xs text-muted-foreground">
-              AI suggestions are unsaved. Review and edit them before saving.
-            </p>
-          ) : null}
-          <div className="flex flex-wrap justify-end gap-2 pt-1">
-            <button
-              type="button"
-              disabled={busy || aiBusy}
-              onClick={() => void suggest()}
-              className="mr-auto rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
-            >
-              {aiBusy ? 'Suggesting…' : 'Suggest with AI'}
-            </button>
-            <button
-              type="button"
-              disabled={busy || aiBusy}
-              onClick={() => {
-                setRoleCompany(initialContext?.roleCompany ?? '')
-                setRelationship(initialContext?.relationship ?? '')
-                setTopics(initialContext?.topics ?? '')
-                setCurrentWork(initialContext?.currentWork ?? '')
-                setImportance(initialContext?.importance ?? null)
-                setEditing(false)
-                setAiSuggested(false)
-                setError(null)
-              }}
-              className="rounded-md border border-border px-2.5 py-1.5 text-xs text-foreground hover:bg-muted disabled:opacity-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={busy || aiBusy}
-              className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
-            >
-              {busy ? 'Saving…' : 'Save context'}
-            </button>
-          </div>
-        </form>
-      ) : hasContext ? (
-        <>
-          {initialContext?.importance !== null &&
-          initialContext?.importance !== undefined ? (
-            <span
-              title="Your importance rating for this correspondent; used as context when classifying their mail."
-              className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
-            >
-              Contact importance · {initialContext.importance}/10
-            </span>
-          ) : null}
-          <dl className="mt-3 space-y-2 text-sm">
-            {[
-              ['Role / company', initialContext?.roleCompany],
-              ['Relationship', initialContext?.relationship],
-              ['Topics discussed', initialContext?.topics],
-              ['Currently working on', initialContext?.currentWork],
-            ].map(([label, value]) =>
-              value ? (
-                <div key={label}>
-                  <dt className="text-[10px] font-medium text-muted-foreground">
-                    {label}
-                  </dt>
-                  <dd className="whitespace-pre-wrap text-xs text-foreground">
-                    {value}
-                  </dd>
-                </div>
-              ) : null,
-            )}
-          </dl>
-        </>
-      ) : initialContext?.importance !== null &&
-        initialContext?.importance !== undefined ? (
-        <>
-          <span className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-            Contact importance · {initialContext.importance}/10
-          </span>
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="ml-2 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
-          >
-            Edit context
-          </button>
-        </>
-      ) : (
-        <p className="mt-2 text-xs text-muted-foreground">
-          Add private notes or ask AI for a draft based on this thread. Review
-          suggestions before saving.
-        </p>
-      )}
+          )}
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -1306,6 +1384,7 @@ function ConversationDetailsEditor({
  */
 function Composer({
   accounts,
+  providerThreadId,
   provider,
   suggest,
   onDraft,
@@ -1314,6 +1393,8 @@ function Composer({
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
+  /** The thread this reply belongs to, so an unsent draft stays with it. */
+  providerThreadId: string
   /** Which service the owning mailbox uses, for the reconnect link. */
   provider: ConversationDetail['provider']
   /** Whether a draft can be generated, and why not when it cannot. */
@@ -1349,6 +1430,42 @@ function Composer({
   const [reviewingGoal, setReviewingGoal] = useState(false)
   const [goalError, setGoalError] = useState<string | null>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
+  /**
+   * The reply is kept per thread, in the browser, until it is sent.
+   *
+   * Sending is the only thing that clears it: closing the panel, opening another
+   * thread or reloading used to lose whatever had been written. Attachments are
+   * deliberately not kept — a file can be megabytes, and re-picking it is a
+   * clearer action than silently restoring bytes from disk.
+   */
+  const draftKey = `nuntia.replyDraft.${providerThreadId}`
+  const [loadedDraftKey, setLoadedDraftKey] = useState<string | null>(null)
+  const [draftRestored, setDraftRestored] = useState(false)
+
+  useEffect(() => {
+    let saved = ''
+    try {
+      saved = window.localStorage.getItem(draftKey) ?? ''
+    } catch {
+      // Storage can be switched off; the reply just starts empty then.
+    }
+    setBody(saved)
+    setAttachments([])
+    setDraftRestored(saved.trim().length > 0)
+    setLoadedDraftKey(draftKey)
+  }, [draftKey])
+
+  useEffect(() => {
+    // Only for the thread that has been read: writing the previous thread's
+    // text under the new key while switching would be a lost draft in reverse.
+    if (loadedDraftKey !== draftKey) return
+    try {
+      if (body.trim()) window.localStorage.setItem(draftKey, body)
+      else window.localStorage.removeItem(draftKey)
+    } catch {
+      // Storage can be switched off; the draft then lives in this tab only.
+    }
+  }, [body, draftKey, loadedDraftKey])
 
   // Grow to fit, up to a cap, so a long reply does not scroll in a tiny box.
   useEffect(() => {
@@ -1395,6 +1512,12 @@ function Composer({
         // Cleared only on success, so a failed send never discards the reply.
         setBody('')
         setAttachments([])
+        setDraftRestored(false)
+        try {
+          window.localStorage.removeItem(draftKey)
+        } catch {
+          // Storage may be unavailable; the reply has still gone out.
+        }
         if (filePicker.current) filePicker.current.value = ''
         setGoalCheck(null)
         setGoalError(null)
@@ -1554,11 +1677,22 @@ function Composer({
         }}
       />
 
+      {draftRestored && body.trim() ? (
+        <p className="mb-1 text-[11px] text-muted-foreground">
+          Unsent draft restored
+        </p>
+      ) : null}
+
       <textarea
         ref={textarea}
         value={body}
-        onChange={(e) => setBody(e.target.value)}
+        onChange={(e) => {
+          setBody(e.target.value)
+          setDraftRestored(false)
+        }}
         onKeyDown={(e) => {
+          // An IME uses Enter to accept a candidate; that must not send.
+          if (e.nativeEvent.isComposing) return
           // Enter sends, Shift+Enter breaks the line — the convention every
           // chat UI shares, and the opposite of a plain textarea.
           if (e.key === 'Enter' && !e.shiftKey) {
@@ -1661,7 +1795,7 @@ function Composer({
             'text-primary-foreground disabled:opacity-50',
           )}
         >
-          {busy ? 'Sending…' : 'Send'}
+          {busy ? 'Sending…' : 'Send reply'}
         </button>
       </div>
     </div>
@@ -1910,15 +2044,23 @@ export function ConversationView({
     error: string | null
   }>
 }) {
-  const bottom = useRef<HTMLDivElement>(null)
-  const [mediaOpen, setMediaOpen] = useState(false)
+  const messagesRef = useRef<HTMLDivElement>(null)
+  const [overviewOpen, setOverviewOpen] = useState(false)
   const [dedupedMedia, setDedupedMedia] = useState<MediaAttachment[] | null>(
     null,
   )
   const [mediaHashFailures, setMediaHashFailures] = useState(0)
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: 'end' })
+    // Scroll the message list itself, never the document.
+    //
+    // `scrollIntoView` walks up *every* scrollable ancestor, so on first render
+    // it also scrolled the window — and with it the inbox list, which stands in
+    // that same window next to the thread. Opening a thread reset the list to
+    // the top even though the router was told not to reset the scroll.
+    const scroller = messagesRef.current
+    if (!scroller) return
+    scroller.scrollTop = scroller.scrollHeight
   }, [detail.messages.length])
 
   // A thread between two of the user's own connected accounts has "mine" on both
@@ -2048,7 +2190,7 @@ export function ConversationView({
   const hasOverview = mediaAttachments.length > 0 || Boolean(detail.senderEmail)
 
   return (
-    <div className="flex h-dvh flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       <header className="border-b border-border px-4 py-3 sm:px-6 sm:py-4">
         <div className="flex items-start gap-3">
           <Avatar
@@ -2082,30 +2224,6 @@ export function ConversationView({
               </p>
             ) : null}
           </div>
-          {/*
-           * Promoted to the title row: on a phone the overview is the only way
-           * to reach the sender's context and their attachments, so it should be
-           * found without scanning a row of low-emphasis controls.
-           */}
-          {hasOverview ? (
-            <button
-              type="button"
-              aria-expanded={mediaOpen}
-              aria-controls="thread-media-overview-mobile"
-              onClick={() => setMediaOpen((open) => !open)}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-[11px] font-medium text-foreground hover:bg-muted lg:hidden"
-            >
-              {mediaOpen ? (
-                <PanelRightClose className="size-3.5" />
-              ) : (
-                <PanelRightOpen className="size-3.5" />
-              )}
-              Overview
-              {mediaAttachments.length > 0
-                ? ` (${dedupedMedia ? mediaAttachments.length : detail.attachments.length})`
-                : ''}
-            </button>
-          ) : null}
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
           {/*
@@ -2204,7 +2322,10 @@ export function ConversationView({
       </details>
 
       <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 space-y-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
+        <div
+          ref={messagesRef}
+          className="min-w-0 flex-1 space-y-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6"
+        >
           {detail.messages.map((message) => {
             const day = new Date(message.sentAt).toDateString()
             const showDay = day !== lastDay
@@ -2312,48 +2433,63 @@ export function ConversationView({
             )
           })}
 
-          <div ref={bottom} />
+          {/*
+           * Floating rather than docked: the overview is a reference, so it
+           * should not claim a column of the thread — and the button itself sits
+           * in the message flow, sticky to the bottom, so it never covers the
+           * composer.
+           */}
+          {hasOverview ? (
+            <div className="pointer-events-none sticky bottom-2 z-10 flex justify-end pr-1">
+              <button
+                type="button"
+                aria-expanded={overviewOpen}
+                aria-controls="thread-overview"
+                onClick={() => setOverviewOpen((open) => !open)}
+                className="pointer-events-auto inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-2 text-xs font-medium text-foreground shadow-lg transition-colors hover:bg-muted"
+              >
+                {overviewOpen ? (
+                  <PanelRightClose className="size-3.5" />
+                ) : (
+                  <PanelRightOpen className="size-3.5" />
+                )}
+                Overview
+                {mediaAttachments.length > 0
+                  ? ` (${dedupedMedia ? mediaAttachments.length : detail.attachments.length})`
+                  : ''}
+              </button>
+            </div>
+          ) : null}
         </div>
 
-        {mediaAttachments.length > 0 || detail.senderEmail ? (
+        {hasOverview ? (
           <>
-            <aside
-              aria-label="Thread overview"
-              id="thread-media-overview-desktop"
-              className="hidden w-80 shrink-0 flex-col overflow-y-auto border-l border-border bg-muted/20 lg:flex"
-            >
-              {detail.senderEmail ? (
-                <ContactContextEditor
-                  key={detail.senderEmail}
-                  email={detail.senderEmail}
-                  initialContext={detail.contactContext}
-                  onSave={onSaveContactContext}
-                  onSuggest={onSuggestContactContext}
-                />
-              ) : null}
-              {mediaAttachments.length > 0 ? (
-                <MediaOverview
-                  attachments={mediaAttachments}
-                  providerThreadId={detail.providerThreadId}
-                  id="thread-media-overview-desktop-list"
-                  hashFailures={mediaHashFailures}
-                  checking={mediaCandidates.length > 0 && dedupedMedia === null}
-                />
-              ) : null}
-            </aside>
-            {mediaOpen ? (
-              <div className="fixed inset-0 z-50 lg:hidden">
+            {overviewOpen ? (
+              <div className="fixed inset-0 z-50">
                 <button
                   type="button"
-                  aria-label="Close media and attachments"
-                  onClick={() => setMediaOpen(false)}
+                  aria-label="Close thread overview"
+                  onClick={() => setOverviewOpen(false)}
                   className="absolute inset-0 bg-black/40"
                 />
                 <aside
                   aria-label="Thread overview"
-                  id="thread-media-overview-mobile"
-                  className="absolute inset-y-0 right-0 flex w-[min(22rem,90vw)] flex-col overflow-y-auto border-l border-border bg-background shadow-xl"
+                  id="thread-overview"
+                  className="absolute top-3 right-3 bottom-3 flex w-[min(22rem,calc(100vw-1.5rem))] flex-col overflow-y-auto rounded-xl border border-border bg-background shadow-2xl sm:top-6 sm:right-6 sm:bottom-6"
                 >
+                  <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                    <span className="text-xs font-semibold text-foreground">
+                      Thread overview
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Close thread overview"
+                      onClick={() => setOverviewOpen(false)}
+                      className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
                   {detail.senderEmail ? (
                     <ContactContextEditor
                       key={detail.senderEmail}
@@ -2367,8 +2503,6 @@ export function ConversationView({
                     <MediaOverview
                       attachments={mediaAttachments}
                       providerThreadId={detail.providerThreadId}
-                      id="thread-media-overview-mobile-list"
-                      onClose={() => setMediaOpen(false)}
                       hashFailures={mediaHashFailures}
                       checking={
                         mediaCandidates.length > 0 && dedupedMedia === null
@@ -2385,6 +2519,7 @@ export function ConversationView({
       {detail.replyable ? (
         <Composer
           accounts={detail.replyAccounts}
+          providerThreadId={detail.providerThreadId}
           provider={detail.provider}
           suggest={detail.suggestReply}
           onDraft={onDraft}

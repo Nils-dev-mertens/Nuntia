@@ -794,7 +794,9 @@ const markSeenAction = createServerFn({ method: 'POST' })
     return { error: null }
   })
 
-export const Route = createFileRoute('/conversations/$providerThreadId')({
+export const Route = createFileRoute(
+  '/_mailbox/conversations/$providerThreadId',
+)({
   loader: async ({ params }) => {
     const result = await fetchConversation({
       data: { providerThreadId: params.providerThreadId },

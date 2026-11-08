@@ -15,11 +15,9 @@ import {
 } from '@tanstack/react-router'
 import { useState } from 'react'
 
+import { AdminShell } from '#/components/admin-shell.tsx'
 import { currentOperator } from '#/lib/admin/guard.ts'
-import {
-  createFormDraft,
-  listFormsForAdmin,
-} from '#/lib/forms/repository.ts'
+import { createFormDraft, listFormsForAdmin } from '#/lib/forms/repository.ts'
 import type { AdminFormSummary } from '#/lib/forms/repository.ts'
 
 const loadForms = createServerFn({ method: 'GET' }).handler(
@@ -82,25 +80,7 @@ function FormsPage() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl p-8">
-      <header className="flex flex-wrap items-baseline justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">Forms</h1>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Ask the beta a question. Published forms are frozen so the answers
-            stay comparable.
-          </p>
-        </div>
-        <div className="flex items-baseline gap-4 text-xs">
-          <Link to="/admin" className="text-muted-foreground hover:underline">
-            Back to admin
-          </Link>
-          <Link to="/" className="text-muted-foreground hover:underline">
-            Back to the app
-          </Link>
-        </div>
-      </header>
-
+    <AdminShell active="forms">
       {error ? (
         <p
           role="alert"
@@ -110,69 +90,82 @@ function FormsPage() {
         </p>
       ) : null}
 
-      <button
-        onClick={() => void onCreate()}
-        disabled={busy}
-        className="mt-6 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-      >
-        {busy ? 'Creating…' : 'New form'}
-      </button>
+      <section className="rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">All forms</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Newest first. A draft is editable; a published form is not.
+            </p>
+          </div>
+          <button
+            onClick={() => void onCreate()}
+            disabled={busy}
+            className="inline-flex h-8 items-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {busy ? 'Creating…' : 'New form'}
+          </button>
+        </div>
 
-      <div className="mt-6 overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="text-xs text-muted-foreground">
-            <tr>
-              <th className="py-1 pr-3">Form</th>
-              <th className="py-1 pr-3">Status</th>
-              <th className="py-1 pr-3">Questions</th>
-              <th className="py-1 pr-3">Audience</th>
-              <th className="py-1 pr-3">Answers</th>
-              <th className="py-1 pr-3">Published</th>
-            </tr>
-          </thead>
-          <tbody>
-            {forms.length === 0 ? (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs text-muted-foreground">
               <tr>
-                <td colSpan={6} className="py-4 text-sm text-muted-foreground">
-                  Nothing yet. Create the first form.
-                </td>
+                <th className="py-1 pr-3">Form</th>
+                <th className="py-1 pr-3">Status</th>
+                <th className="py-1 pr-3">Questions</th>
+                <th className="py-1 pr-3">Audience</th>
+                <th className="py-1 pr-3">Answers</th>
+                <th className="py-1 pr-3">Published</th>
               </tr>
-            ) : null}
-
-            {forms.map((form) => (
-              <tr key={form.id} className="border-t border-border">
-                <td className="py-1 pr-3">
-                  <Link
-                    to="/admin/forms/$id"
-                    params={{ id: form.id }}
-                    className="text-primary hover:underline"
+            </thead>
+            <tbody>
+              {forms.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-4 text-sm text-muted-foreground"
                   >
-                    {form.title}
-                  </Link>
-                </td>
-                <td className="py-1 pr-3">{form.status}</td>
-                <td className="py-1 pr-3">{form.questionCount}</td>
-                <td className="py-1 pr-3">
-                  {form.audience === 'all'
-                    ? `${form.counts.audience} people`
-                    : `${form.counts.audience} selected`}
-                </td>
-                <td className="py-1 pr-3">
-                  {form.counts.submitted}/{form.counts.audience}
-                  <span className="ml-1 text-xs text-muted-foreground">
-                    · {form.counts.shown} shown
-                  </span>
-                </td>
-                <td className="py-1 pr-3">
-                  {form.publishedAt
-                    ? form.publishedAt.toLocaleDateString()
-                    : '—'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+                    Nothing yet. Create the first form.
+                  </td>
+                </tr>
+              ) : null}
+
+              {forms.map((form) => (
+                <tr key={form.id} className="border-t border-border">
+                  <td className="py-1 pr-3">
+                    <Link
+                      to="/admin/forms/$id"
+                      params={{ id: form.id }}
+                      className="text-primary hover:underline"
+                    >
+                      {form.title}
+                    </Link>
+                  </td>
+                  <td className="py-1 pr-3">{form.status}</td>
+                  <td className="py-1 pr-3">{form.questionCount}</td>
+                  <td className="py-1 pr-3">
+                    {form.audience === 'all'
+                      ? `${form.counts.audience} people`
+                      : `${form.counts.audience} selected`}
+                  </td>
+                  <td className="py-1 pr-3">
+                    {form.counts.submitted}/{form.counts.audience}
+                    <span className="ml-1 text-xs text-muted-foreground">
+                      · {form.counts.shown} shown
+                    </span>
+                  </td>
+                  <td className="py-1 pr-3">
+                    {form.publishedAt
+                      ? form.publishedAt.toLocaleDateString()
+                      : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </AdminShell>
   )
 }

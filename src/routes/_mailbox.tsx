@@ -11,11 +11,29 @@
  */
 
 import { createServerFn } from '@tanstack/react-start'
-import { createFileRoute, redirect, useRouter } from '@tanstack/react-router'
-import { useEffect } from 'react'
+import {
+  Link,
+  Outlet,
+  createFileRoute,
+  redirect,
+  useRouter,
+  useRouterState,
+} from '@tanstack/react-router'
+import { useEffect, useMemo, useState } from 'react'
+import { X } from 'lucide-react'
 
+import { AppShell } from '#/components/app-shell.tsx'
+import type { ShellSection } from '#/components/app-shell.tsx'
+import { ComposeOverlay } from '#/components/compose-overlay.tsx'
+import { QuestionsOverlay } from '#/components/questions-overlay.tsx'
 import { Inbox } from '#/components/inbox'
 import type { MailPreview } from '#/components/inbox'
+import { DONE_GROUP, STATE_META, STATE_ORDER } from '#/lib/conversation-state'
+import {
+  loadComposeState,
+  loadStylePreview,
+  sendMessageAction,
+} from '#/lib/mailbox/compose-actions.ts'
 import { getSession } from '#/lib/auth/index.ts'
 import { isMicrosoftConfigured } from '#/lib/auth/microsoft.ts'
 import {
@@ -37,6 +55,7 @@ import { listOrganizationLabels } from '#/lib/organization/store.ts'
 import { savePreferences } from '#/lib/settings/preferences.ts'
 import { CONVERSATION_STATES } from '#/db/schema.ts'
 import type { ConversationState } from '#/db/schema.ts'
+import { cn } from '#/lib/utils'
 
 /**
  * How often an open tab re-checks the inbox.
@@ -594,7 +613,7 @@ const dismissFormPrompt = createServerFn({ method: 'POST' })
     return { error: result.ok ? null : result.error }
   })
 
-export const Route = createFileRoute('/')({
+export const Route = createFileRoute('/_mailbox')({
   // Signed out is a redirect rather than a branch the inbox renders: without a
   // user there is nobody whose mail this page could possibly show.
   loader: async () => {
@@ -617,11 +636,108 @@ export const Route = createFileRoute('/')({
 function Home() {
   const { formPrompt, openFormCount, ...payload } = Route.useLoaderData()
   const router = useRouter()
+  // The thread route renders beside the list instead of replacing it, so the
+  // layout has to know whether one is open — a mailbox URL means yes. Reading it
+  // from the router rather than state keeps deep links and Back working.
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  })
+  const threadOpen = pathname.startsWith('/conversations/')
 
   // A boolean rather than the list itself: the effect below should restart when
   // a sync starts or ends, not on every progress tick within one. Signed out is
   // not a case here — the loader redirects it to the sign-in page.
   const syncing = payload.syncing.length > 0
+
+  const [section, setSection] = useState('all')
+  const [composeOpen, setComposeOpen] = useState(false)
+  // Questions open in the app rather than on `/ask`: the list they were
+  // noticed in stays behind the window.
+  const [questionsOpen, setQuestionsOpen] = useState(false)
+  const [questionFormId, setQuestionFormId] = useState<string | null>(null)
+  // The only part of compose the inbox payload does not already hold. Fetched
+  // when the window opens, so the list does not pay for it on every load.
+  const [composeSuggestions, setComposeSuggestions] = useState<
+    Array<{ email: string; name: string | null }>
+  >([])
+
+  /**
+   * The sidebar's sections, in the order the user arranged them.
+   *
+   * The design moved the section list out of the page and into the shell, so it
+   * is built here from the same tokens and counts the list groups by — a custom
+   * label can still sit above Needs action, because that is the order's point.
+   */
+  const sections = useMemo<ShellSection[]>(() => {
+    const customLabels = payload.organizationLabels.filter(
+      (label) => label.enabled,
+    )
+    const byToken = new Map<string, ShellSection>()
+
+    for (const state of STATE_ORDER) {
+      byToken.set(`state:${state}`, {
+        key: `state:${state}`,
+        title: payload.stateLabels[state].name,
+        dotClass: STATE_META[state].dotClass,
+        count: payload.counts[state],
+      })
+    }
+
+    for (const label of customLabels) {
+      byToken.set(`label:${label.id}`, {
+        key: `label:${label.id}`,
+        title: label.name,
+        dotClass: 'bg-primary',
+        // Counted from the open rows, like the list's own headings: a label's
+        // done mail is filed under Done, not under the label.
+        count: payload.conversations.filter(
+          (conversation) =>
+            !conversation.done &&
+            conversation.organizationGroup?.id === label.id,
+        ).length,
+        custom: true,
+      })
+    }
+
+    const ordered = resolveInboxOrder(
+      payload.inboxOrder,
+      customLabels.map((label) => label.id),
+    ).flatMap((token) => {
+      const entry = byToken.get(token)
+      return entry ? [entry] : []
+    })
+
+    // Done is deliberately outside the arrangement — finished mail is always
+    // last — so it is appended rather than resolved from a token.
+    return payload.doneCount > 0
+      ? [
+          ...ordered,
+          {
+            key: 'done',
+            title: DONE_GROUP.label,
+            dotClass: 'bg-muted-foreground',
+            count: payload.doneCount,
+            muted: true,
+          },
+        ]
+      : ordered
+  }, [payload])
+
+  useEffect(() => {
+    if (!composeOpen) return
+
+    let cancelled = false
+    void loadComposeState()
+      .then((state) => {
+        if (cancelled || !state.signedIn) return
+        setComposeSuggestions(state.suggestions)
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [composeOpen])
 
   useEffect(() => {
     // Invalidate re-runs the loader, which re-runs the server function, which
@@ -647,73 +763,161 @@ function Home() {
   }, [router, syncing])
 
   return (
-    <Inbox
-      payload={payload}
-      formPrompt={formPrompt}
-      openFormCount={openFormCount}
-      onResync={async () => {
-        const result = await resyncInbox()
-        // The action has already written whatever it could, so a refresh is
-        // what makes the list reflect it.
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onDismissForm={async (formId) => {
-        const result = await dismissFormPrompt({ data: { formId } })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSearch={(query) => searchInbox({ data: { query } })}
-      onPreview={(providerThreadId) =>
-        fetchPreview({ data: { providerThreadId } })
-      }
-      onSetDone={async (providerThreadId, done) => {
-        const result = await setDoneAction({
-          data: { providerThreadId, done },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSetState={async (providerThreadId, state) => {
-        const result = await setStateOverrideAction({
-          data: { providerThreadId, state },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSetDoneMany={async (providerThreadIds, done) => {
-        const result = await setDoneBatchAction({
-          data: { providerThreadIds, done },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSetStateMany={async (providerThreadIds, state) => {
-        const result = await setStateBatchAction({
-          data: { providerThreadIds, state },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSetUnread={async (providerThreadIds, unread) => {
-        const result = await setUnreadAction({
-          data: { providerThreadIds, unread },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onSetOrganizationGroup={async (providerThreadIds, groupId) => {
-        const result = await setOrganizationGroupAction({
-          data: { providerThreadIds, groupId },
-        })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-      onReorderSections={async (order) => {
-        const result = await saveInboxOrderAction({ data: { order } })
-        if (!result.error) await router.invalidate()
-        return result
-      }}
-    />
+    <AppShell
+      sections={sections}
+      activeSection={section}
+      onSelectSection={setSection}
+      accounts={payload.accounts}
+      onCompose={() => setComposeOpen(true)}
+    >
+      <div className="flex min-h-screen w-full">
+        <div
+          className={cn(
+            // The list owns its own scroll surface on a wide screen. The thread
+            // opens beside it, not over it, and nothing the thread does — an
+            // effect, a focus, a re-render — can move the list then, because the
+            // list's position is the element's own `scrollTop` rather than the
+            // window's.
+            'min-w-0 flex-1 md:h-dvh md:overflow-y-auto md:overscroll-contain',
+            threadOpen && 'hidden md:block md:w-[22rem] md:flex-none',
+          )}
+        >
+          <Inbox
+            payload={payload}
+            embedded
+            section={section}
+            onSectionChange={setSection}
+            onCompose={() => setComposeOpen(true)}
+            hidePreview={threadOpen}
+            formPrompt={formPrompt}
+            openFormCount={openFormCount}
+            onResync={async () => {
+              const result = await resyncInbox()
+              // The action has already written whatever it could, so a refresh is
+              // what makes the list reflect it.
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onOpenQuestions={(formId) => {
+              setQuestionFormId(formId ?? null)
+              setQuestionsOpen(true)
+            }}
+            onDismissForm={async (formId) => {
+              const result = await dismissFormPrompt({ data: { formId } })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSearch={(query) => searchInbox({ data: { query } })}
+            onPreview={(providerThreadId) =>
+              fetchPreview({ data: { providerThreadId } })
+            }
+            onSetDone={async (providerThreadId, done) => {
+              const result = await setDoneAction({
+                data: { providerThreadId, done },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetState={async (providerThreadId, state) => {
+              const result = await setStateOverrideAction({
+                data: { providerThreadId, state },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetDoneMany={async (providerThreadIds, done) => {
+              const result = await setDoneBatchAction({
+                data: { providerThreadIds, done },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetStateMany={async (providerThreadIds, state) => {
+              const result = await setStateBatchAction({
+                data: { providerThreadIds, state },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetUnread={async (providerThreadIds, unread) => {
+              const result = await setUnreadAction({
+                data: { providerThreadIds, unread },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetOrganizationGroup={async (providerThreadIds, groupId) => {
+              const result = await setOrganizationGroupAction({
+                data: { providerThreadIds, groupId },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onReorderSections={async (order) => {
+              const result = await saveInboxOrderAction({ data: { order } })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+          />
+        </div>
+
+        {threadOpen ? (
+          <div className="sticky top-0 flex h-dvh min-w-0 flex-1 flex-col border-l border-border bg-background max-md:fixed max-md:inset-0 max-md:z-40">
+            <div className="flex h-10 shrink-0 items-center justify-between border-b border-border px-3">
+              <span className="text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                Thread
+              </span>
+              <Link
+                to="/"
+                // The list kept its place while the thread was open; closing it
+                // is returning to that list, not leaving it.
+                resetScroll={false}
+                aria-label="Close thread"
+                className="flex size-7 items-center justify-center rounded-[4px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <X aria-hidden="true" className="size-4" />
+              </Link>
+            </div>
+            <div className="min-h-0 flex-1">
+              <Outlet />
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <QuestionsOverlay
+        open={questionsOpen}
+        initialFormId={questionFormId}
+        onClose={() => setQuestionsOpen(false)}
+        onAnswered={() => void router.invalidate()}
+      />
+
+      <ComposeOverlay
+        open={composeOpen}
+        onClose={() => setComposeOpen(false)}
+        accounts={payload.accounts}
+        suggestions={composeSuggestions}
+        loadStyle={(input) => loadStylePreview({ data: input })}
+        submit={async (input) => {
+          const result = await sendMessageAction({ data: input })
+
+          if (!result.error) {
+            setComposeOpen(false)
+            await router.invalidate()
+
+            if (result.threadId) {
+              await router.navigate({
+                to: '/conversations/$providerThreadId',
+                params: { providerThreadId: result.threadId },
+              })
+            }
+            // Graph reports no thread id: the message lands on the next sync,
+            // and the list the user is already looking at is the destination.
+          }
+
+          return result
+        }}
+      />
+    </AppShell>
   )
 }
