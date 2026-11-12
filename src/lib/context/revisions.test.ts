@@ -9,17 +9,16 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 
 const { eq } = await import('drizzle-orm')
 const { db, initDatabase } = await import('#/db/index.ts')
-const {
-  accounts,
-  contactContexts,
-  contextRevisions,
-  conversations,
-  users,
-} = await import('#/db/schema.ts')
+const { accounts, contactContexts, contextRevisions, conversations, users } =
+  await import('#/db/schema.ts')
+const { saveContactContext } = await import('#/lib/contacts/context.ts')
+const { conversationId } = await import('#/lib/conversation/model.ts')
+const { setGoalIfUnset } = await import('#/lib/conversation/repository.ts')
 const {
   latestLabelSource,
   listContextRevisions,
   listRecentContextRevisions,
+  recordUserContactUpdate,
   recordUserLabelChange,
   undoContextRevision,
   writeAutoContextUpdate,
@@ -29,8 +28,10 @@ await initDatabase()
 
 const OWNER = 'context-owner@example.com'
 const ACCOUNT = 'context-me@example.com'
-const CONVERSATION = 'context-conv-1'
 const THREAD = 'context-thread-1'
+// The repository builds an id from the account and thread; the seed has to use
+// the same shape or `setGoalIfUnset` cannot find the row.
+const CONVERSATION = conversationId(ACCOUNT, THREAD)
 const SENDER = 'context-ana@example.com'
 
 const EMPTY = {
@@ -63,6 +64,50 @@ beforeEach(async () => {
   })
 })
 
+describe('setGoalIfUnset', () => {
+  test('writes an inferred goal, records it, and never replaces one', async () => {
+    const written = await setGoalIfUnset(
+      OWNER,
+      ACCOUNT,
+      THREAD,
+      'Confirm the Tuesday date',
+    )
+    expect(written).not.toBeNull()
+    if (!written) return
+
+    const [row] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, CONVERSATION))
+    expect(row.goal).toBe('Confirm the Tuesday date')
+
+    const [revision] = await listContextRevisions(
+      OWNER,
+      'conversation',
+      CONVERSATION,
+    )
+    expect(revision).toMatchObject({
+      id: written.revisionId,
+      field: 'goal',
+      previousValue: null,
+      nextValue: 'Confirm the Tuesday date',
+      source: 'auto',
+    })
+
+    // A second inference must not take a goal that is already set.
+    expect(
+      await setGoalIfUnset(OWNER, ACCOUNT, THREAD, 'Something else'),
+    ).toBeNull()
+
+    expect(await undoContextRevision(OWNER, written.revisionId)).toBe(true)
+    const [afterUndo] = await db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.id, CONVERSATION))
+    expect(afterUndo.goal).toBeNull()
+  })
+})
+
 describe('writeAutoContextUpdate', () => {
   test('writes the change and records what it replaced', async () => {
     const changed = await writeAutoContextUpdate({
@@ -91,7 +136,11 @@ describe('writeAutoContextUpdate', () => {
       .where(eq(contactContexts.email, SENDER))
     expect(contact.roleCompany).toBe('Northwind, PM')
 
-    const [goal] = await listContextRevisions(OWNER, 'conversation', CONVERSATION)
+    const [goal] = await listContextRevisions(
+      OWNER,
+      'conversation',
+      CONVERSATION,
+    )
     expect(goal).toMatchObject({
       field: 'goal',
       previousValue: null,
@@ -327,5 +376,103 @@ describe('listRecentContextRevisions', () => {
       (revision) => revision.id === mine[0].id,
     )
     expect(after[0].undone).toBe(true)
+  })
+})
+
+describe('contact provenance', () => {
+  test('records a user edit and keeps it out of the next refresh', async () => {
+    await writeAutoContextUpdate({
+      userId: OWNER,
+      conversationId: CONVERSATION,
+      providerThreadId: THREAD,
+      goal: { previous: null, next: null },
+      contact: {
+        email: SENDER,
+        previous: EMPTY,
+        next: { ...EMPTY, roleCompany: 'AI wording' },
+      },
+    })
+
+    const previous = {
+      email: SENDER,
+      ...EMPTY,
+      roleCompany: 'AI wording',
+      summary: '',
+      importance: null,
+      sources: { roleCompany: 'auto' as const },
+    }
+
+    // The route saves first, then records — the revision names the value that
+    // was replaced, so it must be written after the row holds the new one.
+    await saveContactContext(OWNER, SENDER, {
+      ...EMPTY,
+      roleCompany: 'My wording',
+      importance: null,
+    })
+    const recorded = await recordUserContactUpdate({
+      userId: OWNER,
+      email: SENDER,
+      threadId: THREAD,
+      previous,
+      next: { ...EMPTY, roleCompany: 'My wording', importance: null },
+    })
+    expect(recorded).toBe(1)
+
+    const [revision] = await listContextRevisions(OWNER, 'contact', SENDER)
+    expect(revision).toMatchObject({
+      field: 'roleCompany',
+      previousValue: 'AI wording',
+      nextValue: 'My wording',
+      source: 'user',
+    })
+
+    // The next mail proposes the old guess again; the user's wording wins.
+    const refreshed = await writeAutoContextUpdate({
+      userId: OWNER,
+      conversationId: CONVERSATION,
+      providerThreadId: THREAD,
+      goal: { previous: null, next: null },
+      contact: {
+        email: SENDER,
+        previous: { ...EMPTY, roleCompany: 'My wording' },
+        next: { ...EMPTY, roleCompany: 'AI again' },
+      },
+    })
+    expect(refreshed).toBe(0)
+
+    const [contact] = await db
+      .select()
+      .from(contactContexts)
+      .where(eq(contactContexts.email, SENDER))
+    expect(contact.roleCompany).toBe('My wording')
+    expect(contact.sources).toEqual({ roleCompany: 'user' })
+  })
+
+  test('writes the short summary and marks it automatic', async () => {
+    const changed = await writeAutoContextUpdate({
+      userId: OWNER,
+      conversationId: CONVERSATION,
+      providerThreadId: THREAD,
+      goal: { previous: null, next: null },
+      contact: {
+        email: SENDER,
+        previous: EMPTY,
+        previousSummary: '',
+        next: {
+          ...EMPTY,
+          summary: 'Sam leads Northwind and is buying the Q3 rollout.',
+        },
+      },
+    })
+
+    expect(changed).toBe(1)
+    const [contact] = await db
+      .select()
+      .from(contactContexts)
+      .where(eq(contactContexts.email, SENDER))
+    expect(contact.summary).toBe(
+      'Sam leads Northwind and is buying the Q3 rollout.',
+    )
+    expect(contact.sources).toEqual({ summary: 'auto' })
   })
 })

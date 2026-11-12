@@ -46,6 +46,10 @@ import {
 } from '#/lib/context/revisions.ts'
 import { listContactDecisionContextByEmail } from '#/lib/contacts/context.ts'
 import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
+import { loadContactHistory } from '#/lib/contacts/history.ts'
+import type { ContactHistoryThread } from '#/lib/contacts/history.ts'
+import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
+import { listContactTags } from '#/lib/contacts/tags.ts'
 import { customStateMeanings } from '#/lib/organization/labels.ts'
 import type { StateDefinitions } from '#/lib/organization/labels.ts'
 import type { MeaningLabel } from '#/lib/organization/matching.ts'
@@ -87,6 +91,10 @@ export type SenderFacts = {
   ignored: ReadonlySet<string>
   unreplyable: ReadonlySet<string>
   contactContext: ReadonlyMap<string, ContactDecisionContext>
+  /** The tags already on each correspondent, read once for the batch. */
+  contactTags: ReadonlyMap<string, string[]>
+  /** Earlier threads for a correspondent, memoised for the batch. */
+  contactHistory: (email: string) => Promise<ContactHistoryThread[]>
 }
 
 /**
@@ -97,9 +105,7 @@ export type SenderFacts = {
  * the same reason `loadDecisionPipeline` does not: a label read that fails must
  * cost personalisation, not the decision.
  */
-async function loadStateDefinitions(
-  userId: string,
-): Promise<StateDefinitions> {
+async function loadStateDefinitions(userId: string): Promise<StateDefinitions> {
   try {
     return customStateMeanings(await listStateLabels(userId))
   } catch (error) {
@@ -114,9 +120,7 @@ async function loadStateDefinitions(
  * Never throws, for the same reason the state meanings do not: a label read that
  * fails must cost custom filing, not the decision.
  */
-async function loadMeaningLabelsFor(
-  userId: string,
-): Promise<MeaningLabel[]> {
+async function loadMeaningLabelsFor(userId: string): Promise<MeaningLabel[]> {
   try {
     return await listMeaningLabels(userId)
   } catch (error) {
@@ -130,13 +134,31 @@ async function loadSenderFacts(
   accountId: string,
   userId: string,
 ): Promise<SenderFacts> {
-  const [ignored, unreplyable, contactContext] = await Promise.all([
-    listIgnoredSenders(accountId),
-    listUnreplyableSenders(accountId),
-    listContactDecisionContextByEmail(userId),
-  ])
+  const [ignored, unreplyable, contactContext, contactTags] = await Promise.all(
+    [
+      listIgnoredSenders(accountId),
+      listUnreplyableSenders(accountId),
+      listContactDecisionContextByEmail(userId),
+      // Read for the same reason as the profile: a refresh must reuse a tag the
+      // user already chose rather than propose a near-duplicate every sync.
+      listContactTags(userId),
+    ],
+  )
 
-  return { ignored, unreplyable, contactContext }
+  // One read per correspondent per batch: a backfill of a busy mailbox would
+  // otherwise repeat the same history query for every thread they appear in.
+  const historyCache = new Map<string, Promise<ContactHistoryThread[]>>()
+  const contactHistory = (email: string) => {
+    const address = normaliseContactEmail(email)
+    if (!address) return Promise.resolve([])
+    const cached = historyCache.get(address)
+    if (cached) return cached
+    const pending = loadContactHistory(userId, address)
+    historyCache.set(address, pending)
+    return pending
+  }
+
+  return { ignored, unreplyable, contactContext, contactTags, contactHistory }
 }
 
 export type SyncOptions = {
@@ -280,6 +302,19 @@ export async function decideAndSave(
   const meaningLabels =
     opts.meaningLabels ?? (await loadMeaningLabelsFor(opts.userId))
   const otherParty = otherPartyOf(withCall)
+  const pipeline = opts.pipeline ?? (await loadDecisionPipeline(opts.userId))
+  // The open thread is already in the prompt, so it is removed from the history
+  // rather than repeated as though it were an earlier conversation. Only read
+  // when the updater will actually use it: a topic-only install must not pay for
+  // a history query on every synced thread.
+  const senderHistory =
+    otherParty &&
+    pipeline.context.refreshesProfiles === true &&
+    !withCall.isAutomated
+      ? (await senderFacts.contactHistory(otherParty)).filter(
+          (thread) => thread.providerThreadId !== withCall.providerThreadId,
+        )
+      : []
 
   const decision = await decideConversation(
     {
@@ -296,13 +331,15 @@ export async function decideAndSave(
       senderImportance:
         senderFacts.contactContext.get(otherParty)?.importance ?? null,
       senderContext: senderFacts.contactContext.get(otherParty) ?? null,
+      senderTags: senderFacts.contactTags.get(otherParty) ?? [],
+      senderHistory,
       stateDefinitions,
       meaningLabels,
       // Machine mail is labelled, never profiled. The flag is already derived
       // from the messages and stored on the row, so this asks nothing new.
       skipContextRefresh: withCall.isAutomated,
     },
-    opts.pipeline ?? (await loadDecisionPipeline(opts.userId)),
+    pipeline,
   )
   const updated = applyDecision(withCall, decision)
 
@@ -349,6 +386,7 @@ export async function decideAndSave(
                   topics: storedContact?.topics ?? '',
                   currentWork: storedContact?.currentWork ?? '',
                 },
+                previousSummary: storedContact?.summary ?? null,
                 next: decision.contact,
               }
             : null,

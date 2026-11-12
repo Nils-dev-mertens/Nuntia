@@ -13,6 +13,7 @@ const REQUEST: ReplyDraftRequest = {
   subject: 'Re: Project launch',
   topic: 'Finalizing the launch date',
   goal: 'Confirm whether Tuesday works',
+  contact: null,
   recipient: { name: 'Sarah', email: 'sarah@example.com' },
   ownerEmail: 'me@example.com',
   messages: [

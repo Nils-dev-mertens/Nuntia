@@ -649,6 +649,27 @@ export const senderProfiles = sqliteTable(
  * Names are the *latest* non-empty one seen; a message with only an address
  * never erases a name already learned.
  */
+/** The fields kept about a correspondent; `summary` is the one users read. */
+export const CONTACT_CONTEXT_FIELDS = [
+  'roleCompany',
+  'relationship',
+  'topics',
+  'currentWork',
+  'summary',
+] as const
+
+export type ContactContextField = (typeof CONTACT_CONTEXT_FIELDS)[number]
+
+/**
+ * Which fields the app wrote and which the user did.
+ *
+ * The pair is what stops an automatic refresh from quietly replacing a note the
+ * user typed: absent means nobody has claimed the field yet.
+ */
+export type ContactContextSources = Partial<
+  Record<ContactContextField, 'auto' | 'user'>
+>
+
 export const contactContexts = sqliteTable(
   'contact_contexts',
   {
@@ -661,6 +682,20 @@ export const contactContexts = sqliteTable(
     relationship: text('relationship'),
     topics: text('topics'),
     currentWork: text('current_work'),
+    /**
+     * One or two plain-language sentences describing the relationship.
+     *
+     * This is the part the user sees by default: the four fields above are
+     * working notes for classification, while the summary is the short version
+     * of what the app understands about the person.
+     */
+    summary: text('summary'),
+    /**
+     * Provenance per field. `auto` is provisional and may be revised by a later
+     * mail; `user` is the user's own words and is never overwritten by a
+     * refresh. A cleared field drops its entry so a later mail may fill it again.
+     */
+    sources: text('sources', { mode: 'json' }).$type<ContactContextSources>(),
     /** User's 1–10 importance rating for this correspondent; null means unrated. */
     importance: integer('importance'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
@@ -670,6 +705,144 @@ export const contactContexts = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.userId, table.email] }),
     index('contact_contexts_email_idx').on(table.email),
+  ],
+)
+
+/**
+ * A tag the user put on a correspondent.
+ *
+ * Free-form on purpose: a tag is a word the user typed, and "which tags exist"
+ * is whatever their contacts carry, so these rows are the authority on who has
+ * what. A rename is therefore not a special operation — it is adding the new
+ * spelling and removing the old one, which is also what makes a tag shared by
+ * two people behave the same as one used once. `contactTagDescriptions` is the
+ * other half: the words that exist on their own, plus what each one means.
+ *
+ * Keyed by `(user, address)`, like the profile: a person corresponds through
+ * whichever mailbox reaches them, and their tags follow the person rather than
+ * the account. The tag text is stored as typed (trimmed); the writer refuses a
+ * case-only duplicate so "Acme" and "acme" cannot both sit on one contact.
+ */
+/** Who wrote a tag. `auto` may be revised by a later refresh; `user` never is. */
+export const CONTACT_TAG_SOURCES = ['auto', 'user'] as const
+export type ContactTagSource = (typeof CONTACT_TAG_SOURCES)[number]
+
+export const contactTags = sqliteTable(
+  'contact_tags',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Normalized address; shared across this user's connected mailboxes. */
+    email: text('email').notNull(),
+    /** The tag as the user typed it, trimmed. */
+    tag: text('tag').notNull(),
+    /**
+     * Who wrote this tag, and therefore who may change it.
+     *
+     * The same provenance rule the profile fields follow, in one column rather
+     * than a per-field map: the user's tags are theirs, and an automatic refresh
+     * only adds or removes the ones it wrote. A tag the user adds on top of an
+     * automatic one claims it, so the next refresh cannot take it away.
+     */
+    source: text('source').$type<ContactTagSource>().notNull().default('user'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.email, table.tag] }),
+    // The directory filters by one tag across every contact, so the lookup runs
+    // from the tag side even though the row is keyed from the person's.
+    index('contact_tags_user_tag_idx').on(table.userId, table.tag),
+  ],
+)
+
+/**
+ * What a tag means, in the user's words.
+ *
+ * Kept out of `contact_tags` because the description is about the word rather
+ * than about one person carrying it: stored on the rows it would be written once
+ * per contact, and the meaning would disappear with the last contact that had
+ * it. The key is the lowercased tag text — the same grouping the management
+ * list uses — so "Acme" and "acme" cannot drift into two descriptions.
+ *
+ * There is deliberately no row for a tag nobody carries: descriptions are
+ * written from the list of tags in use, and deleting a tag deletes its
+ * description with it.
+ */
+export const contactTagDescriptions = sqliteTable(
+  'contact_tag_descriptions',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Lowercased tag text, so the key matches however the tag was typed. */
+    tag: text('tag').notNull(),
+    /** What the tag is for, one line, as the user or the app wrote it. */
+    description: text('description').notNull(),
+    /**
+     * Who wrote the sentence, and therefore who may rewrite it.
+     *
+     * `auto` is the app's own draft: it is refreshed when the people carrying
+     * the tag change, because the sentence is meant to describe that membership.
+     * `user` is never rewritten — the first save by hand claims the text, the
+     * same provenance rule the tags themselves follow.
+     */
+    source: text('source').$type<ContactTagSource>().notNull().default('user'),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.tag] })],
+)
+
+/** What happened to one address's membership of one tag. */
+export const CONTACT_TAG_EVENT_ACTIONS = ['added', 'removed'] as const
+export type ContactTagEventAction = (typeof CONTACT_TAG_EVENT_ACTIONS)[number]
+
+/**
+ * The change log of the tag vocabulary: who was added to a tag and who left it.
+ *
+ * Two uses, and neither can be reconstructed from the rows themselves:
+ *
+ * - **The history.** `contact_tags` says who carries a tag *now*; it cannot say
+ *   that the tag was made for a project that ended, or that half its people were
+ *   removed last week. The management screen shows the latest few changes for
+ *   exactly that reason.
+ * - **The trigger for an automatic description.** A description written by the
+ *   app (`contact_tag_descriptions.source = 'auto'`) is refreshed when the newest
+ *   event for its tag is newer than the text, so the sentence keeps describing
+ *   the membership it was drawn from rather than the one it started with.
+ *
+ * `tag` is stored lowercased, like the description key, so a rename moves the
+ * history with the word instead of leaving it under the old spelling.
+ */
+export const contactTagEvents = sqliteTable(
+  'contact_tag_events',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Lowercased tag text. */
+    tag: text('tag').notNull(),
+    /** The contact whose membership changed. */
+    email: text('email').notNull(),
+    action: text('action').$type<ContactTagEventAction>().notNull(),
+    /** Whether the user made the change or an automatic refresh did. */
+    source: text('source').$type<ContactTagSource>().notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    // Read newest-first for one tag, and scanned per user for the page.
+    index('contact_tag_events_user_tag_created_idx').on(
+      table.userId,
+      table.tag,
+      table.createdAt,
+    ),
   ],
 )
 
@@ -933,6 +1106,18 @@ export const appSettings = sqliteTable(
       .notNull()
       .default(6),
     /**
+     * Whether every replyable thread may get a draft, regardless of importance.
+     *
+     * Off by default, which keeps the threshold authoritative. On is for a user
+     * who wants the composer offered everywhere and is willing to pay for the
+     * extra calls: importance then stops gating drafts, though the other
+     * conditions — a model, a reachable recipient, and not having spoken last —
+     * still apply.
+     */
+    suggestReplyAlways: integer('suggest_reply_always', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    /**
      * Whether a reply the user sends is checked against the thread's goal.
      *
      * On by default: the goal is the reason a reply exists, and the check is what
@@ -947,15 +1132,15 @@ export const appSettings = sqliteTable(
      * Whether the app refreshes a thread's goal and the correspondent's profile
      * from the mail itself.
      *
-     * The one AI feature that writes to fields the user owns, which is why it is
-     * off by default and why it is a switch at all: it is one model call per
-     * decided thread, and what it buys is text the user did not type. Everything
-     * it writes lands in `context_revisions` with an Undo, so opting in is not a
-     * one-way door — but opting in is still the user's decision to make.
+     * On by default, because a profile that only changes when the user remembers
+     * to fill it in is not context. It is still a switch: the wider prompt costs
+     * more per decided thread, and it writes fields the user owns. Everything it
+     * writes lands in `context_revisions` with an Undo, and a field the user
+     * edited is never revised automatically.
      */
     autoContextEnabled: integer('auto_context_enabled', { mode: 'boolean' })
       .notNull()
-      .default(false),
+      .default(true),
     /**
      * Whether avatars may be fetched from Gravatar.
      *

@@ -1125,6 +1125,59 @@ export async function setGoal(
   await setConversationDetails(accountId, providerThreadId, { goal })
 }
 
+/**
+ * Set a goal only while the thread still has none.
+ *
+ * Used for a goal inferred after the user replies. Checked and written under the
+ * lock so a goal the user typed — or one an earlier inference wrote — cannot be
+ * replaced by a model's reading of a later reply. The write is revisioned like
+ * any other automatic context change, so it appears in recent changes and can be
+ * undone. Returns the stored goal and its revision, or null when nothing was
+ * written.
+ */
+export async function setGoalIfUnset(
+  userId: string,
+  accountId: string,
+  providerThreadId: string,
+  goal: string,
+): Promise<{ goal: string; revisionId: string } | null> {
+  const owner = userId.trim().toLowerCase()
+  const value = goal.trim()
+  if (!owner || !value) return null
+
+  const id = conversationId(accountId, providerThreadId)
+
+  return withWriteLock(() =>
+    db.transaction(async (tx) => {
+      const existing = await tx.query.conversations.findFirst({
+        where: eq(conversations.id, id),
+        columns: { goal: true },
+      })
+      if (!existing || existing.goal) return null
+
+      await tx
+        .update(conversations)
+        .set({ goal: value, updatedAt: new Date() })
+        .where(eq(conversations.id, id))
+
+      const revisionId = randomUUID()
+      await tx.insert(contextRevisions).values({
+        id: revisionId,
+        userId: owner,
+        scope: 'conversation',
+        target: id,
+        field: 'goal',
+        previousValue: null,
+        nextValue: value,
+        source: 'auto',
+        threadId: providerThreadId,
+      })
+
+      return { goal: value, revisionId }
+    }),
+  )
+}
+
 /** Persist both user-owned conversation details under the SQLite write lock. */
 export async function setConversationDetails(
   accountId: string,

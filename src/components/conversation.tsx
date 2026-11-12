@@ -27,6 +27,7 @@ import {
 import type {
   ActionFailure,
   ConversationDetail,
+  InferredGoal,
   ReplyDraftOutcome,
   ReplyGoalCheck,
 } from '#/lib/gmail/service.ts'
@@ -714,6 +715,33 @@ function MediaOverview({
   )
 }
 
+function FieldSource({ source }: { source?: 'auto' | 'user' }) {
+  if (!source) return null
+  return (
+    <span className="ml-1 rounded border border-border px-1 py-px text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
+      {source === 'auto' ? 'AI' : 'You'}
+    </span>
+  )
+}
+
+/** The short description shown to the user, with a plain fallback for old rows. */
+function contactDescription(
+  context: ConversationDetail['contactContext'],
+): string | null {
+  if (!context) return null
+  if (context.summary.trim()) return context.summary.trim()
+
+  const parts = [
+    context.roleCompany,
+    context.relationship,
+    context.topics,
+    context.currentWork,
+  ]
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+  return parts.length > 0 ? parts.slice(0, 2).join(' · ') : null
+}
+
 function ContactContextEditor({
   email,
   initialContext,
@@ -817,6 +845,7 @@ function ContactContextEditor({
   const bodyId = useId()
 
   const hasContext = Boolean(
+    initialContext?.summary ||
     initialContext?.roleCompany ||
     initialContext?.relationship ||
     initialContext?.topics ||
@@ -824,6 +853,16 @@ function ContactContextEditor({
     (initialContext?.importance !== null &&
       initialContext?.importance !== undefined),
   )
+  const description = contactDescription(initialContext)
+  const hasDetails = Boolean(
+    initialContext?.roleCompany ||
+    initialContext?.relationship ||
+    initialContext?.topics ||
+    initialContext?.currentWork,
+  )
+  const autoMaintained = initialContext
+    ? Object.values(initialContext.sources).some((source) => source === 'auto')
+    : false
 
   return (
     <section className="border-b border-border bg-muted/20 last:border-b-0">
@@ -886,7 +925,10 @@ function ContactContextEditor({
               onSubmit={(event) => void save(event)}
             >
               <label className="block text-xs text-muted-foreground">
-                Role / company
+                <span>
+                  Role / company
+                  <FieldSource source={initialContext?.sources.roleCompany} />
+                </span>
                 <input
                   value={roleCompany}
                   onChange={(event) => setRoleCompany(event.target.value)}
@@ -922,7 +964,10 @@ function ContactContextEditor({
                 </select>
               </label>
               <label className="block text-xs text-muted-foreground">
-                Relationship
+                <span>
+                  Relationship
+                  <FieldSource source={initialContext?.sources.relationship} />
+                </span>
                 <textarea
                   value={relationship}
                   onChange={(event) => setRelationship(event.target.value)}
@@ -933,7 +978,10 @@ function ContactContextEditor({
                 />
               </label>
               <label className="block text-xs text-muted-foreground">
-                Topics discussed
+                <span>
+                  Topics discussed
+                  <FieldSource source={initialContext?.sources.topics} />
+                </span>
                 <textarea
                   value={topics}
                   onChange={(event) => setTopics(event.target.value)}
@@ -944,7 +992,10 @@ function ContactContextEditor({
                 />
               </label>
               <label className="block text-xs text-muted-foreground">
-                Currently working on
+                <span>
+                  Currently working on
+                  <FieldSource source={initialContext?.sources.currentWork} />
+                </span>
                 <textarea
                   value={currentWork}
                   onChange={(event) => setCurrentWork(event.target.value)}
@@ -954,6 +1005,10 @@ function ContactContextEditor({
                   className="mt-1 w-full resize-y rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-foreground/30"
                 />
               </label>
+              <p className="text-[11px] text-muted-foreground">
+                AI-filled fields follow new mail. Editing a field keeps your
+                wording and stops automatic changes to it.
+              </p>
               {error ? (
                 <p role="alert" className="text-xs text-destructive">
                   {error}
@@ -1002,6 +1057,11 @@ function ContactContextEditor({
             </form>
           ) : hasContext ? (
             <>
+              {description ? (
+                <p className="mt-2 whitespace-pre-wrap text-xs text-foreground">
+                  {description}
+                </p>
+              ) : null}
               {initialContext?.importance !== null &&
               initialContext?.importance !== undefined ? (
                 <span
@@ -1011,39 +1071,38 @@ function ContactContextEditor({
                   Contact importance · {initialContext.importance}/10
                 </span>
               ) : null}
-              <dl className="mt-3 space-y-2 text-sm">
-                {[
-                  ['Role / company', initialContext?.roleCompany],
-                  ['Relationship', initialContext?.relationship],
-                  ['Topics discussed', initialContext?.topics],
-                  ['Currently working on', initialContext?.currentWork],
-                ].map(([label, value]) =>
-                  value ? (
-                    <div key={label}>
-                      <dt className="text-[10px] font-medium text-muted-foreground">
-                        {label}
-                      </dt>
-                      <dd className="whitespace-pre-wrap text-xs text-foreground">
-                        {value}
-                      </dd>
-                    </div>
-                  ) : null,
-                )}
-              </dl>
-            </>
-          ) : initialContext?.importance !== null &&
-            initialContext?.importance !== undefined ? (
-            <>
-              <span className="mt-2 inline-flex rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                Contact importance · {initialContext.importance}/10
-              </span>
-              <button
-                type="button"
-                onClick={() => setEditing(true)}
-                className="ml-2 rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
-              >
-                Edit context
-              </button>
+              {hasDetails ? (
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-[11px] font-medium text-muted-foreground">
+                    Details
+                  </summary>
+                  <dl className="mt-2 space-y-2 text-sm">
+                    {[
+                      ['Role / company', initialContext?.roleCompany],
+                      ['Relationship', initialContext?.relationship],
+                      ['Topics discussed', initialContext?.topics],
+                      ['Currently working on', initialContext?.currentWork],
+                    ].map(([label, value]) =>
+                      value ? (
+                        <div key={label}>
+                          <dt className="text-[10px] font-medium text-muted-foreground">
+                            {label}
+                          </dt>
+                          <dd className="whitespace-pre-wrap text-xs text-foreground">
+                            {value}
+                          </dd>
+                        </div>
+                      ) : null,
+                    )}
+                  </dl>
+                </details>
+              ) : null}
+              {autoMaintained ? (
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  Kept up to date from your mail. Edit a field and your wording
+                  stays.
+                </p>
+              ) : null}
             </>
           ) : (
             <p className="mt-2 text-xs text-muted-foreground">
@@ -1051,6 +1110,15 @@ function ContactContextEditor({
               Review suggestions before saving.
             </p>
           )}
+          {!editing ? (
+            <Link
+              to="/contacts/$email"
+              params={{ email }}
+              className="mt-3 inline-flex border-t border-border pt-2 text-[11px] font-medium text-primary hover:underline"
+            >
+              All threads with this person
+            </Link>
+          ) : null}
         </div>
       ) : null}
     </section>
@@ -1390,6 +1458,7 @@ function Composer({
   onDraft,
   onSend,
   onReviewReply,
+  onUndoGoal,
 }: {
   /** Addresses this reply could leave from, best first. */
   accounts: Array<{ id: string; email: string }>
@@ -1409,8 +1478,11 @@ function Composer({
   /** Judge the reply just sent against the thread's goal. Never blocks a send. */
   onReviewReply: (body: string) => Promise<{
     check: ReplyGoalCheck | null
+    inferredGoal: InferredGoal | null
     error: string | null
   }>
+  /** Undo a goal the app inferred from the reply that was just sent. */
+  onUndoGoal: (revisionId: string) => Promise<{ error: string | null }>
 }) {
   const [body, setBody] = useState('')
   const [attachments, setAttachments] = useState<ReplyAttachmentUpload[]>([])
@@ -1427,8 +1499,11 @@ function Composer({
   // The send has already happened by the time any of this exists, so it is
   // advice in a box rather than a state the reply is waiting on.
   const [goalCheck, setGoalCheck] = useState<ReplyGoalCheck | null>(null)
+  const [inferredGoal, setInferredGoal] = useState<InferredGoal | null>(null)
   const [reviewingGoal, setReviewingGoal] = useState(false)
+  const [undoingGoal, setUndoingGoal] = useState(false)
   const [goalError, setGoalError] = useState<string | null>(null)
+  const [goalUndoError, setGoalUndoError] = useState<string | null>(null)
   const textarea = useRef<HTMLTextAreaElement>(null)
   /**
    * The reply is kept per thread, in the browser, until it is sent.
@@ -1487,10 +1562,31 @@ function Composer({
         return
       }
       setGoalCheck(result.check)
+      setInferredGoal(result.inferredGoal)
     } catch {
       setGoalError('Could not check that reply against your goal.')
     } finally {
       setReviewingGoal(false)
+    }
+  }
+
+  /** Put the goal back to unset, using the revision the inference recorded. */
+  async function undoInferredGoal() {
+    if (!inferredGoal || undoingGoal) return
+
+    setUndoingGoal(true)
+    setGoalUndoError(null)
+    try {
+      const result = await onUndoGoal(inferredGoal.revisionId)
+      if (result.error) {
+        setGoalUndoError(result.error)
+        return
+      }
+      setInferredGoal(null)
+    } catch {
+      setGoalUndoError('Could not undo that goal.')
+    } finally {
+      setUndoingGoal(false)
     }
   }
 
@@ -1520,7 +1616,9 @@ function Composer({
         }
         if (filePicker.current) filePicker.current.value = ''
         setGoalCheck(null)
+        setInferredGoal(null)
         setGoalError(null)
+        setGoalUndoError(null)
         // After the send, never before it: the message is already on its way, so
         // this can only ever add advice to a reply that went out.
         void reviewGoal(trimmed)
@@ -1606,6 +1704,40 @@ function Composer({
             >
               Reconnect {provider === 'microsoft' ? 'Outlook' : 'Gmail'}
             </a>
+          ) : null}
+        </div>
+      ) : null}
+
+      {inferredGoal ? (
+        <div className="mb-2 rounded-md border border-border bg-muted/20 p-3">
+          <p className="text-[11px] font-semibold tracking-wide text-foreground uppercase">
+            Goal set from your reply
+          </p>
+          <p className="mt-1 text-xs text-foreground">{inferredGoal.goal}</p>
+          <div className="mt-2 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void undoInferredGoal()}
+              disabled={undoingGoal}
+              className="text-[11px] font-medium text-primary hover:underline disabled:opacity-50"
+            >
+              {undoingGoal ? 'Undoing…' : 'Undo'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setInferredGoal(null)
+                setGoalUndoError(null)
+              }}
+              className="text-[11px] text-muted-foreground hover:underline"
+            >
+              Dismiss
+            </button>
+          </div>
+          {goalUndoError ? (
+            <p role="alert" className="mt-1 text-[11px] text-destructive">
+              {goalUndoError}
+            </p>
           ) : null}
         </div>
       ) : null}
@@ -1991,6 +2123,7 @@ export function ConversationView({
   onSaveParsingProfile,
   onSend,
   onReviewReply,
+  onUndoGoal,
   onDraft,
   onReanalyse,
   onSetStateOverride,
@@ -2041,8 +2174,11 @@ export function ConversationView({
   /** Judge the reply just sent against the thread's goal. */
   onReviewReply: (body: string) => Promise<{
     check: ReplyGoalCheck | null
+    inferredGoal: InferredGoal | null
     error: string | null
   }>
+  /** Undo a goal the app inferred from the reply that was just sent. */
+  onUndoGoal: (revisionId: string) => Promise<{ error: string | null }>
 }) {
   const messagesRef = useRef<HTMLDivElement>(null)
   const [overviewOpen, setOverviewOpen] = useState(false)
@@ -2204,6 +2340,19 @@ export function ConversationView({
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {detail.participants.map((p) => p.name ?? p.email).join(', ')}
             </p>
+            {/* The other party's tags, read where the thread is open. */}
+            {detail.tags.length > 0 ? (
+              <p className="mt-1 flex flex-wrap gap-1">
+                {detail.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </p>
+            ) : null}
             {/*
              * The state, the done mark and replyability were three chips in two
              * rows; they are facts about the thread, not controls, so they read
@@ -2525,6 +2674,7 @@ export function ConversationView({
           onDraft={onDraft}
           onSend={onSend}
           onReviewReply={onReviewReply}
+          onUndoGoal={onUndoGoal}
         />
       ) : (
         <div className="border-t border-border bg-muted/30 px-6 py-3 text-center text-xs text-muted-foreground">

@@ -30,6 +30,33 @@ describe('parseContextUpdate', () => {
     })
   })
 
+  test('keeps the tags a refresh proposed, and an empty list as an answer', () => {
+    const withTags = parseContextUpdate(
+      JSON.stringify({
+        topic: 'Launch',
+        contact: { tags: [' investor ', 'Acme', 'acme'] },
+      }),
+    )
+    // Cleaned and de-duplicated on the way in, so the writer only ever sees
+    // tags it can store.
+    expect(withTags?.contact?.tags).toEqual(['investor', 'Acme'])
+
+    // A missing key means the prompt said nothing about tags, so the writer must
+    // leave the stored ones alone; an empty array is the model's "none fit".
+    const withoutTags = parseContextUpdate(
+      JSON.stringify({
+        topic: 'Launch',
+        contact: { relationship: 'Colleague' },
+      }),
+    )
+    expect(withoutTags?.contact).not.toHaveProperty('tags')
+
+    const cleared = parseContextUpdate(
+      JSON.stringify({ topic: 'Launch', contact: { tags: [] } }),
+    )
+    expect(cleared?.contact?.tags).toEqual([])
+  })
+
   test('tolerates a fenced block and surrounding prose', () => {
     const parsed = parseContextUpdate(
       'Here you go:\n```json\n{"topic":"Launch date","goal":"","contact":null}\n```',
@@ -83,9 +110,10 @@ describe('parseContextUpdate', () => {
     // The label question is asked on threads where nothing else has anything to
     // say, so an answer that names only a label must not be thrown away.
     expect(
-      parseContextUpdate(JSON.stringify({ topic: '', label: 'label-clients' }), [
-        { id: 'label-clients' },
-      ]),
+      parseContextUpdate(
+        JSON.stringify({ topic: '', label: 'label-clients' }),
+        [{ id: 'label-clients' }],
+      ),
     ).toEqual({
       topic: null,
       goal: null,

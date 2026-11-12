@@ -12,7 +12,7 @@
 
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Check, Inbox, PenLine, Plus, Settings } from 'lucide-react'
+import { Check, Inbox, PenLine, Plus, Settings, Users } from 'lucide-react'
 
 import { cn } from '#/lib/utils'
 
@@ -64,7 +64,7 @@ export function AppShell({
   profileEmail?: string
   children: ReactNode
 }) {
-  const profile = accounts[0]?.email ?? profileEmail ?? 'Not signed in'
+  const profile = accounts.at(0)?.email ?? profileEmail ?? 'Not signed in'
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -116,6 +116,13 @@ export function AppShell({
                     sections.find((section) => section.key === 'done')?.count
                   }
                 />
+                <Link
+                  to="/contacts"
+                  className="flex h-9 items-center gap-2.5 rounded-[4px] px-2.5 text-left text-[12.5px] font-medium tracking-[0.04em] text-foreground/90 uppercase transition-colors hover:bg-muted/40"
+                >
+                  <Users aria-hidden="true" className="size-4" />
+                  <span className="flex-1">Contacts</span>
+                </Link>
               </nav>
 
               {sections.length > 0 ? (

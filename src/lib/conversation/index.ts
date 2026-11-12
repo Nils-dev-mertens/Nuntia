@@ -47,12 +47,25 @@ export type {
   DraftEligibility,
   DraftSkipReason,
   ReplyDrafter,
+  ReplyDraftContact,
   ReplyDraftMessage,
   ReplyDraftRequest,
 } from './draft.ts'
 
-export { buildGoalReviewPrompt, parseGoalVerdict } from './goal.ts'
-export type { GoalReviewer, GoalReviewRequest, GoalVerdict } from './goal.ts'
+export {
+  buildGoalInferencePrompt,
+  buildGoalReviewPrompt,
+  MAX_INFERRED_GOAL_LENGTH,
+  parseGoalVerdict,
+  parseInferredGoal,
+} from './goal.ts'
+export type {
+  GoalInferenceRequest,
+  GoalInferrer,
+  GoalReviewer,
+  GoalReviewRequest,
+  GoalVerdict,
+} from './goal.ts'
 
 export type {
   ContextUpdate,
@@ -104,6 +117,7 @@ export {
   setConversationUnread,
   setOrganizationGroup,
   setGoal,
+  setGoalIfUnset,
   setReplyableForSender,
   setSenderReplyable,
   listUnreplyableSenders,

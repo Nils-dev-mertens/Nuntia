@@ -44,6 +44,11 @@ export type AiSettingsSummary = {
    */
   suggestReplyMinImportance: number
   /**
+   * Whether a draft is offered on every replyable thread, regardless of
+   * importance. Part of the summary so the form shows the stored switch.
+   */
+  suggestReplyAlways: boolean
+  /**
    * Whether a sent reply is judged against the thread's goal.
    *
    * Part of the summary so the settings form shows the stored answer rather than
@@ -72,9 +77,11 @@ export type AiSettingsInput = {
   jevApiKey?: string | null
   llmApiKey?: string | null
   suggestReplyMinImportance: number
+  /** Omitted leaves the stored answer alone; new rows default to off. */
+  suggestReplyAlways?: boolean
   /** Omitted leaves the stored answer alone; new rows default to on. */
   goalCheckEnabled?: boolean
-  /** Omitted leaves the stored answer alone; new rows default to off. */
+  /** Omitted leaves the stored answer alone; new rows default to on. */
   autoContextEnabled?: boolean
 }
 
@@ -84,11 +91,14 @@ export type AiPipelineConfig = {
   llm: { provider: LlmProvider; apiKey: string; model: string } | null
   /** Same row, same read: the reply draft threshold travels with the keys. */
   suggestReplyMinImportance: number
+  /** Omitted means off: importance gates drafts unless asked otherwise. */
+  suggestReplyAlways?: boolean
   /** Omitted means on, so an older settings row keeps the check enabled. */
   goalCheckEnabled?: boolean
   /**
-   * Omitted means off. The updater writes user-owned fields, so a row written
-   * before this column existed must not start rewriting profiles unasked.
+   * Omitted means on: the profile follows the mail by default. It stays a
+   * switch because the wider prompt costs more per thread, and every change is
+   * revisioned with an Undo.
    */
   autoContextEnabled?: boolean
 }
@@ -147,12 +157,13 @@ export async function getAiSettings(
     suggestReplyMinImportance: normaliseMinImportance(
       row?.suggestReplyMinImportance,
     ),
+    suggestReplyAlways: row?.suggestReplyAlways ?? false,
     // A row written before the column existed reads as on, which is the default
     // the migration itself wrote.
     goalCheckEnabled: row?.goalCheckEnabled ?? true,
-    // Off when absent: a row from before the column existed must not begin
-    // spending calls on a feature nobody turned on.
-    autoContextEnabled: row?.autoContextEnabled ?? false,
+    // On when absent, which is also what the migration writes for existing rows:
+    // a profile that follows the mail is the point of the feature.
+    autoContextEnabled: row?.autoContextEnabled ?? true,
   }
 }
 
@@ -166,8 +177,9 @@ export async function getAiPipelineConfig(
       jev: null,
       llm: null,
       suggestReplyMinImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+      suggestReplyAlways: false,
       goalCheckEnabled: true,
-      autoContextEnabled: false,
+      autoContextEnabled: true,
     }
   }
 
@@ -179,6 +191,7 @@ export async function getAiPipelineConfig(
     suggestReplyMinImportance: normaliseMinImportance(
       row.suggestReplyMinImportance,
     ),
+    suggestReplyAlways: row.suggestReplyAlways,
     goalCheckEnabled: row.goalCheckEnabled,
     autoContextEnabled: row.autoContextEnabled,
     jev: jevKey
@@ -229,10 +242,12 @@ export async function saveAiSettings(
     suggestReplyMinImportance: normaliseMinImportance(
       input.suggestReplyMinImportance,
     ),
+    suggestReplyAlways:
+      input.suggestReplyAlways ?? current?.suggestReplyAlways ?? false,
     goalCheckEnabled:
       input.goalCheckEnabled ?? current?.goalCheckEnabled ?? true,
     autoContextEnabled:
-      input.autoContextEnabled ?? current?.autoContextEnabled ?? false,
+      input.autoContextEnabled ?? current?.autoContextEnabled ?? true,
     llmApiKeyEncrypted: applyKey(
       current?.llmApiKeyEncrypted ?? null,
       input.llmApiKey,

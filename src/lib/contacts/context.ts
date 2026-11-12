@@ -4,6 +4,7 @@ import { and, eq } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { contactContexts } from '#/db/schema.ts'
+import type { ContactContextSources } from '#/db/schema.ts'
 
 import { normaliseContactEmail } from './matching.ts'
 
@@ -13,20 +14,57 @@ export type ContactContext = {
   relationship: string
   topics: string
   currentWork: string
+  /** One or two plain sentences; this is what the conversation view shows. */
+  summary: string
   importance: number | null
+  /** Which fields the app wrote, so a user's own edit is never overwritten. */
+  sources: ContactContextSources
 }
 
-export type ContactContextFields = Omit<ContactContext, 'email'>
+export type ContactContextFields = Omit<
+  ContactContext,
+  'email' | 'summary' | 'sources'
+>
 export type ContactContextTextFields = Omit<ContactContextFields, 'importance'>
-export type ContactDecisionContext = ContactContextFields
+export type ContactDecisionContext = ContactContextFields & {
+  /** Absent on callers that only build the four notes. */
+  summary?: string
+  /** The tags already on this person, so a refresh reuses them rather than
+   * inventing near-duplicates. Not written through this shape. */
+  tags?: string[]
+}
+
+/**
+ * What a model proposes: the four private notes plus the short description the
+ * user actually reads. Kept together so one refresh writes both.
+ */
+export type ContactContextProposal = ContactContextTextFields & {
+  summary?: string
+  /**
+   * Tags the model proposes, when the answer carried any.
+   *
+   * Absent means "the prompt said nothing about tags", which must not clear the
+   * ones already stored; an empty array means "none fit", which does. The
+   * writer distinguishes the two, and only ever touches tags it wrote itself.
+   */
+  tags?: string[]
+}
 
 export const CONTACT_CONTEXT_LIMITS = {
   roleCompany: 160,
   relationship: 500,
   topics: 1000,
   currentWork: 1000,
+  summary: 280,
   importance: 10,
 } as const
+
+/** The summary is derived, so an overlong one is cut rather than refused. */
+export function normaliseContactSummary(
+  value: string | null | undefined,
+): string {
+  return (value ?? '').trim().slice(0, CONTACT_CONTEXT_LIMITS.summary)
+}
 
 export function normaliseContactContextTextFields(
   input: ContactContextTextFields,
@@ -85,6 +123,7 @@ export async function listContactDecisionContextByEmail(
         topics: row.topics ?? '',
         currentWork: row.currentWork ?? '',
         importance: row.importance,
+        summary: row.summary ?? '',
       },
     ]),
   )
@@ -116,16 +155,37 @@ export async function getContactContext(
     ),
   })
 
-  return row
-    ? {
-        email: row.email,
-        roleCompany: row.roleCompany ?? '',
-        relationship: row.relationship ?? '',
-        topics: row.topics ?? '',
-        currentWork: row.currentWork ?? '',
-        importance: row.importance,
-      }
-    : null
+  return row ? toContactContext(row) : null
+}
+
+/** Map one stored row into the shape the app passes around. */
+function toContactContext(
+  row: typeof contactContexts.$inferSelect,
+): ContactContext {
+  return {
+    email: row.email,
+    roleCompany: row.roleCompany ?? '',
+    relationship: row.relationship ?? '',
+    topics: row.topics ?? '',
+    currentWork: row.currentWork ?? '',
+    summary: row.summary ?? '',
+    importance: row.importance,
+    sources: row.sources ?? {},
+  }
+}
+
+/** Every profile this user holds, for the contacts directory. */
+export async function listContactContexts(
+  userId: string,
+): Promise<ContactContext[]> {
+  const owner = userId.trim().toLowerCase()
+  if (!owner) return []
+
+  const rows = await db
+    .select()
+    .from(contactContexts)
+    .where(eq(contactContexts.userId, owner))
+  return rows.map(toContactContext)
 }
 
 export async function saveContactContext(
@@ -175,12 +235,7 @@ export async function saveContactContext(
       set: values,
     })
 
-  return {
-    email: address,
-    roleCompany: fields.roleCompany,
-    relationship: fields.relationship,
-    topics: fields.topics,
-    currentWork: fields.currentWork,
-    importance: fields.importance,
-  }
+  // Read back rather than rebuilding: a manual save must preserve the summary
+  // and provenance the app wrote, and those live only in the row.
+  return getContactContext(owner, address)
 }

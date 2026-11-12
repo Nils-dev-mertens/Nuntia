@@ -50,6 +50,7 @@ import {
   resolveReplyStyle,
   setConversationDone as applyDoneMark,
   setConversationUnread as applyUnreadMark,
+  setGoalIfUnset,
   setOrganizationGroup as applyOrganizationGroup,
   unseenMessages,
   listIgnoredSenders,
@@ -86,6 +87,7 @@ import {
   listContactImportanceByEmail,
 } from '#/lib/contacts/context.ts'
 import type { ContactContext } from '#/lib/contacts/context.ts'
+import { listContactTags } from '#/lib/contacts/tags.ts'
 import { getPreferences } from '#/lib/settings/preferences.ts'
 import { ensurePushRegistrations } from '#/lib/mailbox/push.ts'
 import {
@@ -156,6 +158,14 @@ export type ConversationSummary = {
     initials: string
     avatarUrl: string | null
   }>
+  /**
+   * The correspondent's own tags, for the row's chips.
+   *
+   * One read for the whole list, keyed by address, so a list of two thousand
+   * threads still costs one query. Empty when nobody has tagged the person —
+   * the row then looks exactly as it did before tags existed.
+   */
+  tags: string[]
   messageCount: number
   attachmentCount: number
   /** ISO string — loader data crosses a serialization boundary. */
@@ -389,6 +399,8 @@ export type ConversationDetail = {
     initials: string
     avatarUrl: string | null
   }>
+  /** The other party's tags, for the header's chips. */
+  tags: string[]
   messages: ConversationMessageView[]
   attachments: Array<{
     providerMessageId: string
@@ -489,6 +501,9 @@ export async function loadConversation(
   )
 
   const profileContext = await getParsingProfileContext(accountId)
+  // The correspondent's tags, read once for the header. A tag belongs to the
+  // other party's address, which is what `senderEmail` resolves to below.
+  const contactTags = await listContactTags(userId)
 
   // Ordered by the merge, not by `accounts`: the composer defaults to the first
   // entry, and that has to be the owning mailbox rather than whichever account
@@ -532,6 +547,7 @@ export async function loadConversation(
     awaitingReply: conversation.awaitingReply,
     importance: conversation.importance,
     minImportance: drafting.minImportance,
+    suggestAlways: drafting.suggestAlways,
   })
 
   // Names learned from earlier mail, and whether avatars may leave the machine.
@@ -556,6 +572,7 @@ export async function loadConversation(
     isAutomated: conversation.isAutomated,
     replyable: conversation.replyable,
     senderEmail,
+    tags: contactTags.get(senderEmail ?? '') ?? [],
     topic: conversation.topic,
     goal: conversation.goal,
     stateOverride: activeStateOverride(conversation),
@@ -1036,7 +1053,8 @@ export async function draftReply(
     return { draft: null, error: 'That conversation no longer exists.' }
   }
 
-  const { drafter, minImportance } = await loadReplyDrafter(userId)
+  const { drafter, minImportance, suggestAlways } =
+    await loadReplyDrafter(userId)
 
   const eligibility = replyDraftEligibility({
     modelConfigured: drafter !== null,
@@ -1044,6 +1062,7 @@ export async function draftReply(
     awaitingReply: detail.awaitingReply,
     importance: detail.importance,
     minImportance,
+    suggestAlways,
   })
 
   if (!eligibility.eligible) {
@@ -1093,24 +1112,37 @@ export type ReplyGoalCheck = {
   suggestion: string | null
 }
 
+/** A goal inferred from the reply, plus the revision that can undo it. */
+export type InferredGoal = {
+  goal: string
+  revisionId: string
+}
+
+/** What the post-send review reports: advice, a new goal, or a failure. */
+export type ReplyReviewOutcome = {
+  check: ReplyGoalCheck | null
+  inferredGoal: InferredGoal | null
+  error: string | null
+}
+
 /**
  * Judge a reply the user just sent against the thread's goal.
  *
- * Null when there is nothing to judge: a thread without a goal has no standard to
- * miss, and an install without an LLM has nobody to ask. Best-effort by design —
- * this runs after a send that already succeeded, so a failure here is reported as
- * advice that could not be produced, never as a failed send.
+ * Null when there is nothing to judge: an install without an LLM has nobody to
+ * ask, and a thread that has no goal gets one inferred from the reply just sent
+ * rather than judged against itself. Best-effort by design — this runs after a
+ * send that already succeeded, so a failure here is reported as advice that
+ * could not be produced, never as a failed send.
  */
 export async function reviewSentReply(
   userId: string,
   providerThreadId: string,
   sentBody: string,
-): Promise<{ check: ReplyGoalCheck | null; error: string | null }> {
+): Promise<ReplyReviewOutcome> {
   const detail = await loadConversation(userId, providerThreadId)
-  if (!detail?.goal) return { check: null, error: null }
+  if (!detail) return { check: null, inferredGoal: null, error: null }
 
-  const { reviewer } = await loadReplyDrafter(userId)
-  if (!reviewer) return { check: null, error: null }
+  const { reviewer, inferrer } = await loadReplyDrafter(userId)
 
   const owners = new Set(
     detail.ownerEmails.map((email) => email.trim().toLowerCase()),
@@ -1118,6 +1150,44 @@ export async function reviewSentReply(
   const incoming = [...detail.messages]
     .reverse()
     .find((message) => !owners.has(message.from.email.trim().toLowerCase()))
+
+  if (!detail.goal) {
+    // The first reply on a thread with no goal: infer the goal from what the
+    // user actually sent, so the next draft has one to write toward. This reply
+    // is not judged against it — a goal derived from the reply would only agree
+    // with itself.
+    let inferredGoal: InferredGoal | null = null
+    if (inferrer) {
+      try {
+        const goal = await inferrer.infer({
+          topic: detail.topic,
+          incoming: incoming?.body ?? null,
+          sentReply: sentBody,
+        })
+        if (goal) {
+          inferredGoal = await setGoalIfUnset(
+            userId,
+            detail.accountId,
+            detail.providerThreadId,
+            goal,
+          )
+        }
+      } catch (error) {
+        console.error(
+          '[goal] inferring a goal from the sent reply failed:',
+          error,
+        )
+        await reportAiFailure(
+          inferrer.name,
+          error,
+          'failed to infer a goal from a reply',
+        )
+      }
+    }
+    return { check: null, inferredGoal, error: null }
+  }
+
+  if (!reviewer) return { check: null, inferredGoal: null, error: null }
 
   try {
     const verdict = await reviewer.review({
@@ -1130,13 +1200,17 @@ export async function reviewSentReply(
     if (!verdict) {
       return {
         check: null,
+        inferredGoal: null,
         error: 'Could not check that reply against your goal.',
       }
     }
-    if (verdict.meetsGoal) return { check: null, error: null }
+    if (verdict.meetsGoal) {
+      return { check: null, inferredGoal: null, error: null }
+    }
 
     return {
       check: { reason: verdict.reason, suggestion: verdict.suggestion },
+      inferredGoal: null,
       error: null,
     }
   } catch (error) {
@@ -1148,6 +1222,7 @@ export async function reviewSentReply(
     )
     return {
       check: null,
+      inferredGoal: null,
       error: 'Could not check that reply against your goal.',
     }
   }
@@ -1211,6 +1286,15 @@ function replyDraftRequestFor(
     subject: detail.subject,
     topic: detail.topic,
     goal: detail.goal,
+    contact: detail.contactContext
+      ? {
+          roleCompany: detail.contactContext.roleCompany,
+          relationship: detail.contactContext.relationship,
+          topics: detail.contactContext.topics,
+          currentWork: detail.contactContext.currentWork,
+          summary: detail.contactContext.summary,
+        }
+      : null,
     recipient: incoming
       ? { name: incoming.from.name, email: incoming.from.email }
       : null,
@@ -1718,6 +1802,7 @@ function toSummary(
   useGravatar: boolean,
   organizationLabels: OrganizationLabel[],
   contactImportance: ReadonlyMap<string, number>,
+  contactTags: ReadonlyMap<string, string[]>,
 ): ConversationSummary {
   const conversation = merged.conversation
 
@@ -1750,6 +1835,9 @@ function toSummary(
       names,
       useGravatar,
     ),
+    // Filed under the other party, which is the address a tag belongs to — not
+    // whichever of the user's own accounts owns the row.
+    tags: contactTags.get(otherPartyOf(conversation)) ?? [],
     messageCount: conversation.messageCount,
     attachmentCount: conversation.attachmentCount,
     lastMessageAt: conversation.lastMessageAt.toISOString(),
@@ -1995,20 +2083,22 @@ export async function loadInbox(
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
   const { counts, doneCount } = partitionByState(matched)
-  const [organizationLabels, contactImportance, stateLabels] =
+  const [organizationLabels, contactImportance, stateLabels, contactTags] =
     await Promise.all([
       listOrganizationLabels(userId),
       listContactImportanceByEmail(userId),
       listStateLabels(userId),
-    ],
-  )
+      listContactTags(userId),
+    ])
 
   // The section order, made valid for the labels this user has now: a deleted
   // label's token is dropped and a new one appended, so an old order can never
   // hide a section.
   const inboxOrder = resolveInboxOrder(
     preferences.inboxOrder,
-    organizationLabels.filter((label) => label.enabled).map((label) => label.id),
+    organizationLabels
+      .filter((label) => label.enabled)
+      .map((label) => label.id),
   )
 
   // The list is grouped by state in the UI, but ordering within a group is by
@@ -2034,6 +2124,7 @@ export async function loadInbox(
         preferences.useGravatar,
         organizationLabels,
         contactImportance,
+        contactTags,
       ),
     ),
     counts,

@@ -18,25 +18,39 @@
 import { and, desc, eq, notInArray } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
-import { contactContexts, contextRevisions, conversations } from '#/db/schema.ts'
+import {
+  contactContexts,
+  contextRevisions,
+  conversations,
+} from '#/db/schema.ts'
 import type {
   ContextRevision,
   ContextRevisionScope,
   ContextRevisionSource,
   ConversationState,
 } from '#/db/schema.ts'
-import type { ContactContextTextFields } from '#/lib/contacts/context.ts'
+import type {
+  ContactContext,
+  ContactContextFields,
+  ContactContextProposal,
+  ContactContextTextFields,
+} from '#/lib/contacts/context.ts'
+import { normaliseContactSummary } from '#/lib/contacts/context.ts'
+import { applyAutoContactTags } from '#/lib/contacts/tags.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
 
 /** How many revisions one target keeps. A safety net, not an audit log. */
 export const CONTEXT_REVISION_LIMIT = 20
 
-const CONTACT_FIELDS = [
+const CONTACT_TEXT_FIELDS = [
   'roleCompany',
   'relationship',
   'topics',
   'currentWork',
 ] as const
+
+/** `summary` sits beside the four notes and is restored the same way. */
+const CONTACT_FIELDS = [...CONTACT_TEXT_FIELDS, 'summary'] as const
 
 type ContactField = (typeof CONTACT_FIELDS)[number]
 
@@ -84,7 +98,9 @@ export type AutoContextUpdate = {
   contact: {
     email: string
     previous: ContactContextTextFields
-    next: ContactContextTextFields
+    /** The summary before the refresh, so an unchanged one writes nothing. */
+    previousSummary?: string | null
+    next: ContactContextProposal
   } | null
 }
 
@@ -102,7 +118,7 @@ export async function writeAutoContextUpdate(
   const owner = input.userId.trim().toLowerCase()
   if (!owner) return 0
 
-  return withWriteLock(() =>
+  const written = await withWriteLock(() =>
     db.transaction(async (tx) => {
       const revisions: ContextRevisionInput[] = []
 
@@ -151,16 +167,29 @@ export async function writeAutoContextUpdate(
 
       if (input.contact) {
         const { email, previous, next } = input.contact
+        const existing = await tx.query.contactContexts.findFirst({
+          where: and(
+            eq(contactContexts.userId, owner),
+            eq(contactContexts.email, email),
+          ),
+        })
+        // Read inside the transaction: the user may have edited a field between
+        // the decision that proposed this and the write that lands it, and their
+        // wording must win over the proposal.
+        const sources = { ...(existing?.sources ?? {}) }
         const changed: Partial<Record<ContactField, string>> = {}
 
-        for (const field of CONTACT_FIELDS) {
+        for (const field of CONTACT_TEXT_FIELDS) {
           const before = stored(previous[field])
           const after = stored(next[field])
           // Unchanged fields write nothing: a sync of thirty threads must not
           // bury the one edit that mattered.
           if (!after || after === before) continue
+          // A field the user edited is theirs; the app does not revise it.
+          if (sources[field] === 'user') continue
 
           changed[field] = after
+          sources[field] = 'auto'
           revisions.push({
             userId: owner,
             scope: 'contact',
@@ -173,7 +202,28 @@ export async function writeAutoContextUpdate(
           })
         }
 
-        if (revisions.length > 0 && Object.keys(changed).length > 0) {
+        const beforeSummary = stored(input.contact.previousSummary ?? '')
+        const afterSummary = stored(normaliseContactSummary(next.summary))
+        if (
+          afterSummary &&
+          afterSummary !== beforeSummary &&
+          sources.summary !== 'user'
+        ) {
+          changed.summary = afterSummary
+          sources.summary = 'auto'
+          revisions.push({
+            userId: owner,
+            scope: 'contact',
+            target: email,
+            field: 'summary',
+            previousValue: beforeSummary,
+            nextValue: afterSummary,
+            source: 'auto',
+            threadId: input.providerThreadId,
+          })
+        }
+
+        if (Object.keys(changed).length > 0) {
           // Upserted rather than required to exist: a correspondent nobody has
           // written about yet is the normal first case.
           await tx
@@ -182,11 +232,12 @@ export async function writeAutoContextUpdate(
               userId: owner,
               email,
               ...changed,
+              sources,
               updatedAt: new Date(),
             })
             .onConflictDoUpdate({
               target: [contactContexts.userId, contactContexts.email],
-              set: { ...changed, updatedAt: new Date() },
+              set: { ...changed, sources, updatedAt: new Date() },
             })
         }
       }
@@ -195,6 +246,34 @@ export async function writeAutoContextUpdate(
       return revisions.length
     }),
   )
+
+  // Tags are reconciled after the profile, outside the transaction and the write
+  // lock: they are additive, they carry their own provenance, and a failure here
+  // should cost the tags rather than the profile the user is waiting for.
+  await writeProposedTags(owner, input)
+
+  return written
+}
+
+/**
+ * Write the tags a refresh proposed, if it proposed any.
+ *
+ * `undefined` means the prompt said nothing about tags, which must leave them
+ * alone; an empty array is the model's "none fit", which lets the app retire the
+ * ones it wrote before. The user's own tags are untouched by either.
+ */
+async function writeProposedTags(
+  owner: string,
+  input: AutoContextUpdate,
+): Promise<void> {
+  const contact = input.contact
+  if (!contact || !Array.isArray(contact.next.tags)) return
+
+  try {
+    await applyAutoContactTags(owner, contact.email, contact.next.tags)
+  } catch (error) {
+    console.error('[context] could not apply the automatic tags:', error)
+  }
 }
 
 /** The newest revisions for one target, for the "updated from this thread" list. */
@@ -344,6 +423,78 @@ export async function recordUserLabelChange(input: {
 }
 
 /**
+ * Record a contact edit the user made by hand.
+ *
+ * The revision log's premise is that every write passes through it, and a manual
+ * save used to be the exception: the user overruling an automatic note left no
+ * correction behind, and the next sync could not tell their wording from its
+ * own. Fields the user changes are marked `user` so a later refresh leaves them
+ * alone; a field they clear loses its mark, which lets new mail fill it again.
+ */
+export async function recordUserContactUpdate(input: {
+  userId: string
+  email: string
+  threadId?: string | null
+  previous: ContactContext | null
+  next: ContactContextFields
+}): Promise<number> {
+  const owner = input.userId.trim().toLowerCase()
+  const email = input.email.trim().toLowerCase()
+  if (!owner || !email || !input.previous) return 0
+
+  const revisions: ContextRevisionInput[] = []
+  const sources = { ...input.previous.sources }
+  let sourcesChanged = false
+
+  for (const field of CONTACT_TEXT_FIELDS) {
+    const before = stored(input.previous[field])
+    const after = stored(input.next[field])
+    if (before === after) continue
+
+    revisions.push({
+      userId: owner,
+      scope: 'contact',
+      target: email,
+      field,
+      previousValue: before,
+      nextValue: after,
+      source: 'user',
+      threadId: input.threadId ?? null,
+    })
+
+    if (after) {
+      if (sources[field] !== 'user') {
+        sources[field] = 'user'
+        sourcesChanged = true
+      }
+    } else if (sources[field] !== undefined) {
+      delete sources[field]
+      sourcesChanged = true
+    }
+  }
+
+  if (revisions.length === 0) return 0
+
+  return withWriteLock(() =>
+    db.transaction(async (tx) => {
+      await insertRevisions(tx, revisions)
+      if (sourcesChanged) {
+        await tx
+          .update(contactContexts)
+          .set({ sources, updatedAt: new Date() })
+          .where(
+            and(
+              eq(contactContexts.userId, owner),
+              eq(contactContexts.email, email),
+            ),
+          )
+      }
+      return revisions.length
+    }),
+  )
+}
+
+/**
  * Put a value back, and record the restoration as a revision of its own.
  *
  * Undo is a write like any other, so undoing twice is not a special case: the
@@ -402,12 +553,25 @@ async function restore(
     if (!(CONTACT_FIELDS as readonly string[]).includes(revision.field)) {
       return false
     }
+    const field = revision.field as ContactField
     const values: Partial<Record<ContactField, string | null>> = {
-      [revision.field as ContactField]: revision.previousValue,
+      [field]: revision.previousValue,
     }
+    const row = await tx.query.contactContexts.findFirst({
+      where: and(
+        eq(contactContexts.userId, userId),
+        eq(contactContexts.email, revision.target),
+      ),
+    })
+    const sources = { ...(row?.sources ?? {}) }
+    // Undo is the user's decision, so the restored value is theirs and a later
+    // refresh must not take it back. Restoring an empty field releases it.
+    if (revision.previousValue) sources[field] = 'user'
+    else delete sources[field]
+
     await tx
       .update(contactContexts)
-      .set({ ...values, updatedAt: new Date() })
+      .set({ ...values, sources, updatedAt: new Date() })
       .where(
         and(
           eq(contactContexts.userId, userId),
@@ -420,7 +584,10 @@ async function restore(
   if (revision.field === 'label') {
     await tx
       .update(conversations)
-      .set({ organizationGroupId: revision.previousValue, updatedAt: new Date() })
+      .set({
+        organizationGroupId: revision.previousValue,
+        updatedAt: new Date(),
+      })
       .where(eq(conversations.id, revision.target))
     return true
   }
@@ -481,12 +648,7 @@ async function insertRevisions(
   }
 
   for (const revision of targets.values()) {
-    await pruneTarget(
-      tx,
-      revision.userId,
-      revision.scope,
-      revision.target,
-    )
+    await pruneTarget(tx, revision.userId, revision.scope, revision.target)
   }
 }
 
@@ -513,17 +675,15 @@ async function pruneTarget(
   // `NOT IN ()` is not valid SQL, and an empty set means nothing to prune.
   if (keep.length === 0) return
 
-  await tx
-    .delete(contextRevisions)
-    .where(
-      and(
-        eq(contextRevisions.userId, userId),
-        eq(contextRevisions.scope, scope),
-        eq(contextRevisions.target, target),
-        notInArray(
-          contextRevisions.id,
-          keep.map((row) => row.id),
-        ),
+  await tx.delete(contextRevisions).where(
+    and(
+      eq(contextRevisions.userId, userId),
+      eq(contextRevisions.scope, scope),
+      eq(contextRevisions.target, target),
+      notInArray(
+        contextRevisions.id,
+        keep.map((row) => row.id),
       ),
-    )
+    ),
+  )
 }

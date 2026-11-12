@@ -43,6 +43,30 @@ export interface GoalReviewer {
   review: (request: GoalReviewRequest) => Promise<GoalVerdict | null>
 }
 
+/**
+ * A thread with no goal, and the reply that may reveal one.
+ *
+ * Only the user's own sent reply is asked about: it is the one piece of the
+ * thread that says what they actually wanted, as opposed to what the other side
+ * asked for.
+ */
+export type GoalInferenceRequest = {
+  topic: string | null
+  /** The newest message from the other side, which the reply answered. */
+  incoming: string | null
+  /** What the user actually sent. */
+  sentReply: string
+}
+
+/** The seam for inferring a goal; null means no model is configured. */
+export interface GoalInferrer {
+  readonly name: string
+  infer: (request: GoalInferenceRequest) => Promise<string | null>
+}
+
+/** A goal stays one sentence, like the one the user can type themselves. */
+export const MAX_INFERRED_GOAL_LENGTH = 500
+
 /** How much of either side the prompt carries: enough to judge, not a mailbox. */
 const MAX_REVIEW_CHARS = 2_000
 
@@ -82,6 +106,72 @@ export function buildGoalReviewPrompt(request: GoalReviewRequest): string {
   )
 
   return lines.join('\n')
+}
+
+/**
+ * The prompt for a thread that has no goal.
+ *
+ * Deliberately not a summariser: the answer has to be an outcome the user can
+ * edit and that a later reply can be judged against. The incoming message is
+ * included for context, but the instruction points at the sent reply, because
+ * the other side's request is not automatically what the user wanted.
+ */
+export function buildGoalInferencePrompt(
+  request: GoalInferenceRequest,
+): string {
+  const lines: string[] = [
+    'I replied to an email in a thread that has no recorded goal.',
+    'Infer what I want out of this conversation from the reply I sent.',
+    'Answer with one sentence in the first person, as if I wrote it.',
+    'Describe the outcome I want, not the words I used. No quotes, no explanation.',
+  ]
+
+  if (request.topic) lines.push(`Thread topic: ${request.topic}`)
+
+  if (request.incoming) {
+    lines.push(
+      '',
+      'The message I was answering:',
+      request.incoming.slice(0, MAX_REVIEW_CHARS),
+    )
+  }
+
+  lines.push(
+    '',
+    'The reply I sent:',
+    request.sentReply.slice(0, MAX_REVIEW_CHARS),
+  )
+
+  return lines.join('\n')
+}
+
+/**
+ * Turn the model's answer into a goal the app can store.
+ *
+ * Models answer a one-sentence request with fences, quotes, a "Goal:" label or
+ * a short paragraph. Only the first non-empty line is kept, because the column
+ * is meant to hold the sentence the user reads and edits, not the model's
+ * explanation of it.
+ */
+export function parseInferredGoal(raw: string): string | null {
+  const unfenced = raw.replace(/```[^\n]*\n?/g, '').trim()
+  const first = unfenced
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0)
+  if (!first) return null
+
+  const text = first
+    .replace(/^(?:my\s+)?goal\s*:\s*/i, '')
+    .replace(/^["'“]+/, '')
+    .replace(/["'”]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!text) return null
+  return text.length > MAX_INFERRED_GOAL_LENGTH
+    ? text.slice(0, MAX_INFERRED_GOAL_LENGTH).trimEnd()
+    : text
 }
 
 /**

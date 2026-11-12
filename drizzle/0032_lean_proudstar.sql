@@ -1,0 +1,1 @@
+ALTER TABLE `app_settings` ADD `suggest_reply_always` integer DEFAULT false NOT NULL;

@@ -11,10 +11,10 @@
  * points that take an account id straight from the client.
  */
 
-import { and, desc, eq } from 'drizzle-orm'
+import { and, count, desc, eq } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
-import { accounts, syncCursors } from '#/db/schema.ts'
+import { accounts, conversations, syncCursors } from '#/db/schema.ts'
 import type { Provider } from '#/lib/mailbox/types.ts'
 import { decryptRefreshToken, encryptRefreshToken } from './google.ts'
 
@@ -261,6 +261,33 @@ export async function getLastSyncedAt(id: string): Promise<Date | null> {
   })
 
   return row?.updatedAt ?? null
+}
+
+/**
+ * What a mailbox's detail view needs: when it last synced, and how much mail it
+ * holds.
+ *
+ * Two reads rather than one, because they answer different questions: the cursor
+ * records the last completed run, while the count is what deleting the mailbox
+ * would remove. Both are scoped to the account, so a settings page can show them
+ * for every mailbox without the rows ever mixing.
+ */
+export async function getAccountSyncSummary(
+  accountId: string,
+): Promise<{ lastSyncedAt: Date | null; storedThreads: number }> {
+  const id = accountId.trim().toLowerCase()
+  const [lastSyncedAt, counted] = await Promise.all([
+    getLastSyncedAt(id),
+    db
+      .select({ value: count() })
+      .from(conversations)
+      .where(eq(conversations.accountId, id)),
+  ])
+
+  return {
+    lastSyncedAt,
+    storedThreads: counted.at(0)?.value ?? 0,
+  }
 }
 
 /**

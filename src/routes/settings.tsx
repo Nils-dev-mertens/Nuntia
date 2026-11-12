@@ -26,6 +26,8 @@ import type { FormEvent } from 'react'
 import {
   ArrowLeft,
   Ban,
+  ChevronDown,
+  ChevronUp,
   FolderTree,
   Mail,
   MessageSquare,
@@ -65,7 +67,10 @@ import {
   saveAccountParsingDefaults,
 } from '#/lib/conversation/index.ts'
 import type { ParsingPreferences } from '#/lib/conversation/index.ts'
-import { assertOwnedAccount } from '#/lib/auth/accounts.ts'
+import {
+  assertOwnedAccount,
+  getAccountSyncSummary,
+} from '#/lib/auth/accounts.ts'
 import { redecideStoredConversations } from '#/lib/mailbox/sync.ts'
 // The draft limits are imported from the pure module that defines them, not from
 // the conversation barrel: the barrel also re-exports the repository and the
@@ -131,6 +136,10 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
           parsingDefaults: ParsingPreferences
           defaultReplyGreeting: string
           defaultReplySignature: string
+          /** Last completed sync, ISO, or null when it has never synced. */
+          lastSyncedAt: string | null
+          /** Conversations stored for this mailbox — what a delete removes. */
+          storedThreads: number
         }>
         /** Whether avatars may be fetched from Gravatar (opt-in, off by default). */
         useGravatar: boolean
@@ -225,7 +234,10 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       contextRevisions: await listRecentContextRevisions(session.userId),
       accounts: await Promise.all(
         accounts.map(async (account) => {
-          const profile = await getParsingProfileContext(account.id)
+          const [profile, summary] = await Promise.all([
+            getParsingProfileContext(account.id),
+            getAccountSyncSummary(account.id),
+          ])
           return {
             id: account.id,
             email: account.email,
@@ -233,6 +245,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
             parsingDefaults: profile.parsingDefaults,
             defaultReplyGreeting: profile.replyStyles.account.greeting ?? '',
             defaultReplySignature: profile.replyStyles.account.signature ?? '',
+            lastSyncedAt: summary.lastSyncedAt?.toISOString() ?? null,
+            storedThreads: summary.storedThreads,
           }
         }),
       ),
@@ -435,7 +449,9 @@ const saveGravatarAction = createServerFn({ method: 'POST' })
     }
   })
 
-/** Sign out on this device: one session row deleted, the others left alone. */
+/**
+ * Sign out on this device: one session row deleted, the others left alone.
+ */
 const signOutAction = createServerFn({ method: 'POST' }).handler(
   async (): Promise<{ error: string | null }> => {
     try {
@@ -538,6 +554,8 @@ type SaveInput = {
   llmModel: string | null
   /** Importance at or above which a reply draft is offered, 1–10. */
   suggestReplyMinImportance: number
+  /** Whether every replyable thread is offered a draft, ignoring importance. */
+  suggestReplyAlways: boolean
   /** Whether a sent reply is checked against the thread's goal. */
   goalCheckEnabled: boolean
   /** Whether the app refreshes goals and contact profiles from the mail. */
@@ -562,6 +580,10 @@ function validateSave(data: SaveInput): string | null {
     threshold > REPLY_DRAFT_MIN_IMPORTANCE_MAX
   ) {
     return `Importance must be a whole number between ${REPLY_DRAFT_MIN_IMPORTANCE_MIN} and ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}.`
+  }
+
+  if (typeof data.suggestReplyAlways !== 'boolean') {
+    return 'The every-thread reply setting has to be on or off.'
   }
 
   if (typeof data.goalCheckEnabled !== 'boolean') {
@@ -612,6 +634,7 @@ const saveAiSettingsAction = createServerFn({ method: 'POST' })
           : null,
         llmModel: blankToNull(data.llmModel),
         suggestReplyMinImportance: data.suggestReplyMinImportance,
+        suggestReplyAlways: data.suggestReplyAlways,
         goalCheckEnabled: data.goalCheckEnabled,
         autoContextEnabled: data.autoContextEnabled,
         // `undefined` keeps the stored key; `''` clears it; a value replaces it.
@@ -1357,6 +1380,8 @@ function contextRevisionLabel(field: string): string {
       return 'Relationship'
     case 'currentWork':
       return 'Current work'
+    case 'summary':
+      return 'Description'
     default:
       return 'Topics'
   }
@@ -1559,6 +1584,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   const [minImportance, setMinImportance] = useState(
     String(settings.suggestReplyMinImportance),
   )
+  const [suggestReplyAlways, setSuggestReplyAlways] = useState(
+    settings.suggestReplyAlways,
+  )
   const [goalCheckEnabled, setGoalCheckEnabled] = useState(
     settings.goalCheckEnabled,
   )
@@ -1573,6 +1601,9 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   // Kept separate from the form's own feedback: the mailbox list sits outside the
   // form, and one shared message would report in the wrong place.
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+  // Which mailbox is opened for detail. One at a time: this is a detail view of
+  // a list, and two open rows push the other mailboxes off the screen.
+  const [expandedMailbox, setExpandedMailbox] = useState<string | null>(null)
   const [mailboxError, setMailboxError] = useState<string | null>(null)
   const [mailboxMessage, setMailboxMessage] = useState<string | null>(null)
 
@@ -1877,6 +1908,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           llmProvider,
           llmModel: llmModel.trim() || null,
           suggestReplyMinImportance: Number(minImportance),
+          suggestReplyAlways,
           goalCheckEnabled,
           autoContextEnabled,
           jevApiKey: jevApiKey.trim() || null,
@@ -2397,20 +2429,49 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
             >
               <section className="p-4">
                 <div className="space-y-3">
-                  <Field
-                    label="Draft a reply from importance"
-                    hint={`${REPLY_DRAFT_MIN_IMPORTANCE_MIN} to ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}. Every draft is one API call, so the routine mail below this is left alone.`}
-                  >
+                  <label className="flex items-start gap-2 text-xs text-muted-foreground">
                     <input
-                      type="number"
-                      min={REPLY_DRAFT_MIN_IMPORTANCE_MIN}
-                      max={REPLY_DRAFT_MIN_IMPORTANCE_MAX}
-                      step={1}
-                      value={minImportance}
-                      onChange={(event) => setMinImportance(event.target.value)}
-                      className={inputClass}
+                      type="checkbox"
+                      checked={suggestReplyAlways}
+                      onChange={(event) =>
+                        setSuggestReplyAlways(event.target.checked)
+                      }
+                      className="mt-0.5"
                     />
-                  </Field>
+                    <span>
+                      <span className="font-medium text-foreground">
+                        Suggest a reply in every thread
+                      </span>
+                      <span className="mt-0.5 block">
+                        Ignore how important a thread is. Every thread where a
+                        reply can reach someone offers a draft, above or below
+                        the threshold. Each draft is still one API call.
+                      </span>
+                    </span>
+                  </label>
+                  {!suggestReplyAlways ? (
+                    <Field
+                      label="Draft a reply from importance"
+                      hint={`${REPLY_DRAFT_MIN_IMPORTANCE_MIN} to ${REPLY_DRAFT_MIN_IMPORTANCE_MAX}. Every draft is one API call, so the routine mail below this is left alone.`}
+                    >
+                      <input
+                        type="number"
+                        min={REPLY_DRAFT_MIN_IMPORTANCE_MIN}
+                        max={REPLY_DRAFT_MIN_IMPORTANCE_MAX}
+                        step={1}
+                        value={minImportance}
+                        onChange={(event) =>
+                          setMinImportance(event.target.value)
+                        }
+                        className={inputClass}
+                      />
+                    </Field>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      Importance is ignored while every thread is suggested. The
+                      threshold is kept for when you switch this back off.
+                    </p>
+                  )}
                   <label className="flex items-start gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
@@ -2446,12 +2507,14 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                         Update the goal and contact profile automatically
                       </span>
                       <span className="mt-0.5 block">
-                        One extra call per thread that gains messages, so the
-                        goal and each correspondent&rsquo;s profile follow the
-                        mail instead of waiting to be filled in. It costs more
-                        tokens than a topic alone, so it is off unless you turn
-                        it on. Blank fields are never cleared, and every change
-                        appears under recent changes below with an Undo.
+                        Each thread that gains mail refreshes the goal and the
+                        correspondent&rsquo;s profile from that thread and their
+                        earlier conversations, and writes the short relationship
+                        description the thread overview shows you. It costs more
+                        tokens than a topic alone, so it can be turned off.
+                        Blank fields are never cleared, a field you edit stays
+                        yours, and every change appears under recent changes
+                        below with an Undo.
                       </span>
                     </span>
                   </label>
@@ -2709,59 +2772,190 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                 Connected mailboxes
               </h2>
               <p className="mt-1 text-xs text-muted-foreground">
-                Deleting a mailbox removes the conversations and attachments
-                stored on this machine. Nothing is deleted from Gmail — connect
-                it again and it syncs fresh. Useful when mail was stored by an
-                older version and you want to see what the current one makes of
-                it.
+                Open a mailbox to see when it last synced, how much mail is
+                stored for it and the settings that apply only to it. Deleting
+                one removes the conversations and attachments stored on this
+                machine; nothing is deleted from Gmail — connect it again and it
+                syncs fresh.
               </p>
-              <ul className="mt-3 space-y-2">
-                {accounts.map((account) => (
-                  <li
-                    key={account.id}
-                    className="flex items-center justify-between gap-3 text-xs"
-                  >
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="truncate text-foreground">
-                        {account.email}
-                      </span>
-                      <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {account.provider === 'microsoft' ? 'Outlook' : 'Gmail'}
-                      </span>
-                    </span>
+              {accounts.length === 0 ? (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  No mailbox is connected yet. Add one below.
+                </p>
+              ) : (
+                <ul className="mt-3 divide-y divide-border rounded-md border border-border">
+                  {accounts.map((account) => {
+                    const open = expandedMailbox === account.id
+                    const marked = unreplyableSenders.filter(
+                      (entry) => entry.accountId === account.id,
+                    )
+                    // The three switches, in the order the parsing panel shows
+                    // them, so the summary and the editor read the same way.
+                    const stripped = [
+                      account.parsingDefaults.stripQuotedHistory
+                        ? 'quoted history'
+                        : null,
+                      account.parsingDefaults.stripGreeting
+                        ? 'greetings'
+                        : null,
+                      account.parsingDefaults.stripSignature
+                        ? 'signatures'
+                        : null,
+                    ].filter((value): value is string => value !== null)
 
-                    {pendingDelete === account.id ? (
-                      <span className="flex shrink-0 items-center gap-2">
+                    return (
+                      <li key={account.id}>
                         <button
                           type="button"
-                          disabled={busy}
-                          onClick={() => void removeMailbox(account.id)}
-                          className="rounded-md border border-destructive bg-destructive/10 px-2 py-1 font-medium text-destructive disabled:opacity-50"
+                          aria-expanded={open}
+                          onClick={() => {
+                            setExpandedMailbox(open ? null : account.id)
+                            if (open) setPendingDelete(null)
+                          }}
+                          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                         >
-                          {busy ? 'Deleting…' : 'Delete everything'}
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-xs font-medium text-foreground">
+                              {account.email}
+                            </span>
+                            <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                              {account.provider === 'microsoft'
+                                ? 'Outlook'
+                                : 'Gmail'}
+                            </span>
+                          </span>
+                          <span className="flex shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
+                            {account.storedThreads}{' '}
+                            {account.storedThreads === 1
+                              ? 'conversation'
+                              : 'conversations'}
+                            {open ? (
+                              <ChevronUp
+                                aria-hidden="true"
+                                className="size-3.5"
+                              />
+                            ) : (
+                              <ChevronDown
+                                aria-hidden="true"
+                                className="size-3.5"
+                              />
+                            )}
+                          </span>
                         </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => setPendingDelete(null)}
-                          className="rounded-md border border-border px-2 py-1 font-medium text-muted-foreground disabled:opacity-50"
-                        >
-                          Cancel
-                        </button>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void removeMailbox(account.id)}
-                        className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
-                      >
-                        Delete stored mail
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
+
+                        {open ? (
+                          <div className="space-y-3 border-t border-border bg-muted/20 px-3 py-3">
+                            <dl className="grid gap-3 text-[11px] sm:grid-cols-2">
+                              <div>
+                                <dt className="font-medium text-foreground">
+                                  Last synced
+                                </dt>
+                                <dd className="mt-0.5 text-muted-foreground">
+                                  {account.lastSyncedAt
+                                    ? `${account.lastSyncedAt.slice(0, 16).replace('T', ' ')} UTC`
+                                    : 'Never — the next sync is the first one.'}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-foreground">
+                                  Parsing
+                                </dt>
+                                <dd className="mt-0.5 text-muted-foreground">
+                                  {stripped.length > 0
+                                    ? `Strips ${stripped.join(', ')}`
+                                    : 'Keeps greetings, signatures and quoted history'}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-foreground">
+                                  Default greeting
+                                </dt>
+                                <dd className="mt-0.5 text-muted-foreground">
+                                  {account.defaultReplyGreeting || 'None'}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="font-medium text-foreground">
+                                  Default signature
+                                </dt>
+                                <dd className="mt-0.5 whitespace-pre-wrap text-muted-foreground">
+                                  {account.defaultReplySignature || 'None'}
+                                </dd>
+                              </div>
+                            </dl>
+
+                            <div>
+                              <p className="text-[11px] font-medium text-foreground">
+                                Can’t reply — {marked.length}{' '}
+                                {marked.length === 1 ? 'sender' : 'senders'}
+                              </p>
+                              {marked.length === 0 ? (
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                  Nothing marked for this mailbox, so every
+                                  sender still gets a reply box.
+                                </p>
+                              ) : (
+                                <ul className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+                                  {marked.map((entry) => (
+                                    <li
+                                      key={entry.senderEmail}
+                                      className="truncate"
+                                    >
+                                      {entry.senderEmail}
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-xs">
+                              <button
+                                type="button"
+                                onClick={() => selectPanel('parsing')}
+                                className="rounded-md border border-border px-2 py-1 font-medium text-foreground hover:border-foreground/25"
+                              >
+                                Parsing defaults
+                              </button>
+
+                              {pendingDelete === account.id ? (
+                                <span className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      void removeMailbox(account.id)
+                                    }
+                                    className="rounded-md border border-destructive bg-destructive/10 px-2 py-1 font-medium text-destructive disabled:opacity-50"
+                                  >
+                                    {busy ? 'Deleting…' : 'Delete everything'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => setPendingDelete(null)}
+                                    className="rounded-md border border-border px-2 py-1 font-medium text-muted-foreground disabled:opacity-50"
+                                  >
+                                    Cancel
+                                  </button>
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => void removeMailbox(account.id)}
+                                  className="rounded-md border border-destructive/40 px-2 py-1 font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                                >
+                                  Delete stored mail
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ) : null}
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
               <div className="mt-3 flex flex-wrap gap-2 text-xs">
                 <a
                   href="/auth/google"
@@ -2792,13 +2986,6 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                   {mailboxMessage}
                 </p>
               ) : null}
-              <p className="mt-3 text-[11px] text-muted-foreground">
-                To add a mailbox,{' '}
-                <a href="/auth/google" className="text-primary hover:underline">
-                  connect Gmail
-                </a>
-                .
-              </p>{' '}
             </section>
           ) : null}
         </div>

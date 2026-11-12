@@ -13,14 +13,18 @@
  */
 
 import type {
+  GoalInferenceRequest,
+  GoalInferrer,
   GoalReviewer,
   GoalReviewRequest,
   GoalVerdict,
 } from '#/lib/conversation/index.ts'
 
 import {
+  buildGoalInferencePrompt,
   buildGoalReviewPrompt,
   parseGoalVerdict,
+  parseInferredGoal,
   sanitizeDraft,
 } from '#/lib/conversation/index.ts'
 import { completeLlm, isReasoningModel } from './llm.ts'
@@ -66,9 +70,48 @@ export class LlmGoalReviewer implements GoalReviewer {
   }
 }
 
+/** One sentence needs far less room than a review, even with reasoning first. */
+const MAX_INFER_TOKENS = 200
+const MAX_REASONING_INFER_TOKENS = 2_048
+
+/**
+ * The LLM as an inferrer of a goal from the reply the user sent.
+ *
+ * Only called when the thread has no goal, and never used to overwrite one: a
+ * goal is the user's own statement of intent, and a model may propose the first
+ * one but not replace a later one.
+ */
+export class LlmGoalInferrer implements GoalInferrer {
+  readonly name: string
+  private readonly config: LlmConfig
+
+  constructor(config: LlmConfig) {
+    this.config = config
+    this.name = `llm:${config.provider}`
+  }
+
+  async infer(request: GoalInferenceRequest): Promise<string | null> {
+    const raw = await completeLlm(
+      this.config,
+      buildGoalInferencePrompt(request),
+      isReasoningModel(this.config.model)
+        ? MAX_REASONING_INFER_TOKENS
+        : MAX_INFER_TOKENS,
+    )
+    return parseInferredGoal(raw)
+  }
+}
+
 /** The reviewer for a config, or null when no LLM is configured. */
 export function goalReviewerFromConfig(
   llm: LlmConfig | null | undefined,
 ): GoalReviewer | null {
   return llm ? new LlmGoalReviewer(llm) : null
+}
+
+/** The goal inferrer for a config, or null when no LLM is configured. */
+export function goalInferrerFromConfig(
+  llm: LlmConfig | null | undefined,
+): GoalInferrer | null {
+  return llm ? new LlmGoalInferrer(llm) : null
 }

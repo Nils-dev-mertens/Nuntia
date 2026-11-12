@@ -28,7 +28,7 @@
 import type { Conversation, ConversationMessage } from './model.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import type {
-  ContactContextTextFields,
+  ContactContextProposal,
   ContactDecisionContext,
 } from '#/lib/contacts/context.ts'
 import type { StateDefinitions } from '#/lib/organization/labels.ts'
@@ -79,6 +79,31 @@ export type DecisionInput = {
   senderImportance?: number | null
   /** User-authored profile notes for this correspondent, when present. */
   senderContext?: ContactDecisionContext | null
+  /**
+   * The tags already on this correspondent — the user's and the app's.
+   *
+   * Read once per sync batch and passed in so a refresh can reuse a spelling the
+   * user chose instead of inventing a near-duplicate, and so the prompt sees how
+   * the person is already filed. Only the app's own tags may be revised.
+   */
+  senderTags?: ReadonlyArray<string> | null
+  /**
+   * Earlier threads with the same correspondent, newest first.
+   *
+   * A profile that only ever sees the open thread re-learns the relationship
+   * from one message at a time. These are the other conversations the caller
+   * found by address, and they are evidence rather than instructions: the open
+   * thread and anything the user wrote still win.
+   */
+  senderHistory?: ReadonlyArray<{
+    providerThreadId: string
+    subject: string
+    messages: ReadonlyArray<{
+      sender: string
+      sentAt: string
+      body: string
+    }>
+  }> | null
   /**
    * The user's own words for what a state means, where they rewrote one.
    *
@@ -196,7 +221,7 @@ export interface DecisionModel {
 export type ContextUpdate = {
   topic: string | null
   goal: string | null
-  contact: ContactContextTextFields | null
+  contact: ContactContextProposal | null
   /**
    * The id of one of the user's meaning-matched labels, or null for none.
    *
@@ -223,6 +248,13 @@ export type ContextUpdate = {
  */
 export interface ContextUpdater {
   readonly name: string
+  /**
+   * True when this updater actually refreshes the profile.
+   *
+   * Lets the caller skip loading cross-thread history for an install that only
+   * labels topics, where the evidence could never be used.
+   */
+  readonly refreshesProfiles?: boolean
   update: (input: DecisionInput) => Promise<ContextUpdate | null>
 }
 
@@ -250,7 +282,7 @@ export type Decision = {
    */
   goal: string | null
   /** Contact profile fields the context stage proposes, or null for none. */
-  contact: ContactContextTextFields | null
+  contact: ContactContextProposal | null
   /**
    * A custom label the decision settled the thread into, or null for none.
    *
@@ -449,7 +481,11 @@ export async function decideConversation(
     // otherwise has nobody to ask at all.
     labelId: verdict.labelId ?? context?.labelId ?? null,
     reasoning: verdict.reasoning ?? facts.reasoning,
-    providers: [pipeline.rules.name, pipeline.model.name, pipeline.context.name],
+    providers: [
+      pipeline.rules.name,
+      pipeline.model.name,
+      pipeline.context.name,
+    ],
   }
 }
 

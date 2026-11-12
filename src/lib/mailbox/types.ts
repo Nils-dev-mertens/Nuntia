@@ -167,6 +167,21 @@ export interface MailboxClient {
   /** Fetch a full thread with all message payloads. */
   getThread: (threadId: string) => Promise<ProviderThread>
 
+  /**
+   * Find threads a correspondent wrote, in the mailbox itself.
+   *
+   * Optional like the send methods: Gmail's search syntax is the only one this
+   * app can build, and a provider that cannot search says so by not implementing
+   * it rather than returning an unfiltered page the caller would have to filter
+   * anyway. Callers treat an absent method as "no extra history here".
+   */
+  searchThreads?: (opts: {
+    /** A bare address; the adapter owns the provider's query syntax. */
+    from: string
+    /** Threads to return at most, newest first. */
+    maxResults?: number
+  }) => Promise<ProviderThread[]>
+
   /** Changes since a cursor. */
   listHistory: (opts: {
     startHistoryId: string

@@ -15,6 +15,12 @@ import { getSession } from '#/lib/auth/index.ts'
 import { getAiPipelineConfig } from '#/lib/ai/settings.ts'
 import { suggestContactContext } from '#/lib/contacts/context-ai.ts'
 import type { ContactContextSource } from '#/lib/contacts/context-ai.ts'
+import { loadContactHistory } from '#/lib/contacts/history.ts'
+import { searchMailboxContactHistory } from '#/lib/contacts/provider-history.ts'
+import {
+  recordUserContactUpdate,
+  undoContextRevision,
+} from '#/lib/context/revisions.ts'
 import {
   applyUserImportanceOverride,
   applyUserStateOverride,
@@ -33,7 +39,7 @@ import type { ConversationState } from '#/db/schema.ts'
 import type {
   ActionFailure,
   ReplyDraftOutcome,
-  ReplyGoalCheck,
+  ReplyReviewOutcome,
 } from '#/lib/gmail/service.ts'
 import {
   refreshThread,
@@ -225,6 +231,16 @@ const saveContactContextAction = createServerFn({ method: 'POST' })
       const email = normaliseContactEmail(correspondent)
       const previous = await getContactContext(session.userId, email)
       await saveContactContext(session.userId, email, context)
+      // A manual edit goes through the same log as an automatic one: this is
+      // where the next refresh learns that the wording is the user's and must
+      // not be revised, and where Undo can put the old value back.
+      await recordUserContactUpdate({
+        userId: session.userId,
+        email,
+        threadId: conversation.providerThreadId,
+        previous,
+        next: context,
+      })
       if (previous?.importance !== context.importance) {
         await redecideConversationsForSender(session.userId, email)
       }
@@ -323,11 +339,33 @@ const suggestContactContextAction = createServerFn({ method: 'POST' })
           }
         }
 
-        // Use only this authenticated thread plus the user's current profile draft.
-        // The model proposes fields; this action never writes them to the database.
+        // Earlier conversations are what make the profile durable. They are
+        // supporting evidence only: the model still proposes, and this action
+        // never writes anything.
+        const history = await loadContactHistory(
+          session.userId,
+          correspondent.from.email,
+          { excludeProviderThreadId: conversation.providerThreadId },
+        )
+        // Stored mail only reaches back as far as the sync has walked. A Gmail
+        // mailbox can be searched directly, which is what lets the note know
+        // about a relationship that started before this install did. Everything
+        // already offered is excluded so the prompt never reads it twice.
+        const fromMailbox = await searchMailboxContactHistory(
+          session.userId,
+          correspondent.from.email,
+          {
+            excludeProviderThreadIds: [
+              conversation.providerThreadId,
+              ...history.map((thread) => thread.providerThreadId),
+            ],
+            limit: 2,
+          },
+        )
         const source: ContactContextSource = {
           subject: conversation.subject,
           current,
+          history: [...history, ...fromMailbox],
           messages: conversation.messages.map((message) => ({
             sender: message.from.name ?? message.from.email,
             sentAt: message.sentAt.toISOString(),
@@ -737,24 +775,57 @@ const setImportanceAction = createServerFn({ method: 'POST' })
  */
 const reviewReplyAction = createServerFn({ method: 'POST' })
   .validator((data: { providerThreadId: string; body: string }) => data)
-  .handler(
-    async ({
-      data,
-    }): Promise<{ check: ReplyGoalCheck | null; error: string | null }> => {
-      const session = await getSession()
-      if (!session) return { check: null, error: 'You are not signed in.' }
-
-      if (typeof data.body !== 'string' || data.body.trim().length === 0) {
-        return { check: null, error: 'There is no reply to check.' }
+  .handler(async ({ data }): Promise<ReplyReviewOutcome> => {
+    const session = await getSession()
+    if (!session) {
+      return {
+        check: null,
+        inferredGoal: null,
+        error: 'You are not signed in.',
       }
+    }
 
-      return await reviewSentReply(
-        session.userId,
-        data.providerThreadId,
-        data.body.trim(),
-      )
-    },
-  )
+    if (typeof data.body !== 'string' || data.body.trim().length === 0) {
+      return {
+        check: null,
+        inferredGoal: null,
+        error: 'There is no reply to check.',
+      }
+    }
+
+    return await reviewSentReply(
+      session.userId,
+      data.providerThreadId,
+      data.body.trim(),
+    )
+  })
+
+/**
+ * Undo a goal the app inferred from the reply the user just sent.
+ *
+ * The revision carries whether this was an inference at all, and undo is already
+ * ownership-checked, so a client can only reverse a change on its own account.
+ */
+const undoInferredGoalAction = createServerFn({ method: 'POST' })
+  .validator((data: { revisionId: string }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (typeof data.revisionId !== 'string' || !data.revisionId) {
+      return { error: 'That goal could not be found.' }
+    }
+
+    try {
+      const undone = await undoContextRevision(session.userId, data.revisionId)
+      return {
+        error: undone ? null : 'That goal could not be undone.',
+      }
+    } catch (error) {
+      console.error('[goal] undoing the inferred goal failed:', error)
+      return { error: 'Could not undo that goal.' }
+    }
+  })
 
 /**
  * Record that the user has opened this thread, so it stops reading as new mail.
@@ -956,6 +1027,13 @@ function ConversationRoute() {
           data: { providerThreadId: detail.providerThreadId, body },
         })
       }
+      onUndoGoal={async (revisionId) => {
+        const undone = await undoInferredGoalAction({
+          data: { revisionId },
+        })
+        if (!undone.error) await router.invalidate()
+        return undone
+      }}
     />
   )
 }

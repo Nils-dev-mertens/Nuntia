@@ -24,12 +24,13 @@ import {
 } from '#/lib/conversation/index.ts'
 import type {
   DecisionPipeline,
+  GoalInferrer,
   GoalReviewer,
   ReplyDrafter,
 } from '#/lib/conversation/index.ts'
 
 import { replyDrafterFromConfig } from './draft.ts'
-import { goalReviewerFromConfig } from './goal.ts'
+import { goalInferrerFromConfig, goalReviewerFromConfig } from './goal.ts'
 import { JevDecisionModel } from './jev.ts'
 import { LlmContextUpdater } from './context.ts'
 import { getAiPipelineConfig } from './settings.ts'
@@ -38,7 +39,12 @@ import type { AiPipelineConfig } from './settings.ts'
 export { JevDecisionModel } from './jev.ts'
 export type { JevConfig } from './jev.ts'
 export { LlmReplyDrafter, replyDrafterFromConfig } from './draft.ts'
-export { LlmGoalReviewer, goalReviewerFromConfig } from './goal.ts'
+export {
+  LlmGoalInferrer,
+  LlmGoalReviewer,
+  goalInferrerFromConfig,
+  goalReviewerFromConfig,
+} from './goal.ts'
 export { LlmContextUpdater, parseContextUpdate } from './context.ts'
 export {
   completeLlm,
@@ -120,8 +126,15 @@ export type ReplyDrafting = {
    * the user sent, so the two features are on or off together.
    */
   reviewer: GoalReviewer | null
+  /**
+   * Null when no LLM is stored. Used only for a thread that has no goal, to
+   * propose one from the reply the user just sent.
+   */
+  inferrer: GoalInferrer | null
   /** 1–10, from the same row. */
   minImportance: number
+  /** The stored switch that makes importance stop gating drafts. */
+  suggestAlways: boolean
 }
 
 /**
@@ -144,14 +157,20 @@ export async function loadReplyDrafter(userId: string): Promise<ReplyDrafting> {
         config.goalCheckEnabled === false
           ? null
           : goalReviewerFromConfig(config.llm),
+      // Goal inference is not the post-send check: it runs for any thread with
+      // no goal, even when the user has switched the check itself off.
+      inferrer: goalInferrerFromConfig(config.llm),
       minImportance: config.suggestReplyMinImportance,
+      suggestAlways: config.suggestReplyAlways === true,
     }
   } catch (error) {
     console.error('[ai] could not load the reply drafter:', error)
     return {
       drafter: null,
       reviewer: null,
+      inferrer: null,
       minImportance: REPLY_DRAFT_MIN_IMPORTANCE_DEFAULT,
+      suggestAlways: false,
     }
   }
 }

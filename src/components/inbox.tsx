@@ -533,6 +533,23 @@ function ConversationRow({
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
                 {participantsOf(conversation)}
               </p>
+              {/*
+               * The correspondent's tags, on the row they are filed under: a tag
+               * is how the user finds a person, and a thread list is where they
+               * look. Quiet on purpose — the subject still leads the row.
+               */}
+              {conversation.tags.length > 0 ? (
+                <p className="mt-1 flex flex-wrap gap-1">
+                  {conversation.tags.map((tag) => (
+                    <span
+                      key={tag}
+                      className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </p>
+              ) : null}
             </div>
           </div>
 

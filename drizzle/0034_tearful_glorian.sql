@@ -1,0 +1,1 @@
+ALTER TABLE `contact_tags` ADD `source` text DEFAULT 'user' NOT NULL;

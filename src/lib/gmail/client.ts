@@ -152,6 +152,35 @@ export function createGmailApiClient(
     }
   }
 
+  /**
+   * Fetch one thread with every message payload.
+   *
+   * Shared by the sync path and the contact search: both need bodies, and the
+   * only difference between them is how the thread id was found.
+   */
+  const fetchThread = async (threadId: string): Promise<ProviderThread> => {
+    const data = await req(() =>
+      gmail.users.threads.get({
+        userId: 'me',
+        id: threadId,
+        format: 'full',
+      }),
+    )
+
+    return {
+      id: data.id ?? threadId,
+      cursor: data.historyId ?? '',
+      messages: (data.messages ?? []).map((m) => ({
+        id: m.id ?? '',
+        threadId: m.threadId ?? threadId,
+        labelIds: m.labelIds ?? [],
+        internalDate: m.internalDate ?? null,
+        snippet: m.snippet ?? null,
+        payload: m.payload ? toGmailPart(m.payload) : null,
+      })),
+    }
+  }
+
   return {
     provider: 'google',
     capabilities: { structuredReply: false, delta: true },
@@ -182,26 +211,28 @@ export function createGmailApiClient(
     },
 
     async getThread(threadId) {
+      return fetchThread(threadId)
+    },
+
+    async searchThreads({ from, maxResults = 5 }) {
+      // The address is bare, so the query is built here rather than by a caller
+      // that would have to know this is Gmail's syntax. `from:` matches the
+      // header's address only, which is what "mail from this person" means.
       const data = await req(() =>
-        gmail.users.threads.get({
+        gmail.users.threads.list({
           userId: 'me',
-          id: threadId,
-          format: 'full',
+          maxResults,
+          q: `from:${from}`,
         }),
       )
 
-      return {
-        id: data.id ?? threadId,
-        cursor: data.historyId ?? '',
-        messages: (data.messages ?? []).map((m) => ({
-          id: m.id ?? '',
-          threadId: m.threadId ?? threadId,
-          labelIds: m.labelIds ?? [],
-          internalDate: m.internalDate ?? null,
-          snippet: m.snippet ?? null,
-          payload: m.payload ? toGmailPart(m.payload) : null,
-        })),
-      }
+      const ids = (data.threads ?? [])
+        .map((thread) => thread.id)
+        .filter((id): id is string => Boolean(id))
+
+      // One fetch per thread, bounded by `maxResults`: this answers a person
+      // waiting for a profile, not a page of a backfill.
+      return Promise.all(ids.map(fetchThread))
     },
 
     async setThreadUnread(threadId, unread) {

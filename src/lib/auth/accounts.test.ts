@@ -335,6 +335,29 @@ describe('AI settings', () => {
     expect((await getAiSettings(BOB)).suggestReplyMinImportance).toBe(8)
   })
 
+  test('the every-thread reply switch is stored per user and kept when omitted', async () => {
+    await signUp(ALICE, BOB)
+    await saveAiSettings(ALICE, {
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      suggestReplyMinImportance: 6,
+      suggestReplyAlways: true,
+    })
+
+    expect((await getAiSettings(ALICE)).suggestReplyAlways).toBe(true)
+    expect((await getAiSettings(BOB)).suggestReplyAlways).toBe(false)
+
+    // Omitting the switch leaves the stored answer alone, like the other booleans.
+    await saveAiSettings(ALICE, {
+      jevModel: null,
+      llmProvider: null,
+      llmModel: null,
+      suggestReplyMinImportance: 6,
+    })
+    expect((await getAiSettings(ALICE)).suggestReplyAlways).toBe(true)
+  })
+
   test('write to the row the first sign-up adopted', async () => {
     await signUp(ALICE)
 
