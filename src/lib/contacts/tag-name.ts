@@ -20,6 +20,14 @@ export const CONTACT_TAG_LIMITS = {
    */
   perProposal: 5,
   /**
+   * How many of those a refresh may actually apply.
+   *
+   * Deliberately lower than what may be proposed: the resolver below drops
+   * everything outside the existing vocabulary first, and three is already more
+   * filing than most people do by hand at once.
+   */
+  autoPerRefresh: 3,
+  /**
    * A sentence, not an essay: enough to say what the word means, short enough
    * to sit under a tag in a list without turning the list into prose.
    */
@@ -69,6 +77,42 @@ export function normaliseContactTagList(
     if (tags.length >= limit) break
   }
   return tags
+}
+
+/**
+ * Which of a refresh's proposals the app may actually write.
+ *
+ * An automatic refresh used to be allowed to invent tags, and it did: every
+ * address got its own role, and the vocabulary filled up with words nobody had
+ * typed. A tag is the user's filing decision, so the automatic writer may only
+ * place someone under a word the address book already has — a tag the user put
+ * on someone by hand, or a definition they created on the tags screen.
+ *
+ * Everything else is dropped, which is what stops one address from inventing a
+ * group of one. The spellings of the proposals are kept so the model's casing
+ * for a proper noun survives; comparison is case-insensitive, like every other
+ * tag writer.
+ */
+export function autoContactTags(
+  proposed: ReadonlyArray<string>,
+  vocabulary: Iterable<string>,
+): string[] {
+  const known = new Set([...vocabulary].map((tag) => tag.trim().toLowerCase()))
+  const seen = new Set<string>()
+  const accepted: string[] = []
+
+  for (const value of proposed) {
+    const tag = normaliseContactTag(value)
+    if (!tag) continue
+    const key = tag.toLowerCase()
+    if (!known.has(key) || seen.has(key)) continue
+
+    seen.add(key)
+    accepted.push(tag)
+    if (accepted.length >= CONTACT_TAG_LIMITS.autoPerRefresh) break
+  }
+
+  return accepted
 }
 
 /**

@@ -15,12 +15,16 @@ import { Link } from '@tanstack/react-router'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
+  Ban,
+  Check,
   ChevronDown,
   ChevronRight,
   File,
+  Flag,
   Image,
   PanelRightClose,
   PanelRightOpen,
+  Tag,
   X,
 } from 'lucide-react'
 
@@ -41,7 +45,6 @@ import type {
   ContactContextTextFields,
 } from '#/lib/contacts/context.ts'
 
-import { Avatar } from '#/components/avatar'
 import { StateBadge } from '#/components/state-badge'
 import { DONE_META, READ_META, STATE_ORDER } from '#/lib/conversation-state'
 import { cn } from '#/lib/utils'
@@ -200,23 +203,23 @@ function DoneButton({
         type="button"
         onClick={() => void run()}
         disabled={busy}
+        aria-label={done ? 'Reopen this thread' : 'Mark this thread done'}
         title={
           done
             ? 'Reopen: this thread counts as work again'
             : 'Mark done: you have dealt with this thread. New mail brings it back by itself.'
         }
-        className="rounded-md border border-border px-2 py-1 text-xs font-medium text-foreground transition-colors hover:border-foreground/25 disabled:opacity-50"
+        className={cn(
+          'flex size-8 items-center justify-center rounded-[4px] border transition-colors disabled:opacity-50',
+          done
+            ? 'border-success/40 bg-success/10 text-success'
+            : 'border-border text-muted-foreground hover:border-foreground/25 hover:text-foreground',
+        )}
       >
-        {/* "Mark done" rather than "Done": one is the action, the other is the
-            state, and a button that reads like a label is how a control gets
-            mistaken for a badge. */}
-        {busy
-          ? done
-            ? 'Reopening…'
-            : 'Marking…'
-          : done
-            ? 'Reopen'
-            : 'Mark done'}
+        {/* A check, like the design's mark-done control: the action is the
+            icon, and the label that used to spell it out now lives in the
+            accessible name and the tooltip. */}
+        <Check aria-hidden="true" className="size-4" />
       </button>
       {error ? (
         <span
@@ -283,15 +286,16 @@ function StateLabelPicker({
   return (
     <div className="flex flex-col items-end gap-1">
       <label
-        className="flex items-center gap-2 text-xs text-muted-foreground"
+        className="flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-background px-2 text-[11px] font-medium text-muted-foreground"
         title="Where this thread is filed. Automatic is the app's own answer; picking a label overrides it for this thread."
       >
-        Label
+        <Tag aria-hidden="true" className="size-3.5 shrink-0" />
         <select
           value={value}
           onChange={(event) => void choose(event.target.value)}
           disabled={busy}
-          className="rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground disabled:opacity-50"
+          aria-label="Label"
+          className="h-8 max-w-32 bg-transparent text-[11px] font-medium text-foreground outline-none disabled:opacity-50"
         >
           <option value="">Automatic</option>
           {STATE_ORDER.map((state) => (
@@ -354,15 +358,16 @@ function ImportancePicker({
   return (
     <div className="flex flex-col items-start gap-1">
       <label
-        className="flex items-center gap-2 text-xs text-muted-foreground"
+        className="flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-background px-2 text-[11px] font-medium text-muted-foreground"
         title="How much this thread needs you. Automatic is the app's own score; a number you pick stays on this thread until newer mail arrives."
       >
-        Importance
+        <Flag aria-hidden="true" className="size-3.5 shrink-0" />
         <select
           value={value}
           onChange={(event) => void choose(event.target.value)}
           disabled={busy}
-          className="rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground disabled:opacity-50"
+          aria-label="Importance"
+          className="h-8 max-w-36 bg-transparent text-[11px] font-medium text-foreground outline-none disabled:opacity-50"
         >
           <option value="">Automatic ({effective}/10)</option>
           {Array.from({ length: 10 }, (_, index) => index + 1).map((score) => (
@@ -419,10 +424,11 @@ function CantReplyButton({
         type="button"
         onClick={() => void run()}
         disabled={busy}
+        aria-label={`Can’t reply to ${senderEmail}`}
         title={`Hide the reply box on every thread from ${senderEmail}. Undo this from the can’t-reply list in Settings.`}
-        className="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+        className="flex size-8 items-center justify-center rounded-[4px] border border-border text-muted-foreground transition-colors hover:border-foreground/25 hover:text-foreground disabled:opacity-50"
       >
-        {busy ? 'Marking…' : 'Can’t reply'}
+        <Ban aria-hidden="true" className="size-4" />
       </button>
       {error ? (
         <span
@@ -2313,14 +2319,6 @@ export function ConversationView({
     !message.isFromOwner && Date.parse(message.sentAt) > seenAtMs
   let shownUnseenBoundary = false
 
-  // The header avatar belongs to the other party. In a thread between two of the
-  // user's own addresses that is still "the other side", which is why the
-  // owner's addresses are excluded rather than just taking the first entry.
-  const senderContact =
-    detail.participants.find(
-      (p) => !detail.ownerEmails.includes(p.email.toLowerCase()),
-    ) ?? detail.participants[0]
-
   // The overview only exists when there is contact context or media behind it,
   // which is also what decides whether the mobile control is offered.
   const hasOverview = mediaAttachments.length > 0 || Boolean(detail.senderEmail)
@@ -2328,89 +2326,104 @@ export function ConversationView({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="border-b border-border px-4 py-3 sm:px-6 sm:py-4">
-        <div className="flex items-start gap-3">
-          <Avatar
-            contact={senderContact}
-            className="mt-0.5 size-8 text-[10px] sm:size-9 sm:text-xs"
-          />
+        <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-base font-semibold text-foreground sm:text-lg">
+            <h1 className="truncate font-display text-[20px] leading-tight font-medium tracking-[-0.3px] text-foreground">
               {detail.topic ?? detail.subject}
             </h1>
-            <p className="mt-0.5 truncate text-xs text-muted-foreground">
-              {detail.participants.map((p) => p.name ?? p.email).join(', ')}
-            </p>
-            {/* The other party's tags, read where the thread is open. */}
-            {detail.tags.length > 0 ? (
-              <p className="mt-1 flex flex-wrap gap-1">
-                {detail.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </p>
-            ) : null}
             {/*
-             * The state, the done mark and replyability were three chips in two
-             * rows; they are facts about the thread, not controls, so they read
-             * as one quiet line under the subject.
+             * One quiet line: who, how many messages, and the state — the
+             * design's header meta, with the done and no-reply facts kept in
+             * the same row rather than growing their own chips.
              */}
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-muted-foreground">
+              <span className="min-w-0 truncate">
+                {detail.participants.map((p) => p.name ?? p.email).join(', ')}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                {detail.messages.length}{' '}
+                {detail.messages.length === 1 ? 'message' : 'messages'}
+              </span>
               <StateBadge
                 state={detail.state}
                 label={detail.stateLabels[detail.state].name}
+                className="gap-1 rounded-[4px] bg-muted/60 px-[7px] py-[3px] text-[10px] tracking-[0.04em] uppercase"
               />
               {detail.done ? <span>{DONE_META.label}</span> : null}
               {detail.replyable ? null : <span>no reply</span>}
+              {/* The other party's tags ride in the same line: a third stacked
+                  row above the mail for two words was most of the header's
+                  height. */}
+              {detail.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-[4px] border border-border bg-muted/40 px-1.5 text-[10px] text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
             </div>
-            {detail.goal ? (
-              <p className="mt-1 line-clamp-2 text-[11px] text-muted-foreground">
-                <span className="font-medium text-foreground">Goal</span>{' '}
-                {detail.goal}
-              </p>
+          </div>
+          {/*
+           * The controls sit beside the title where there is width — the design's
+           * action cluster — and drop under it on a phone, where a row of
+           * 32px buttons is the whole width. One strip either way.
+           */}
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
+            {/*
+             * Always offered, and it reads as a statement of where the thread is
+             * as well as a control: the picker shows the stored label, or
+             * Automatic when the app's own answer stands — including when a
+             * sender-level call of the user's is what put it there.
+             */}
+            <StateLabelPicker
+              current={detail.stateOverride}
+              labels={detail.stateLabels}
+              onSet={onSetStateOverride}
+            />
+            <ImportancePicker
+              current={detail.importanceOverride}
+              effective={detail.importance}
+              onSet={onSetImportance}
+            />
+            {/*
+             * Adding to the can't-reply list was Settings-only, which meant
+             * recognising a sender you already had open and then finding the
+             * address again somewhere else to type it. It is offered here too, and
+             * only while a reply box is still on screen: a sender who is already
+             * unanswerable has nothing left to add, which is why the control
+             * disappears rather than becoming an undo.
+             *
+             * Taking the mark back stays in Settings — one list, one place to
+             * manage it. This is a second way in, not a second place it is edited.
+             */}
+            {detail.replyable && detail.senderEmail ? (
+              <CantReplyButton
+                senderEmail={detail.senderEmail}
+                onMark={onMarkSenderUnreplyable}
+              />
             ) : null}
+            <DoneButton done={detail.done} onSet={onSetDone} />
           </div>
         </div>
-        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
-          {/*
-           * Always offered, and it reads as a statement of where the thread is
-           * as well as a control: the picker shows the stored label, or
-           * Automatic when the app's own answer stands — including when a
-           * sender-level call of the user's is what put it there.
-           */}
-          <StateLabelPicker
-            current={detail.stateOverride}
-            labels={detail.stateLabels}
-            onSet={onSetStateOverride}
-          />
-          <ImportancePicker
-            current={detail.importanceOverride}
-            effective={detail.importance}
-            onSet={onSetImportance}
-          />
-          {/*
-           * Adding to the can't-reply list was Settings-only, which meant
-           * recognising a sender you already had open and then finding the
-           * address again somewhere else to type it. It is offered here too, and
-           * only while a reply box is still on screen: a sender who is already
-           * unanswerable has nothing left to add, which is why the control
-           * disappears rather than becoming an undo.
-           *
-           * Taking the mark back stays in Settings — one list, one place to
-           * manage it. This is a second way in, not a second place it is edited.
-           */}
-          {detail.replyable && detail.senderEmail ? (
-            <CantReplyButton
-              senderEmail={detail.senderEmail}
-              onMark={onMarkSenderUnreplyable}
-            />
-          ) : null}
-          <DoneButton done={detail.done} onSet={onSetDone} />
-        </div>
       </header>
+
+      {/*
+       * The goal is a fact about the whole thread, not part of its heading, so
+       * it gets the design's context strip: its own rule, a mono label, and the
+       * full width of the pane instead of a third line squeezed under the meta.
+       */}
+      {detail.goal ? (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-border px-4 py-2 sm:px-6">
+          <span className="font-mono text-[10px] font-semibold tracking-[0.08em] text-muted-foreground uppercase">
+            Goal
+          </span>
+          <p className="min-w-0 flex-1 text-[12px] leading-4 text-foreground/90">
+            {detail.goal}
+          </p>
+        </div>
+      ) : null}
 
       {/*
        * Says what the tag above means, in the one place with room for it: the two
@@ -2418,7 +2431,7 @@ export function ConversationView({
        * groups" is the difference in a sentence.
        */}
       {detail.done ? (
-        <p className="border-y border-border bg-success/5 px-4 py-2 text-xs text-muted-foreground sm:px-6">
+        <p className="border-b border-border bg-success/5 px-4 py-2 text-xs text-muted-foreground sm:px-6">
           <span className="font-medium text-success">{DONE_META.label}</span> —{' '}
           {DONE_META.detail}{' '}
           {/*

@@ -1,0 +1,151 @@
+/*
+ * Design tokens for the landing site.
+ *
+ * These mirror the app's palette and the Stitch spec in `../../stitch/DESIGN.md`:
+ * obsidian canvas, hairline rules, one cadmium accent, Space Grotesk for
+ * headings, JetBrains Mono for labels. Duplicated here rather than imported so
+ * the landing site builds and deploys on its own.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --color-background: #0a0a0c;
+  --color-foreground: #ffffff;
+  --color-card: #111113;
+  --color-muted: #1e1e22;
+  --color-muted-foreground: rgba(255, 255, 255, 0.6);
+  --color-border: rgba(255, 255, 255, 0.12);
+  --color-primary: #ff5722;
+  --color-primary-foreground: #0a0a0c;
+  --color-warning: #ffc789;
+  --color-success: #3ce36a;
+}
+
+html {
+  scroll-behavior: smooth;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: rgba(255, 87, 34, 0.35);
+  color: var(--color-foreground);
+}
+
+* {
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-width: thin;
+}
+
+/*
+ * One reveal, reused by the sections. The interactive island uses Motion; this
+ * is for everything that should stay HTML and still not arrive all at once.
+ */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.rise-late {
+  animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .rise,
+  .rise-late {
+    animation: none;
+  }
+}
+
+/*
+ * Section reveals. The page is mostly static HTML, so instead of turning each
+ * section into a React island, a tiny IntersectionObserver adds `.is-visible`
+ * and CSS does the transition. The delay comes from `--reveal-delay`, which
+ * lets a list stagger without JavaScript per item. `app.js` adds the class;
+ * without JavaScript a <noscript> rule in the page shows everything at once.
+ */
+[data-reveal] {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1) var(--reveal-delay, 0ms);
+}
+
+[data-reveal].is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* The header gains weight only after the page has moved. */
+#site-header {
+  transition:
+    background-color 0.3s ease,
+    box-shadow 0.3s ease,
+    backdrop-filter 0.3s ease;
+}
+
+#site-header.is-scrolled {
+  background-color: rgba(10, 10, 12, 0.92);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(16px);
+}
+
+/* The FAQ keeps native <details>; only the answer fades in. */
+details[open] .faq-answer {
+  animation: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* A slow drift on the closing card's light, so it is not a flat gradient. */
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-28px, 22px, 0) scale(1.1);
+  }
+}
+
+.cta-orb {
+  animation: drift 16s ease-in-out infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal] {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  details[open] .faq-answer,
+  .cta-orb {
+    animation: none;
+  }
+}

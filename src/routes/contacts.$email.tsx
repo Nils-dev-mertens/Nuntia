@@ -30,10 +30,15 @@ import { getSession, listAccounts } from '#/lib/auth/index.ts'
 import { getContactContext } from '#/lib/contacts/context.ts'
 import type { ContactContext } from '#/lib/contacts/context.ts'
 import { contactContextDescription } from '#/lib/contacts/description.ts'
-import { contactNamesFor } from '#/lib/contacts/index.ts'
+import {
+  contactNamesFor,
+  listContactSuggestions,
+} from '#/lib/contacts/index.ts'
 import { listContactThreads } from '#/lib/contacts/history.ts'
 import type { ContactThread } from '#/lib/contacts/history.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
+import { contactOrganization } from '#/lib/contacts/organization.ts'
+import type { ContactOrganization } from '#/lib/contacts/organization.ts'
 import { getContactTags, setContactTag } from '#/lib/contacts/tags.ts'
 import { listStateLabels } from '#/lib/organization/store.ts'
 import type { StateLabels } from '#/lib/organization/labels.ts'
@@ -54,6 +59,10 @@ type ContactPageData =
       threads: ContactThread[]
       /** The user's own tags for this person, in display order. */
       tags: string[]
+      /** The company the address belongs to, read from its domain. */
+      organization: ContactOrganization | null
+      /** Other known addresses at the same organisation. */
+      colleagues: Array<{ email: string; name: string | null }>
       stateLabels: StateLabels
       accounts: ConnectedAccount[]
     }
@@ -71,13 +80,38 @@ const fetchContact = createServerFn({ method: 'GET' })
     const email = normaliseContactEmail(data.email)
     if (!email) return { signedIn: true, found: false, accounts }
 
-    const [context, threads, names, stateLabels, tags] = await Promise.all([
-      getContactContext(session.userId, email),
-      listContactThreads(session.userId, email),
-      contactNamesFor(accounts.map((account) => account.id)),
-      listStateLabels(session.userId),
-      getContactTags(session.userId, email),
-    ])
+    const organization = contactOrganization(email)
+    const [context, threads, names, stateLabels, tags, colleagues] =
+      await Promise.all([
+        getContactContext(session.userId, email),
+        listContactThreads(session.userId, email),
+        contactNamesFor(accounts.map((account) => account.id)),
+        listStateLabels(session.userId),
+        getContactTags(session.userId, email),
+        organization
+          ? listContactSuggestions(
+              accounts.map((account) => account.id),
+              new Set(
+                accounts.map((account) => account.email.trim().toLowerCase()),
+              ),
+              1_000,
+            ).then((rows) =>
+              rows
+                .flatMap((row) => {
+                  const address = normaliseContactEmail(row.email)
+                  if (
+                    !address ||
+                    address === email ||
+                    contactOrganization(address)?.domain !== organization.domain
+                  ) {
+                    return []
+                  }
+                  return [{ email: address, name: row.name }]
+                })
+                .slice(0, 8),
+            )
+          : Promise.resolve([]),
+      ])
 
     return {
       signedIn: true,
@@ -87,6 +121,8 @@ const fetchContact = createServerFn({ method: 'GET' })
       context,
       threads,
       tags,
+      organization,
+      colleagues,
       stateLabels,
       accounts,
     }
@@ -318,6 +354,14 @@ function ContactPage() {
                   {context.roleCompany}
                 </span>
               ) : null}
+              {data.organization ? (
+                <span
+                  title={`Organisation · ${data.organization.domain}`}
+                  className="rounded-full border border-border px-2 py-0.5"
+                >
+                  {data.organization.name}
+                </span>
+              ) : null}
               {context && context.importance !== null ? (
                 <span className="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 font-medium text-primary">
                   Importance · {context.importance}/10
@@ -332,6 +376,31 @@ function ContactPage() {
         </header>
 
         <ContactTags email={data.email} initialTags={data.tags} />
+
+        {data.organization && data.colleagues.length > 0 ? (
+          <section className="mt-6 rounded-lg border border-border bg-card p-4">
+            <h2 className="text-[10px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+              Also at {data.organization.name}
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Grouped by the address domain, so people at one organisation are
+              findable together.
+            </p>
+            <ul className="mt-2 flex flex-wrap gap-1.5">
+              {data.colleagues.map((colleague) => (
+                <li key={colleague.email}>
+                  <Link
+                    to="/contacts/$email"
+                    params={{ email: colleague.email }}
+                    className="rounded-full border border-border px-2 py-0.5 text-[11px] text-foreground transition-colors hover:bg-muted/40"
+                  >
+                    {colleague.name ?? colleague.email}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
 
         {context && (context.topics || context.currentWork) ? (
           <dl className="mt-6 grid gap-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-2">

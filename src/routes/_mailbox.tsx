@@ -28,7 +28,7 @@ import { ComposeOverlay } from '#/components/compose-overlay.tsx'
 import { QuestionsOverlay } from '#/components/questions-overlay.tsx'
 import { Inbox } from '#/components/inbox'
 import type { MailPreview } from '#/components/inbox'
-import { DONE_GROUP, STATE_META, STATE_ORDER } from '#/lib/conversation-state'
+import { STATE_META, STATE_ORDER } from '#/lib/conversation-state'
 import {
   loadComposeState,
   loadStylePreview,
@@ -707,20 +707,9 @@ function Home() {
       return entry ? [entry] : []
     })
 
-    // Done is deliberately outside the arrangement — finished mail is always
-    // last — so it is appended rather than resolved from a token.
-    return payload.doneCount > 0
-      ? [
-          ...ordered,
-          {
-            key: 'done',
-            title: DONE_GROUP.label,
-            dotClass: 'bg-muted-foreground',
-            count: payload.doneCount,
-            muted: true,
-          },
-        ]
-      : ordered
+    // Done is outside the arrangement on purpose: it is a destination in the
+    // nav, not a section, so it is not repeated in the list below.
+    return ordered
   }, [payload])
 
   useEffect(() => {
@@ -765,6 +754,7 @@ function Home() {
   return (
     <AppShell
       sections={sections}
+      doneCount={payload.doneCount}
       activeSection={section}
       onSelectSection={setSection}
       accounts={payload.accounts}
@@ -779,7 +769,7 @@ function Home() {
             // list's position is the element's own `scrollTop` rather than the
             // window's.
             'min-w-0 flex-1 md:h-dvh md:overflow-y-auto md:overscroll-contain',
-            threadOpen && 'hidden md:block md:w-[22rem] md:flex-none',
+            threadOpen && 'hidden md:block md:w-[404px] md:flex-none',
           )}
         >
           <Inbox

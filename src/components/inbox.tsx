@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Clock,
   GripVertical,
+  Paperclip,
 } from 'lucide-react'
 
 import type { ConversationState } from '#/db/schema.ts'
@@ -161,6 +162,23 @@ function readStoredSort(): InboxSort | null {
   } catch {
     return null
   }
+}
+
+/**
+ * The section's own colour, reused for its title.
+ *
+ * Written out rather than derived from `dotClass`, because the classes have to
+ * appear literally for the compiler to emit them. A section titled in the same
+ * colour as its dot is the one thing that makes a new group obvious at a
+ * glance, without a filled band taking a row's height.
+ */
+const SECTION_TITLE_CLASS: Record<string, string> = {
+  'bg-success': 'text-success',
+  'bg-warning': 'text-warning',
+  'bg-info': 'text-info',
+  'bg-primary': 'text-primary',
+  'bg-foreground/30': 'text-muted-foreground',
+  'bg-muted-foreground': 'text-muted-foreground',
 }
 
 /** The threads the user has handled, in their own section. */
@@ -382,33 +400,33 @@ function AutomatedRow({
           })
         }}
         className={cn(
-          'block rounded-md border border-border/60 bg-muted/20 transition-colors hover:border-foreground/25',
-          showSelector ? 'py-2 pr-3 pl-9' : 'px-3 py-2',
-          active && 'border-foreground/30 bg-muted/40',
+          '-mx-[18px] block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
+          showSelector && 'pl-10',
+          active && 'bg-muted/40',
         )}
       >
         <div className="flex items-baseline justify-between gap-3">
-          <div className="flex min-w-0 items-baseline gap-2">
-            <span className="truncate text-sm font-medium text-foreground">
-              {sender}
-            </span>
-            <NoReplyTag />
-            {showAccount ? (
-              <AccountTag email={conversation.accountEmail} />
-            ) : null}
-          </div>
-
+          <span className="min-w-0 truncate text-[12.5px] font-bold text-foreground">
+            {sender}
+          </span>
           <time
             dateTime={conversation.lastMessageAt}
             suppressHydrationWarning
-            className="shrink-0 text-xs text-muted-foreground"
+            className="shrink-0 font-mono text-[10.5px] tracking-[0.02em] text-muted-foreground"
           >
             {timeAgo(conversation.lastMessageAt)}
           </time>
         </div>
 
-        <p className="mt-0.5 truncate text-xs text-muted-foreground">
+        <p className="mt-1 truncate font-display text-[16px] leading-tight font-medium text-foreground">
           {conversation.topic ?? conversation.subject}
+        </p>
+
+        <p className="mt-1 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+          <NoReplyTag />
+          {showAccount ? (
+            <AccountTag email={conversation.accountEmail} />
+          ) : null}
         </p>
       </Link>
     </li>
@@ -466,7 +484,7 @@ function ConversationRow({
             })
           }
           className={cn(
-            'absolute top-3.5 left-3 z-10 flex size-4 items-center justify-center rounded border transition-colors',
+            'absolute top-2 left-2 z-10 flex size-4 items-center justify-center rounded-[4px] border transition-colors',
             selected
               ? 'border-primary bg-primary text-primary-foreground'
               : 'border-border bg-background hover:border-foreground/40',
@@ -497,230 +515,91 @@ function ConversationRow({
           })
         }}
         className={cn(
-          'block rounded-lg border border-border bg-card transition-colors hover:border-foreground/25',
-          showSelector ? 'py-4 pr-4 pl-10' : 'p-4',
-          active && 'border-foreground/30 ring-1 ring-foreground/10',
+          '-mx-[18px] block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
+          showSelector && 'pl-10',
+          active && 'bg-muted/40',
         )}
       >
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex min-w-0 gap-3">
-            <Avatar contact={conversation.participants[0]} className="mt-0.5" />
-            <div className="min-w-0">
-              <p className="flex min-w-0 items-center gap-2 text-sm font-medium text-card-foreground">
-                {/*
-                 * Incoming mail the user has not opened. Only unseen mail earns
-                 * this: a thread they have read but not answered is not new — it is
-                 * the one case where looking away would lose a reply, so it keeps
-                 * its row's weight and stays where it is.
-                 */}
-                {conversation.unseen ? (
-                  <span
-                    role="img"
-                    aria-label={READ_META.description}
-                    title={READ_META.description}
-                    className="size-2 shrink-0 rounded-full bg-primary"
-                  />
-                ) : null}
-                <span
-                  className={cn(
-                    'truncate',
-                    conversation.unseen && 'font-semibold',
-                  )}
-                >
-                  {title}
-                </span>
-              </p>
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                {participantsOf(conversation)}
-              </p>
-              {/*
-               * The correspondent's tags, on the row they are filed under: a tag
-               * is how the user finds a person, and a thread list is where they
-               * look. Quiet on purpose — the subject still leads the row.
-               */}
-              {conversation.tags.length > 0 ? (
-                <p className="mt-1 flex flex-wrap gap-1">
-                  {conversation.tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </p>
-              ) : null}
-            </div>
-          </div>
-
+        <div className="flex items-center gap-[9px]">
+          <Avatar
+            contact={conversation.participants[0]}
+            tone="sender"
+            className="size-[26px] rounded-[4px] text-[9.5px] font-bold"
+          />
+          {/*
+           * Incoming mail the user has not opened. Only unseen mail earns this:
+           * a thread they have read but not answered is not new, so it keeps the
+           * row's weight without the dot.
+           */}
+          <p className="min-w-0 flex-1 truncate text-[12.5px] font-bold text-foreground">
+            {participantsOf(conversation)}
+          </p>
+          {conversation.unseen ? (
+            <span
+              role="img"
+              aria-label={READ_META.description}
+              title={READ_META.description}
+              className="size-1.5 shrink-0 rounded-full bg-primary"
+            />
+          ) : null}
           <time
             dateTime={conversation.lastMessageAt}
             suppressHydrationWarning
-            className="shrink-0 text-xs text-muted-foreground"
+            className="shrink-0 font-mono text-[10.5px] tracking-[0.02em] text-muted-foreground"
           >
             {timeAgo(conversation.lastMessageAt)}
           </time>
         </div>
 
-        {/* What the thread actually wants, when the decision layer worked it
-            out. It is the reason the row is in this section, so it leads; the
-            preview follows on a wider screen where the extra line fits. */}
-        {conversation.goal ? (
-          <p className="mt-2 line-clamp-2 text-sm text-foreground/90">
-            {conversation.goal}
-          </p>
-        ) : null}
+        <p
+          className={cn(
+            'mt-1 truncate font-display text-[20px] leading-tight font-medium tracking-[-0.3px] text-foreground',
+            conversation.unseen && 'font-semibold',
+          )}
+        >
+          {title}
+        </p>
 
-        {conversation.preview ? (
-          <p
-            className={cn(
-              'line-clamp-2 text-sm text-muted-foreground',
-              conversation.goal ? 'mt-1 hidden sm:block' : 'mt-2',
-            )}
-          >
-            {conversation.preview}
-          </p>
-        ) : null}
+        {/* One line, newest fact first: what the thread wants, else its text. */}
+        <p className="mt-1 truncate text-[12px]/[16px] text-muted-foreground">
+          {conversation.goal ||
+            conversation.preview ||
+            participantsOf(conversation)}
+        </p>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-          {/* Faint in the Done section: the state is the one it had when the user
-              finished with it, kept rather than rewritten, and dimming it says so
-              without hiding it. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+          {/* Faint in Done: the state is the one it had when the user finished
+              with it, kept rather than rewritten. */}
           <StateBadge
             state={conversation.state}
             label={stateLabel}
-            className={conversation.done ? 'opacity-60' : undefined}
+            className={cn(
+              'gap-1 rounded-[4px] bg-muted/60 px-[7px] py-[3px] text-[10px] tracking-[0.04em] uppercase',
+              conversation.done && 'opacity-60',
+            )}
           />
-          {conversation.done ? (
-            <>
-              <Separator />
-              <DoneTag />
-            </>
-          ) : null}
-          {/* A human thread can still have nobody to answer — the same wording as
-              an automated card, since the composer is hidden either way. */}
-          {conversation.replyable ? null : (
-            <>
-              <Separator />
-              <NoReplyTag />
-            </>
-          )}
-          <Separator />
-          <ImportanceTag score={conversation.importance} />
-          {conversation.senderImportance !== null ? (
-            <>
-              <Separator />
-              <span title="Your importance rating for this correspondent; used as context when classifying their mail.">
-                contact {conversation.senderImportance}/10
-              </span>
-            </>
+          {conversation.tags.map((tag) => (
+            <span key={tag} className="max-w-28 truncate">
+              #{tag}
+            </span>
+          ))}
+          {conversation.done ? <DoneTag /> : null}
+          {/* A human thread can still have nobody to answer — the same wording
+              as an automated row, since the composer is hidden either way. */}
+          {conversation.replyable ? null : <NoReplyTag />}
+          {conversation.attachmentCount > 0 ? (
+            <span className="inline-flex items-center gap-1 rounded-[4px] bg-muted/60 px-1.5 py-[3px]">
+              <Paperclip aria-hidden="true" className="size-2.5" />
+              {conversation.attachmentCount}
+            </span>
           ) : null}
           {showAccount ? (
-            <>
-              <Separator />
-              <AccountTag email={conversation.accountEmail} />
-            </>
+            <AccountTag email={conversation.accountEmail} />
           ) : null}
           <RelationTag conversation={conversation} />
-          <Separator />
-          <span>
-            {conversation.messageCount}{' '}
-            {conversation.messageCount === 1 ? 'message' : 'messages'}
-          </span>
-          {conversation.attachmentCount > 0 ? (
-            <>
-              <Separator />
-              <span>
-                {conversation.attachmentCount}{' '}
-                {conversation.attachmentCount === 1
-                  ? 'attachment'
-                  : 'attachments'}
-              </span>
-            </>
-          ) : null}
         </div>
       </Link>
     </li>
-  )
-}
-
-/**
- * The mailbox in four numbers.
- *
- * Every one of these is already on the loader — `counts` and `doneCount` are
- * computed once for the whole mailbox, and the unseen count is a filter over the
- * rows — so the top of the page says how much work there is before the user has
- * scrolled through it.
- */
-function SummaryStrip({
-  counts,
-  doneCount,
-  unseenCount,
-  lastSyncedAt,
-  syncing,
-  accountCount,
-}: {
-  counts: Record<ConversationState, number>
-  doneCount: number
-  unseenCount: number
-  lastSyncedAt: string | null
-  syncing: boolean
-  accountCount: number
-}) {
-  const tiles = [
-    {
-      key: 'needs-action',
-      label: 'Needs action',
-      value: counts['needs-action'],
-      tone: 'text-success',
-    },
-    {
-      key: 'waiting-for-reply',
-      label: 'Waiting on them',
-      value: counts['waiting-for-reply'],
-      tone: 'text-warning',
-    },
-    { key: 'new', label: 'New', value: unseenCount, tone: 'text-primary' },
-    {
-      key: 'done',
-      label: 'Handled',
-      value: doneCount,
-      tone: 'text-muted-foreground',
-    },
-  ] as const
-
-  return (
-    <section aria-label="Mailbox at a glance" className="mt-6">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {tiles.map((tile) => (
-          <div
-            key={tile.key}
-            className="rounded-lg border border-border bg-card px-3 py-2"
-          >
-            <p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-              {tile.label}
-            </p>
-            <p
-              className={cn(
-                'mt-0.5 text-2xl font-semibold tabular-nums',
-                tile.tone,
-              )}
-            >
-              {tile.value}
-            </p>
-          </div>
-        ))}
-      </div>
-      <p className="mt-2 text-[11px] text-muted-foreground">
-        {syncing
-          ? 'Syncing…'
-          : lastSyncedAt
-            ? `Last synced ${timeAgo(lastSyncedAt)}`
-            : 'Not synced yet'}
-        {' · '}
-        {accountCount} {accountCount === 1 ? 'mailbox' : 'mailboxes'}
-      </p>
-    </section>
   )
 }
 
@@ -777,7 +656,7 @@ function SyncBanner({ syncing }: { syncing: AccountSyncProgress[] }) {
   return (
     <div
       role="status"
-      className="mt-6 rounded-md border border-border bg-muted/30 px-4 py-3"
+      className="mt-4 rounded-[4px] border border-border bg-muted/30 px-4 py-3"
     >
       <p className="text-sm font-medium text-foreground">
         {syncing.length === 1
@@ -849,7 +728,7 @@ function GetStarted({ microsoftConfigured }: { microsoftConfigured: boolean }) {
               <a
                 href="/auth/google"
                 className={cn(
-                  'inline-flex h-9 items-center rounded-md bg-primary px-4',
+                  'inline-flex h-9 items-center rounded-[4px] bg-primary px-4',
                   'text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90',
                 )}
               >
@@ -858,7 +737,7 @@ function GetStarted({ microsoftConfigured }: { microsoftConfigured: boolean }) {
               <OutlookButton
                 configured={microsoftConfigured}
                 className={cn(
-                  'inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
+                  'inline-flex h-9 items-center rounded-[4px] border border-border bg-background px-4',
                   'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
                 )}
               >
@@ -916,7 +795,7 @@ function GetStarted({ microsoftConfigured }: { microsoftConfigured: boolean }) {
             <Link
               to="/settings"
               className={cn(
-                'mt-3 inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
+                'mt-3 inline-flex h-9 items-center rounded-[4px] border border-border bg-background px-4',
                 'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
               )}
             >
@@ -984,7 +863,7 @@ function SignInPrompt({
   microsoftConfigured: boolean
 }) {
   return (
-    <div className="rounded-lg border border-border bg-card p-8 text-center">
+    <div className="rounded-[4px] border border-border bg-card p-8 text-center">
       <h2 className="text-lg font-semibold text-card-foreground">
         Connect your mailbox
       </h2>
@@ -996,7 +875,7 @@ function SignInPrompt({
         <a
           href="/auth/google"
           className={cn(
-            'inline-flex h-9 items-center rounded-md bg-primary px-4',
+            'inline-flex h-9 items-center rounded-[4px] bg-primary px-4',
             'text-sm font-medium text-primary-foreground',
           )}
         >
@@ -1005,7 +884,7 @@ function SignInPrompt({
         <OutlookButton
           configured={microsoftConfigured}
           className={cn(
-            'inline-flex h-9 items-center rounded-md border border-border bg-background px-4',
+            'inline-flex h-9 items-center rounded-[4px] border border-border bg-background px-4',
             'text-sm font-medium text-foreground transition-colors hover:border-foreground/25',
           )}
         >
@@ -1076,7 +955,7 @@ function MailPreviewCard({
     return (
       <div
         role="status"
-        className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-xs text-destructive"
+        className="rounded-[4px] border border-destructive/30 bg-destructive/10 p-4 text-xs text-destructive lg:m-6"
       >
         {error}
       </div>
@@ -1085,7 +964,7 @@ function MailPreviewCard({
 
   if (!preview) {
     return (
-      <div className="rounded-lg border border-dashed border-border p-4">
+      <div className="rounded-[4px] border border-dashed border-border p-4 lg:m-6">
         <h2 className="text-sm font-semibold text-foreground">Mail preview</h2>
         <p className="mt-1 text-xs text-muted-foreground">
           {loading
@@ -1104,8 +983,8 @@ function MailPreviewCard({
     .join(', ')
 
   return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="flex items-baseline justify-between gap-3 border-b border-border px-5 py-3">
+    <div className="overflow-hidden rounded-[4px] border border-border bg-secondary lg:h-dvh lg:rounded-none lg:border-0">
+      <div className="flex items-baseline justify-between gap-3 border-b border-border bg-card px-4 py-2.5 lg:px-6 lg:py-[18px]">
         <span className="truncate text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
           {preview.accountEmail}
         </span>
@@ -1113,19 +992,19 @@ function MailPreviewCard({
           <time
             dateTime={newest.sentAt}
             suppressHydrationWarning
-            className="shrink-0 text-[11px] text-muted-foreground"
+            className="shrink-0 font-mono text-[10.5px] tracking-[0.02em] text-muted-foreground"
           >
             {timeAgo(newest.sentAt)}
           </time>
         ) : null}
       </div>
 
-      <div className="px-5 py-4">
+      <div className="px-4 py-3 lg:px-6 lg:py-4">
         <h2 className="line-clamp-3 text-base font-semibold text-card-foreground">
           {preview.topic ?? preview.subject}
         </h2>
 
-        <div className="mt-3 flex items-center gap-2">
+        <div className="mt-2 flex items-center gap-2">
           <div className="flex shrink-0 -space-x-1.5">
             {preview.participants.slice(0, 3).map((participant) => (
               <Avatar
@@ -1140,10 +1019,11 @@ function MailPreviewCard({
           </p>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
           <StateBadge
             state={preview.state}
             label={stateLabels[preview.state].name}
+            className="gap-1 rounded-[4px] bg-muted/60 px-[7px] py-[3px] text-[10px] tracking-[0.04em] uppercase"
           />
           {preview.done ? (
             <>
@@ -1170,7 +1050,7 @@ function MailPreviewCard({
         {/* The thread's ask, when the decision layer worked one out — the same
             line the row shows, repeated where there is room to read it. */}
         {preview.goal ? (
-          <p className="mt-3 rounded-md border-l-2 border-primary/30 bg-muted/40 px-3 py-2 text-xs text-foreground/90">
+          <p className="mt-2 rounded-[4px] border-l-2 border-primary/30 bg-muted/40 px-3 py-2 text-xs text-foreground/90">
             {preview.goal}
           </p>
         ) : null}
@@ -1179,7 +1059,7 @@ function MailPreviewCard({
             at most: the panel is for judging the mail, not for editing a CRM. */}
         {preview.contact &&
         (preview.contact.roleCompany || preview.contact.relationship) ? (
-          <dl className="mt-3 grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1 text-[11px]">
+          <dl className="mt-2 grid grid-cols-[auto_1fr] items-baseline gap-x-3 gap-y-1 text-[10.5px]">
             {preview.contact.roleCompany ? (
               <>
                 <dt className="text-muted-foreground">Role</dt>
@@ -1200,13 +1080,13 @@ function MailPreviewCard({
         ) : null}
 
         {newest ? (
-          <p className="mt-3 line-clamp-[12] text-sm break-words whitespace-pre-wrap text-muted-foreground xl:line-clamp-[18]">
+          <p className="mt-2 line-clamp-[12] text-[12.5px]/[19px] break-words whitespace-pre-wrap text-muted-foreground xl:line-clamp-[18]">
             {newest.body || 'No text in the newest message.'}
           </p>
         ) : null}
 
         {earlier.length > 0 ? (
-          <div className="mt-4 border-t border-border pt-3">
+          <div className="mt-3 border-t border-border pt-2.5">
             <p className="text-[11px] tracking-wide text-muted-foreground uppercase">
               Earlier in this thread
             </p>
@@ -1234,7 +1114,7 @@ function MailPreviewCard({
         ) : null}
 
         {preview.attachments.length > 0 ? (
-          <div className="mt-4 border-t border-border pt-3">
+          <div className="mt-3 border-t border-border pt-2.5">
             <p className="text-[11px] tracking-wide text-muted-foreground uppercase">
               Attachments
             </p>
@@ -1254,7 +1134,7 @@ function MailPreviewCard({
           </div>
         ) : null}
 
-        <div className="mt-4 flex items-center justify-between gap-2 border-t border-border pt-3">
+        <div className="mt-3 flex items-center justify-between gap-2 border-t border-border pt-2.5">
           <span className="text-[11px] text-muted-foreground">
             {preview.messageCount}{' '}
             {preview.messageCount === 1 ? 'message' : 'messages'}
@@ -1263,7 +1143,7 @@ function MailPreviewCard({
             to="/conversations/$providerThreadId"
             params={{ providerThreadId: preview.providerThreadId }}
             resetScroll={false}
-            className="inline-flex h-8 shrink-0 items-center rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
+            className="inline-flex h-8 shrink-0 items-center rounded-[4px] border border-border bg-background px-2.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
           >
             Open
           </Link>
@@ -1477,10 +1357,9 @@ export function Inbox({
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
-  // Where a Shift range starts from, and whether Shift is down. Selection is
-  // not a mode you switch on: holding Shift is the mode.
+  // Where a Shift range starts from. Selection is not a mode you switch on: a
+  // modified click is the whole gesture.
   const [anchor, setAnchor] = useState<string | null>(null)
-  const [shiftHeld, setShiftHeld] = useState(false)
   // The preview column's own state: which row it is showing, its cache, and the
   // request allowed to land.
   const [preview, setPreview] = useState<{
@@ -1629,50 +1508,20 @@ export function Inbox({
     [],
   )
 
-  /**
-   * Shift is the selection mode.
-   *
-   * Watched at the window so the checkboxes can appear before a row is touched,
-   * and released on blur so switching tabs does not leave the list looking like
-   * a mode the keyboard no longer agrees with. Ignored while typing, where Shift
-   * is a capital letter rather than a selection modifier.
-   */
+  /** Escape drops a selection, wherever focus is. */
   useEffect(() => {
     if (!onSetDoneMany && !onSetStateMany) return
 
-    const isTyping = (target: EventTarget | null) => {
-      const element = target as HTMLElement | null
-      if (!element) return false
-      const tag = element.tagName
-      return (
-        tag === 'INPUT' ||
-        tag === 'TEXTAREA' ||
-        tag === 'SELECT' ||
-        element.isContentEditable
-      )
-    }
-
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Shift' && !isTyping(event.target)) setShiftHeld(true)
       if (event.key === 'Escape') {
         setSelected(new Set())
         setAnchor(null)
       }
     }
-    const onKeyUp = (event: KeyboardEvent) => {
-      if (event.key === 'Shift') setShiftHeld(false)
-    }
-    const onBlur = () => setShiftHeld(false)
 
     window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('keyup', onKeyUp)
-    window.addEventListener('blur', onBlur)
 
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('keyup', onKeyUp)
-      window.removeEventListener('blur', onBlur)
-    }
+    return () => window.removeEventListener('keydown', onKeyDown)
   }, [onSetDoneMany, onSetStateMany])
 
   // A search that matches nothing would otherwise leave the chosen section
@@ -1810,7 +1659,10 @@ export function Inbox({
   const selectable = Boolean(doneMany || stateMany)
   // The checkboxes are only part of the page while a selection gesture is
   // possible or under way; otherwise the rows stay a clean list.
-  const showSelectors = selectable && (shiftHeld || selected.size > 0)
+  // Only once something is selected. Merely holding Shift used to add a 40px
+  // checkbox gutter to every row, which pushed the mail right without saying
+  // anything the user had asked for.
+  const showSelectors = selectable && selected.size > 0
 
   /**
    * The rows a menu action applies to.
@@ -1937,8 +1789,6 @@ export function Inbox({
   const {
     accounts,
     conversations,
-    counts,
-    doneCount,
     syncError,
     authRequiredAccounts,
     lastSyncedAt,
@@ -2142,7 +1992,7 @@ export function Inbox({
         void dropSection(dragKey, null)
       }}
       className={cn(
-        'rounded-lg border border-dashed px-3 py-3 text-center text-xs',
+        'rounded-[4px] border border-dashed px-3 py-3 text-center text-xs',
         dropTarget === '__end__'
           ? 'border-primary text-foreground'
           : 'border-border text-muted-foreground',
@@ -2157,21 +2007,46 @@ export function Inbox({
       className={cn(
         'mx-auto w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-8 lg:max-w-7xl 2xl:max-w-[88rem]',
         // Inside the shell the sidebar is the page frame; the list keeps only
-        // its own gutters, and the preview column supplies the right edge.
-        embedded &&
-          'max-w-none px-4 py-4 sm:px-5 sm:py-5 lg:max-w-none lg:px-6 2xl:max-w-none',
+        // its own gutters, and the preview column supplies the right edge. The
+        // `sm` step has to be cleared too: `p-0` cancels `px-4`/`py-6` but a
+        // variant without its own reset leaves `sm:px-6`/`sm:py-8` in place,
+        // which inset the whole pane by 24px on every wide screen.
+        embedded && 'max-w-none p-0 sm:p-0 lg:max-w-none 2xl:max-w-none',
       )}
     >
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div className={embedded ? 'lg:hidden' : undefined}>
-          <h1 className="font-display text-3xl font-bold">Nuntia</h1>
+      <header
+        className={cn(
+          'flex flex-wrap items-start justify-between gap-4 pt-5',
+          // Inside the shell the sidebar owns the top of the page, and the list
+          // title moves into the 404px column (as in the design) so the thread
+          // beside it starts at the top instead of below a page header. On a
+          // phone the header is the screen's only frame, so it keeps the
+          // column's 18px gutter instead of sitting flush against the edge.
+          embedded && 'px-[18px] lg:hidden',
+        )}
+      >
+        <div className={cn('min-w-0', embedded && 'lg:hidden')}>
+          {/* The screen's name, as on a wide window: the product name is the
+              sidebar's job, and the sidebar is exactly what is missing here. */}
+          <h1
+            className={cn(
+              'font-display',
+              embedded
+                ? 'text-[28px] leading-none font-medium tracking-[-0.6px]'
+                : 'text-3xl font-bold',
+            )}
+          >
+            {embedded ? 'Inbox' : 'Nuntia'}
+          </h1>
           {/*
            * The two marks, in words, once — because the dot and the tag are only
            * obvious to whoever wrote them. One is a fact the app noticed, the
            * other is a decision the user made, and saying so here is cheaper than
-           * expecting anyone to work it out from the two rows side by side.
+           * expecting anyone to work it out from the two rows side by side. On a
+           * phone it is a paragraph of preamble above the mail, so it waits for
+           * a wider screen.
            */}
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="mt-1 hidden text-[11px] leading-4 text-muted-foreground sm:block">
             <span
               aria-hidden="true"
               className="mr-1.5 inline-block size-2 rounded-full bg-primary align-middle"
@@ -2183,11 +2058,22 @@ export function Inbox({
             — you handled it, so it is out of the groups below.
           </p>
         </div>
+        {/*
+         * The sidebar already carries the brand, the message button, the
+         * mailboxes and Settings. Below `lg` the sidebar is gone and those
+         * actions come back, which is why the header is hidden rather than
+         * deleted.
+         */}
         {/* All connected mailboxes are merged into the one list below. The
             "Add mailbox" action re-runs the same OAuth flow as the sign-in
             prompt, but accounts are global, so signing in again connects the
             new mailbox alongside the existing ones instead of replacing them. */}
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div
+          className={cn(
+            'flex min-w-0 flex-wrap items-center gap-2',
+            embedded && 'lg:hidden',
+          )}
+        >
           <span className="hidden min-w-0 max-w-56 truncate text-xs text-muted-foreground sm:block lg:hidden">
             {accounts.map((account) => account.email).join(' · ')}
           </span>
@@ -2198,7 +2084,7 @@ export function Inbox({
               type="button"
               onClick={onCompose}
               className={cn(
-                'inline-flex h-9 shrink-0 items-center rounded-md bg-primary px-3',
+                'inline-flex h-9 shrink-0 items-center rounded-[4px] bg-primary px-3',
                 'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
               )}
             >
@@ -2208,7 +2094,7 @@ export function Inbox({
             <Link
               to="/compose"
               className={cn(
-                'inline-flex h-9 shrink-0 items-center rounded-md bg-primary px-3',
+                'inline-flex h-9 shrink-0 items-center rounded-[4px] bg-primary px-3',
                 'text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90',
               )}
             >
@@ -2220,7 +2106,7 @@ export function Inbox({
           <details className="relative shrink-0">
             <summary
               className={cn(
-                'inline-flex h-9 cursor-pointer list-none items-center rounded-md border border-border bg-background px-3',
+                'inline-flex h-9 cursor-pointer list-none items-center rounded-[4px] border border-border bg-background px-3',
                 'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
                 '[&::-webkit-details-marker]:hidden',
               )}
@@ -2233,7 +2119,7 @@ export function Inbox({
                 />
               ) : null}
             </summary>
-            <div className="absolute right-0 z-20 mt-1 w-60 rounded-lg border border-border bg-card p-1 shadow-lg">
+            <div className="absolute right-0 z-20 mt-1 w-60 rounded-[4px] border border-border bg-card p-1 shadow-lg">
               <p className="px-2.5 pt-1.5 pb-1 text-[11px] tracking-wide text-muted-foreground uppercase">
                 Connected
               </p>
@@ -2253,19 +2139,19 @@ export function Inbox({
                 onClick={() => void handleResync()}
                 disabled={resyncing || !onResync}
                 title="Re-fetch the last 30 days from Gmail"
-                className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                className="block w-full rounded-[4px] px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {resyncing ? 'Re-syncing…' : 'Re-sync mail'}
               </button>
               <a
                 href="/auth/google"
-                className="block rounded-md px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                className="block rounded-[4px] px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
               >
                 Add Gmail mailbox
               </a>
               <OutlookButton
                 configured={payload.microsoftConfigured}
-                className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                className="block w-full rounded-[4px] px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted"
               >
                 Add Outlook mailbox
               </OutlookButton>
@@ -2274,14 +2160,14 @@ export function Inbox({
                   <button
                     type="button"
                     onClick={() => onOpenQuestions()}
-                    className="block w-full rounded-md px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                    className="block w-full rounded-[4px] px-2.5 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted"
                   >
                     Questions ({openFormCount})
                   </button>
                 ) : (
                   <Link
                     to="/ask"
-                    className="block rounded-md px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                    className="block rounded-[4px] px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
                   >
                     Questions ({openFormCount})
                   </Link>
@@ -2291,7 +2177,7 @@ export function Inbox({
                   a popup: the point is that it is there when something goes wrong. */}
               <Link
                 to="/feedback"
-                className="block rounded-md px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                className="block rounded-[4px] px-2.5 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted"
               >
                 Send feedback
               </Link>
@@ -2300,7 +2186,7 @@ export function Inbox({
           <Link
             to="/settings"
             className={cn(
-              'inline-flex h-9 shrink-0 items-center rounded-md border border-border bg-background px-3',
+              'inline-flex h-9 shrink-0 items-center rounded-[4px] border border-border bg-background px-3',
               'text-xs font-medium text-foreground transition-colors hover:border-foreground/25',
             )}
           >
@@ -2308,21 +2194,6 @@ export function Inbox({
           </Link>
         </div>
       </header>
-
-      {/* The shape of the work before the work: counts the section headings
-          would otherwise only reveal one at a time. */}
-      <SummaryStrip
-        counts={counts}
-        doneCount={doneCount}
-        unseenCount={
-          conversations.filter(
-            (conversation) => conversation.unseen && !conversation.done,
-          ).length
-        }
-        lastSyncedAt={lastSyncedAt}
-        syncing={syncing.length > 0}
-        accountCount={accounts.length}
-      />
 
       {/* The actions a row offers without opening it: the two marks the user
           owns, and the label. Opened by right click or the menu key. */}
@@ -2332,7 +2203,7 @@ export function Inbox({
           role="menu"
           aria-label="Thread actions"
           style={{ top: menu.y, left: menu.x }}
-          className="fixed z-50 w-60 rounded-lg border border-border bg-card p-1 shadow-xl"
+          className="fixed z-50 w-60 rounded-[4px] border border-border bg-card p-1 shadow-xl"
         >
           <p className="truncate px-2.5 pt-1.5 pb-1 text-[11px] text-muted-foreground">
             {menu.conversation.topic ?? menu.conversation.subject}
@@ -2343,7 +2214,7 @@ export function Inbox({
             resetScroll={false}
             role="menuitem"
             onClick={() => setMenu(null)}
-            className="block rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none"
+            className="block rounded-[4px] px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none"
           >
             Open thread
           </Link>
@@ -2358,7 +2229,7 @@ export function Inbox({
                   menuTargetIds,
                 )
               }
-              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+              className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
             >
               {menuTargetIds.length > 1
                 ? `Mark ${menuTargetIds.length} as ${menu.conversation.done ? 'not done' : 'done'}`
@@ -2384,7 +2255,7 @@ export function Inbox({
                   menuTargetIds,
                 )
               }
-              className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+              className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
             >
               {menuTargetIds.length > 1
                 ? `Mark ${menuTargetIds.length} as ${menu.conversation.unseen ? 'read' : 'unread'}`
@@ -2415,7 +2286,7 @@ export function Inbox({
                     )
                   }
                   className={cn(
-                    'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50',
+                    'flex w-full items-center gap-2 rounded-[4px] px-2.5 py-1.5 text-left text-xs text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50',
                     menu.conversation.state === state && 'font-semibold',
                   )}
                 >
@@ -2444,7 +2315,7 @@ export function Inbox({
                     menuTargetIds,
                   )
                 }
-                className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+                className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
               >
                 {menuTargetIds.length > 1
                   ? 'Use automatic label for all'
@@ -2482,7 +2353,7 @@ export function Inbox({
                     )
                   }
                   className={cn(
-                    'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50',
+                    'flex w-full items-center gap-2 rounded-[4px] px-2.5 py-1.5 text-left text-xs text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50',
                     menu.conversation.organizationGroup?.id === label.id &&
                       'font-semibold',
                   )}
@@ -2517,7 +2388,7 @@ export function Inbox({
                     menuTargetIds,
                   )
                 }
-                className="block w-full rounded-md px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+                className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
               >
                 {menuTargetIds.length > 1
                   ? 'Automatic for all (rules, then the model)'
@@ -2538,10 +2409,20 @@ export function Inbox({
 
       {/* List on the left, preview on the right; the column only exists where
           there is width for it, and the list keeps the full width below that. */}
-      <div className="lg:flex lg:items-start lg:gap-8">
-        <div className="min-w-0 lg:flex-1">
+      <div className="lg:flex lg:items-start lg:gap-0">
+        {/* 404px, the width the v3 list column is drawn at. Rows bleed to its
+            edges and everything else is inset by the design's 18px gutter. */}
+        <div className="min-w-0 max-w-full bg-card px-[18px] lg:w-[404px] lg:flex-none lg:border-r lg:border-border">
+          {/* The design's List Header puts the title inside the column at the
+              same 18px gutter as the search and rows. */}
+          {embedded ? (
+            <h1 className="hidden pt-5 font-display text-[28px] leading-none font-medium tracking-[-0.6px] lg:block">
+              Inbox
+            </h1>
+          ) : null}
+
           {formPrompt && hiddenPromptId !== formPrompt.id ? (
-            <div className="mt-6 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
+            <div className="mt-4 rounded-[4px] border border-border bg-muted/40 px-4 py-3 text-sm">
               <div className="flex flex-wrap items-baseline justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-medium">
@@ -2589,7 +2470,7 @@ export function Inbox({
           {authRequiredAccounts.length > 0 ? (
             <div
               role="alert"
-              className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+              className="mt-6 rounded-[4px] border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
             >
               <p>
                 The mail service no longer accepts the stored access for{' '}
@@ -2610,7 +2491,7 @@ export function Inbox({
                         : '/auth/google'
                     }
                     className={cn(
-                      'inline-flex h-8 items-center rounded-md bg-primary px-3',
+                      'inline-flex h-8 items-center rounded-[4px] bg-primary px-3',
                       'text-xs font-medium text-primary-foreground',
                     )}
                   >
@@ -2623,7 +2504,7 @@ export function Inbox({
           ) : syncError ? (
             <p
               role="status"
-              className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+              className="mt-6 rounded-[4px] border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
             >
               Sync failed: {syncError}
             </p>
@@ -2632,7 +2513,7 @@ export function Inbox({
           {resyncError ? (
             <p
               role="status"
-              className="mt-4 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+              className="mt-4 rounded-[4px] border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
             >
               Re-sync failed: {resyncError}
             </p>
@@ -2643,7 +2524,7 @@ export function Inbox({
           {searchActive && searchError && !searching ? (
             <p
               role="alert"
-              className="mt-8 rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+              className="mt-8 rounded-[4px] border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
             >
               {searchError}
             </p>
@@ -2660,21 +2541,28 @@ export function Inbox({
            * way to clear the query.
            */}
           {onSearch || sections.length > 0 ? (
-            <div className="@container mt-6 flex flex-col gap-3">
-              {/* Pills rather than a select: the counts are the point, and a
-                drop-down hid every section but the chosen one. */}
+            <div className="@container mt-3 flex flex-col gap-2">
+              {/*
+               * Pills rather than a select: the counts are the point, and a
+               * drop-down hid every section but the chosen one. Only shown
+               * below `lg`, where the sidebar that lists the same sections is
+               * hidden — two section pickers side by side is one too many.
+               */}
               {sections.length > 1 ? (
                 <div
                   role="group"
                   aria-label="Show one section"
-                  className="flex flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/40 p-1"
+                  className={cn(
+                    'flex flex-wrap items-center gap-1.5',
+                    embedded && 'lg:hidden',
+                  )}
                 >
                   <button
                     type="button"
                     aria-pressed={activeFilter === 'all'}
                     onClick={() => setSectionFilter('all')}
                     className={cn(
-                      'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+                      'inline-flex shrink-0 items-center gap-1 rounded-[4px] bg-muted/40 px-2.5 py-[5px] text-[11px] font-medium transition-colors',
                       activeFilter === 'all'
                         ? 'bg-card text-foreground shadow-sm'
                         : 'text-muted-foreground hover:text-foreground',
@@ -2692,7 +2580,7 @@ export function Inbox({
                       aria-pressed={activeFilter === section.key}
                       onClick={() => setSectionFilter(section.key)}
                       className={cn(
-                        'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+                        'inline-flex shrink-0 items-center gap-1 rounded-[4px] bg-muted/40 px-2.5 py-[5px] text-[11px] font-medium transition-colors',
                         activeFilter === section.key
                           ? 'bg-card text-foreground shadow-sm'
                           : 'text-muted-foreground hover:text-foreground',
@@ -2731,9 +2619,9 @@ export function Inbox({
                 <div
                   role="group"
                   aria-label="Order the mail"
-                  className="flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1"
+                  className="flex items-center gap-1.5"
                 >
-                  <span className="px-1.5 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
+                  <span className="shrink-0 px-1.5 text-[11px] font-medium tracking-wide whitespace-nowrap text-muted-foreground uppercase">
                     Order
                   </span>
                   <button
@@ -2741,7 +2629,7 @@ export function Inbox({
                     aria-pressed={sort === 'importance'}
                     onClick={() => chooseSort('importance')}
                     className={cn(
-                      'inline-flex h-7 shrink-0 items-center rounded-md px-2.5 text-xs font-medium transition-colors',
+                      'inline-flex shrink-0 items-center rounded-[4px] bg-muted/40 px-2.5 py-[5px] text-[11px] font-medium transition-colors',
                       sort === 'importance'
                         ? 'bg-card text-foreground shadow-sm'
                         : 'text-muted-foreground hover:text-foreground',
@@ -2754,7 +2642,7 @@ export function Inbox({
                     aria-pressed={sort === 'chronological'}
                     onClick={() => chooseSort('chronological')}
                     className={cn(
-                      'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors',
+                      'inline-flex shrink-0 items-center gap-1 rounded-[4px] bg-muted/40 px-2.5 py-[5px] text-[11px] font-medium transition-colors',
                       sort === 'chronological'
                         ? 'bg-card text-foreground shadow-sm'
                         : 'text-muted-foreground hover:text-foreground',
@@ -2773,7 +2661,7 @@ export function Inbox({
                       placeholder="Search all mail…"
                       value={searchInput}
                       onChange={(event) => setSearchInput(event.target.value)}
-                      className="h-9 w-full rounded-md border border-border bg-background px-2.5 text-xs text-foreground outline-none focus:border-foreground/30 @3xl:w-64"
+                      className="h-[38px] w-full rounded-[4px] border border-border bg-background px-3 text-[12.5px] text-foreground outline-none focus:border-foreground/30 @3xl:w-60"
                     />
                     {searching ? (
                       <span className="shrink-0 text-xs text-muted-foreground">
@@ -2799,7 +2687,7 @@ export function Inbox({
             <div
               role="region"
               aria-label="Selected conversations"
-              className="sticky top-2 z-20 mt-6 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-border bg-card px-3 py-2 shadow-sm"
+              className="sticky top-2 z-20 mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[4px] border border-border bg-card px-3 py-2 shadow-sm"
             >
               <span className="text-xs font-semibold text-foreground">
                 {selected.size} selected
@@ -2813,7 +2701,7 @@ export function Inbox({
                     type="button"
                     disabled={bulkBusy}
                     onClick={() => void runBulk((ids) => doneMany(ids, true))}
-                    className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
+                    className="rounded-[4px] border border-border px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted disabled:opacity-50"
                   >
                     Mark done
                   </button>
@@ -2821,7 +2709,7 @@ export function Inbox({
                     type="button"
                     disabled={bulkBusy}
                     onClick={() => void runBulk((ids) => doneMany(ids, false))}
-                    className="rounded-md px-1 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    className="rounded-[4px] px-1 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground disabled:opacity-50"
                   >
                     Mark not done
                   </button>
@@ -2845,7 +2733,7 @@ export function Inbox({
                         ),
                       )
                     }}
-                    className="rounded-md border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground disabled:opacity-50"
+                    className="rounded-[4px] border border-border bg-background px-1.5 py-0.5 text-[11px] text-foreground disabled:opacity-50"
                   >
                     <option value="">Apply…</option>
                     {STATE_ORDER.map((state) => (
@@ -2908,7 +2796,7 @@ export function Inbox({
           ) : null}
 
           {visibleConversations.length === 0 ? (
-            <div className="mt-8">
+            <div className="mt-5">
               <p className="text-sm text-muted-foreground">
                 {searchActive
                   ? searching
@@ -2933,16 +2821,16 @@ export function Inbox({
           ) : null}
 
           {flatItems ? (
-            <div className="mt-8">
-              <p className="mb-3 text-[11px] text-muted-foreground">
+            <div className="mt-3">
+              <p className="mb-2 text-[11px] text-muted-foreground">
                 {flatItems.length}{' '}
                 {flatItems.length === 1 ? 'conversation' : 'conversations'} ·
                 newest first, no sections.
               </p>
-              <ul className="space-y-3">{flatItems.map(rowFor)}</ul>
+              <ul>{flatItems.map(rowFor)}</ul>
             </div>
           ) : (
-            <div className="mt-8 space-y-8">
+            <div className="mt-3 space-y-3">
               {shownSections.map((section) => {
                 const isFiltered = activeFilter === section.key
                 // The cap belongs to the compact all-sections view. A section on
@@ -2988,97 +2876,104 @@ export function Inbox({
                           'border-t-2 border-primary pt-2',
                       )}
                     >
-                      <div className="mb-1 flex items-center justify-between gap-4">
-                        {section.custom ? (
-                          <div className="flex min-w-0 items-center gap-1">
-                            {onReorderSections ? (
-                              <span
-                                draggable
-                                onDragStart={(event) => {
-                                  event.dataTransfer.effectAllowed = 'move'
-                                  event.dataTransfer.setData(
-                                    'text/plain',
-                                    section.key,
-                                  )
-                                  setDragKey(section.key)
-                                  setDropTarget(null)
-                                  setOrderError(null)
-                                }}
-                                onDragEnd={() => {
-                                  setDragKey(null)
-                                  setDropTarget(null)
-                                }}
-                                title="Drag to reorder this label"
-                                aria-hidden="true"
-                                className={cn(
-                                  'shrink-0 cursor-grab text-muted-foreground/70 hover:text-foreground active:cursor-grabbing',
-                                  dragKey === section.key && 'text-foreground',
-                                )}
+                      {/* The header is larger than the rows and wears the
+                          section's colour; a hairline under it closes the group
+                          so the next one cannot be mistaken for more rows. */}
+                      <div className="-mx-[18px] border-b border-border px-[18px] pb-2">
+                        <div className="flex items-center justify-between gap-4">
+                          {section.custom ? (
+                            <div className="flex min-w-0 items-center gap-1">
+                              {onReorderSections ? (
+                                <span
+                                  draggable
+                                  onDragStart={(event) => {
+                                    event.dataTransfer.effectAllowed = 'move'
+                                    event.dataTransfer.setData(
+                                      'text/plain',
+                                      section.key,
+                                    )
+                                    setDragKey(section.key)
+                                    setDropTarget(null)
+                                    setOrderError(null)
+                                  }}
+                                  onDragEnd={() => {
+                                    setDragKey(null)
+                                    setDropTarget(null)
+                                  }}
+                                  title="Drag to reorder this label"
+                                  aria-hidden="true"
+                                  className={cn(
+                                    'shrink-0 cursor-grab text-muted-foreground/70 hover:text-foreground active:cursor-grabbing',
+                                    dragKey === section.key &&
+                                      'text-foreground',
+                                  )}
+                                >
+                                  <GripVertical className="size-3.5" />
+                                </span>
+                              ) : null}
+                              <button
+                                type="button"
+                                aria-expanded={!collapsed}
+                                onClick={() =>
+                                  setCollapsedLabels((current) => ({
+                                    ...current,
+                                    [section.key]:
+                                      current[section.key] !== true,
+                                  }))
+                                }
+                                className="flex min-w-0 items-center gap-1 font-mono text-[14px] font-semibold tracking-[0.04em] text-primary uppercase hover:text-primary/80"
                               >
-                                <GripVertical className="size-3.5" />
+                                {collapsed ? (
+                                  <ChevronRight
+                                    aria-hidden="true"
+                                    className="size-3.5 shrink-0"
+                                  />
+                                ) : (
+                                  <ChevronDown
+                                    aria-hidden="true"
+                                    className="size-3.5 shrink-0"
+                                  />
+                                )}
+                                <span className="truncate">
+                                  {section.title}
+                                </span>
+                              </button>
+                            </div>
+                          ) : (
+                            <h2
+                              className={cn(
+                                'font-mono text-[14px] font-semibold tracking-[0.04em] uppercase',
+                                section.muted
+                                  ? 'text-muted-foreground'
+                                  : (SECTION_TITLE_CLASS[section.dotClass] ??
+                                      'text-foreground'),
+                              )}
+                            >
+                              {section.title}
+                            </h2>
+                          )}
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            {savingOrder ? (
+                              <span className="text-[11px] text-muted-foreground">
+                                Saving…
                               </span>
                             ) : null}
-                            <button
-                              type="button"
-                              aria-expanded={!collapsed}
-                              onClick={() =>
-                                setCollapsedLabels((current) => ({
-                                  ...current,
-                                  [section.key]: current[section.key] !== true,
-                                }))
-                              }
-                              className="flex min-w-0 items-center gap-1 text-xs font-semibold tracking-wide text-foreground/80 uppercase hover:text-foreground"
-                            >
-                              {collapsed ? (
-                                <ChevronRight
-                                  aria-hidden="true"
-                                  className="size-3.5 shrink-0"
-                                />
-                              ) : (
-                                <ChevronDown
-                                  aria-hidden="true"
-                                  className="size-3.5 shrink-0"
-                                />
-                              )}
-                              <span className="truncate">{section.title}</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <h2
-                            className={cn(
-                              'text-sm font-semibold tracking-wide uppercase',
-                              section.muted
-                                ? 'text-muted-foreground'
-                                : 'text-foreground',
-                            )}
-                          >
-                            {section.title}
-                          </h2>
-                        )}
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          {savingOrder ? (
-                            <span className="text-[11px] text-muted-foreground">
-                              Saving…
+                            <span className="font-mono text-[11px] text-muted-foreground tabular-nums">
+                              {section.items.length}
                             </span>
-                          ) : null}
-                          <span className="text-xs text-muted-foreground tabular-nums">
-                            {section.items.length}
-                          </span>
+                          </div>
                         </div>
+                        {/* The label's meaning, in the user's words — the
+                        reason a section explains itself rather than only
+                        naming itself. */}
+                        {collapsed ? null : section.description ? (
+                          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                            {section.description}
+                          </p>
+                        ) : null}
                       </div>
-                      {/* The label's meaning, in the user's words — the reason a
-                      section explains itself rather than only naming itself. */}
-                      {collapsed ? null : section.description ? (
-                        <p className="mb-3 text-xs text-muted-foreground">
-                          {section.description}
-                        </p>
-                      ) : (
-                        <div className="mb-3" />
-                      )}
 
-                      {collapsed ? null : (
-                        <ul className="space-y-3">{shown.map(rowFor)}</ul>
-                      )}
+                      {collapsed ? null : <ul>{shown.map(rowFor)}</ul>}
 
                       {!collapsed &&
                       !isFiltered &&
@@ -3092,7 +2987,7 @@ export function Inbox({
                               [section.key]: current[section.key] !== true,
                             }))
                           }
-                          className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-foreground/25"
+                          className="mt-2 rounded-[4px] border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:border-foreground/25"
                         >
                           {expandedSections[section.key]
                             ? 'Show fewer'
@@ -3109,7 +3004,7 @@ export function Inbox({
         </div>
 
         {hidePreview ? null : (
-          <aside className="hidden lg:sticky lg:top-6 lg:block lg:w-96 lg:shrink-0 xl:w-[26rem] 2xl:w-[32rem]">
+          <aside className="hidden lg:sticky lg:top-0 lg:block lg:min-w-0 lg:flex-1">
             <MailPreviewCard
               preview={preview?.data ?? null}
               loading={previewLoading}

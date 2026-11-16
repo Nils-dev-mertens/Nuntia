@@ -231,6 +231,14 @@ export type ContextUpdate = {
    * Jev's typed answer wins where both are configured; see `decideConversation`.
    */
   labelId?: string | null
+  /**
+   * What the sender's company does, when the mail states it in its own words.
+   *
+   * A company-level fact, so it is not part of `contact`: the caller writes it to
+   * the organisation record as a suggestion, never straight into the person's
+   * note. Absent means the mail did not say.
+   */
+  companyFocus?: string | null
 }
 
 /**
@@ -283,6 +291,14 @@ export type Decision = {
   goal: string | null
   /** Contact profile fields the context stage proposes, or null for none. */
   contact: ContactContextProposal | null
+  /**
+   * What the sender's company does, when the mail stated it in its own words.
+   *
+   * Carried like `contact` and written outside `applyDecision` like it too, but
+   * it is not the person's note: the writer queues it on the organisation
+   * record as a suggestion. Null means the mail did not say.
+   */
+  companyFocus?: string | null
   /**
    * A custom label the decision settled the thread into, or null for none.
    *
@@ -476,6 +492,7 @@ export async function decideConversation(
     topic: context?.topic ?? null,
     goal: context?.goal ?? null,
     contact: context?.contact ?? null,
+    companyFocus: context?.companyFocus ?? null,
     // The typed decision first, then prose: Jev answers with a calibrated choice
     // and the LLM with a reading of the description, and a keyless-Jev install
     // otherwise has nobody to ask at all.

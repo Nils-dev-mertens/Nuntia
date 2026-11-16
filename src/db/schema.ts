@@ -797,6 +797,49 @@ export const contactTagDescriptions = sqliteTable(
   (table) => [primaryKey({ columns: [table.userId, table.tag] })],
 )
 
+/** Who wrote an organisation's description. `mail` is a quote, not a guess. */
+export const ORGANIZATION_FOCUS_SOURCES = ['user', 'mail'] as const
+export type OrganizationFocusSource =
+  (typeof ORGANIZATION_FOCUS_SOURCES)[number]
+
+/**
+ * What a company does, keyed by the domain its people write from.
+ *
+ * The one thing a domain cannot say. Organisations are otherwise derived from
+ * the address, so there is no row to keep true — this table exists only for the
+ * description, and a missing row simply means nobody has written one.
+ *
+ * `focus` is the accepted wording, and `focusSource` records where it came
+ * from: `user` is their own sentence, `mail` is a quote from a signature or
+ * footer they chose to keep. `suggestedFocus` is a mail-stated line waiting on
+ * that choice — the refresh writes it, but it never becomes the description
+ * until the user accepts it. A user-written description is never replaced by a
+ * suggestion.
+ *
+ * Shared by everyone at the domain because the company is: two contacts at
+ * `acme.com` read the same description, and editing it from either one edits
+ * it for both.
+ */
+export const contactOrganizations = sqliteTable(
+  'contact_organizations',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Registrable domain, the same grouping key the directory derives. */
+    domain: text('domain').notNull(),
+    /** What the company does, in the user's or the accepted mail's words. */
+    focus: text('focus'),
+    focusSource: text('focus_source').$type<OrganizationFocusSource>(),
+    /** A mail-stated line the user has not accepted or dismissed yet. */
+    suggestedFocus: text('suggested_focus'),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.domain] })],
+)
+
 /** What happened to one address's membership of one tag. */
 export const CONTACT_TAG_EVENT_ACTIONS = ['added', 'removed'] as const
 export type ContactTagEventAction = (typeof CONTACT_TAG_EVENT_ACTIONS)[number]
@@ -1571,6 +1614,7 @@ export type SenderProfile = typeof senderProfiles.$inferSelect
 export type SenderSignal = typeof senderSignals.$inferSelect
 export type Contact = typeof contacts.$inferSelect
 export type ContactContext = typeof contactContexts.$inferSelect
+export type ContactOrganizationRow = typeof contactOrganizations.$inferSelect
 export type OrganizationLabelRow = typeof organizationLabels.$inferSelect
 export type OrganizationRuleRow = typeof organizationRules.$inferSelect
 export type FormParticipation = typeof formParticipation.$inferSelect

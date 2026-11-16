@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0" name="viewport"/><meta content="web_standard" name="shell-type"/><title>Lumen — Conversational Email on Gmail</title><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;family=Space+Grotesk:wght@500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>@layer base{html,body{margin:0;padding:0;}body{overscroll-behavior:none;}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "on-tertiary-fixed": "#002108", "on-primary": "#5f1500", "outline-variant": "#5b4039", "inverse-primary": "#b02f00", "primary-fixed-dim": "#ffb5a0", "on-secondary": "#482a00", "on-primary-fixed-variant": "#862200", "on-primary-fixed": "#3b0900", "primary-container": "#ff5722", "primary": "#ffb5a0", "secondary-container": "#ffa10a", "tertiary-fixed": "#69ff87", "on-error-container": "#ffdad6", "surface-container": "#201f21", "tertiary-container": "#00a744", "surface-bright": "#39393b", "inverse-surface": "#e5e1e4", "secondary": "#ffc789", "surface": "#131315", "on-tertiary": "#003912", "secondary-fixed": "#ffddba", "secondary-fixed-dim": "#ffb865", "tertiary": "#3ce36a", "outline": "#ab8980", "on-tertiary-container": "#00320f", "surface-container-high": "#2a2a2c", "inverse-on-surface": "#313032", "surface-container-lowest": "#0e0e10", "on-primary-container": "#541200", "error-container": "#93000a", "background": "#131315", "on-background": "#e5e1e4", "surface-variant": "#353437", "surface-tint": "#ffb5a0", "primary-fixed": "#ffdbd1", "tertiary-fixed-dim": "#3ce36a", "on-secondary-fixed-variant": "#663d00", "on-secondary-container": "#673e00", "on-secondary-fixed": "#2b1700", "surface-dim": "#131315", "surface-container-low": "#1c1b1d", "on-error": "#690005", "on-tertiary-fixed-variant": "#00531e", "on-surface-variant": "#e4beb4", "error": "#ffb4ab", "on-surface": "#e5e1e4", "surface-container-highest": "#353437" }, "borderRadius": { "DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem" }, "spacing": { "margin": "1.25rem", "gutter": "1.5rem", "space-3xl": "6rem", "margin-desktop": "3rem", "gutter-desktop": "2rem", "space-md": "1rem", "space-sm": "0.5rem", "space-xl": "2.5rem", "space-2xl": "4rem", "space-xs": "0.25rem", "space-lg": "1.5rem" }, "fontFamily": { "body-md": ["Inter"], "display-lg": ["Space Grotesk"], "label-caps": ["JetBrains Mono"], "body-lg": ["Inter"], "body-sm": ["Inter"], "display-xl-mobile": ["Space Grotesk"], "label-code": ["JetBrains Mono"], "headline-md": ["Space Grotesk"], "headline-sm": ["Space Grotesk"], "display-xl": ["Space Grotesk"], "display-lg-mobile": ["Space Grotesk"], "headline-lg": ["Space Grotesk"] }, "fontSize": { "body-md": ["15px", { "lineHeight": "24px", "letterSpacing": "0em", "fontWeight": "400" }], "display-lg": ["56px", { "lineHeight": "60px", "letterSpacing": "-0.03em", "fontWeight": "500" }], "label-caps": ["11px", { "lineHeight": "14px", "letterSpacing": "0.12em", "fontWeight": "500" }], "body-lg": ["18px", { "lineHeight": "28px", "letterSpacing": "-0.01em", "fontWeight": "400" }], "body-sm": ["13px", { "lineHeight": "20px", "letterSpacing": "0em", "fontWeight": "400" }], "display-xl-mobile": ["40px", { "lineHeight": "44px", "letterSpacing": "-0.03em", "fontWeight": "600" }], "label-code": ["12px", { "lineHeight": "16px", "letterSpacing": "0.04em", "fontWeight": "400" }], "headline-md": ["28px", { "lineHeight": "34px", "letterSpacing": "-0.015em", "fontWeight": "500" }], "headline-sm": ["20px", { "lineHeight": "26px", "letterSpacing": "-0.01em", "fontWeight": "500" }], "display-xl": ["72px", { "lineHeight": "76px", "letterSpacing": "-0.04em", "fontWeight": "600" }], "display-lg-mobile": ["32px", { "lineHeight": "36px", "letterSpacing": "-0.02em", "fontWeight": "500" }], "headline-lg": ["36px", { "lineHeight": "42px", "letterSpacing": "-0.02em", "fontWeight": "500" }] } } } };</script><style id="theme-enhancements">body, main { background-color: #060709 !important; } header { background-color: rgba(6, 7, 9, 0.92) !important; border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important; } footer { background-color: #040405 !important; border-top: 1px solid rgba(255, 255, 255, 0.12) !important; } .bg-surface-container-low, .bg-surface-container { background-color: #0e0f13 !important; } .bg-surface-container-high, .bg-surface-container-highest { background-color: #14151b !important; } .bg-surface-container-lowest { background-color: #08090c !important; } #demo, .rounded-xl.bg-surface-container-low { border: 1px solid rgba(255, 255, 255, 0.15) !important; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 20px 40px -15px rgba(0, 0, 0, 0.8) !important; } #demo > div:first-child { background-color: #101116 !important; border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important; } .rounded-xl.bg-surface-container, .rounded.bg-surface-container { border: 1px solid rgba(255, 255, 255, 0.1) !important; } .hover\:bg-surface-bright:hover { border-color: rgba(255, 255, 255, 0.3) !important; } .text-on-surface-variant { color: #cbd5e1 !important; } h1, h2, h3, .font-headline-lg, .font-display-lg, .font-display-xl { color: #ffffff !important; } .text-tertiary { color: #4ade80 !important; } .text-primary { color: #ff8c69 !important; } section:nth-of-type(5) > div { border: 1px solid rgba(255, 87, 34, 0.5) !important; box-shadow: 0 0 35px -5px rgba(230, 74, 25, 0.3) !important; }</style></head><body class="bg-[#060709] font-body-md text-body-md text-[#cbd5e1] antialiased"><header class="fixed top-0 left-0 w-full z-50 bg-[#060709]/90 backdrop-blur-xl border-b border-white/10 shadow-[0_1px_8px_rgba(0,0,0,0.2)]"><div class="h-16 max-w-7xl mx-auto px-margin md:px-margin-desktop flex items-center justify-between gap-space-md"><div class="flex items-center gap-space-lg"><a class="flex items-center gap-space-sm group" data-path="product" href="#"><div class="w-6 h-6 rounded bg-primary-container flex items-center justify-center"><div class="w-2 h-2 bg-inverse-surface rounded-xs"></div></div><span class="font-headline-sm text-headline-sm tracking-tight text-on-surface font-semibold">lumen</span><span class="hidden lg:inline-flex items-center px-space-xs py-0.5 rounded-full bg-surface-container font-label-caps text-label-caps text-on-surface-variant uppercase tracking-wider">v0.9-alpha</span></a><nav class="hidden md:flex items-center gap-space-xs" data-active-classes="bg-surface-container text-on-surface font-medium rounded-lg"><a class="px-space-sm py-1.5 rounded text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="product" href="#">Product</a><a class="px-space-sm py-1.5 rounded text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="how-it-works" href="#">How it Works</a><a class="px-space-sm py-1.5 rounded text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="security" href="#">Security</a><a class="px-space-sm py-1.5 rounded text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="principles" href="#">Principles</a><a class="px-space-sm py-1.5 rounded text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm" data-path="docs" href="#">Docs</a></nav></div><div class="flex items-center gap-space-sm"><a class="hidden sm:flex items-center gap-space-xs px-space-sm py-1 rounded-full bg-surface-container-high text-on-surface hover:bg-surface-bright hover:text-on-surface transition-colors font-label-code text-label-code" href="https://github.com" rel="noopener" target="_blank"><span class="material-symbols-outlined text-[14px] text-secondary">star</span><span class="font-medium">4.2k</span></a><a class="hidden sm:inline-flex px-space-md py-1.5 text-on-surface-variant hover:text-on-surface transition-colors font-body-sm text-body-sm font-medium" data-path="sign-in" href="#">Sign In</a><a class="inline-flex items-center gap-space-xs px-space-md py-2 rounded-full bg-inverse-surface text-inverse-on-surface hover:bg-secondary transition-colors font-headline-sm text-[13px] font-semibold tracking-tight shadow-sm" data-path="sign-in" href="#"><span class="">Get Started with Gmail</span><span class="material-symbols-outlined text-[16px]">arrow_forward</span></a><div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center"><span class="material-symbols-outlined text-on-primary text-[18px]">person</span></div></div></div></header><main class="w-full pt-16 bg-[#060709] min-h-screen"><div class="flex flex-col w-full text-on-surface">
+<!-- 1. HERO SECTION -->
+<section class="relative w-full pt-space-2xl pb-space-3xl md:pt-space-3xl md:pb-space-3xl px-margin md:px-margin-desktop overflow-hidden"><div class="absolute top-0 left-1/2 -translate-x-1/2 w-[900px] h-[480px] bg-gradient-to-b from-primary-container/15 via-secondary/5 to-transparent blur-[120px] pointer-events-none -z-0 opacity-80"></div>
+<!-- Ambient Subtlety: Soft Warm Glow -->
+<div class="max-w-7xl mx-auto flex flex-col items-center text-center relative z-10">
+<!-- Hero Headline (Solid crisp high-contrast white text, spacious and commanding) -->
+<h1 class="font-display-xl text-display-xl text-white tracking-tight max-w-4xl mx-auto mb-space-md">
+  Read email like chat.<br/>
+<span class="text-on-surface-variant font-display-xl text-display-xl">Keep your Gmail intact.</span>
+</h1>
+<!-- Hero Subtitle -->
+<p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl mx-auto mb-space-2xl">Lumen eliminates legal footers, bloated signatures, and multi-tier quote pyramids on the fly. Experience your native Gmail inbox as a clean, chronological conversation stream — with zero mailbox lock-in and 100% two-way protocol sync.</p>
+<!-- Action Row -->
+<div class="flex flex-wrap items-center justify-center gap-space-md mb-space-2xl"><a class="inline-flex items-center gap-space-sm px-space-xl py-3 rounded-full bg-inverse-surface text-inverse-on-surface hover:bg-white hover:text-surface transition-all font-headline-sm text-[15px] font-semibold tracking-tight shadow-md group" href="#demo">
+<svg class="w-4 h-4 fill-current" viewbox="0 0 24 24">
+<path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"></path>
+<path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"></path>
+<path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"></path>
+<path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"></path>
+</svg>
+<span class="">Connect Gmail</span>
+<span class="material-symbols-outlined text-[16px] group-hover:translate-x-0.5 transition-transform">arrow_forward</span>
+</a>
+<a class="inline-flex items-center gap-space-sm px-space-lg py-3 rounded-full bg-surface-container hover:bg-surface-bright text-on-surface transition-colors font-label-code text-label-code shadow-sm" href="https://github.com" rel="noopener" target="_blank">
+<span class="material-symbols-outlined text-[16px] text-on-surface-variant">terminal</span>
+<span class="font-medium">lumen-mail / core</span>
+<span class="px-1.5 py-0.5 rounded bg-surface-container-highest font-label-caps text-[10px] text-tertiary">v0.9.4</span>
+</a></div>
+<!-- Sleek Floating Interactive Workbench Container -->
+<div class="w-full max-w-5xl rounded-xl bg-surface-container-low text-left shadow-2xl relative overflow-hidden" id="demo">
+<!-- Window Chrome / Metadata Bar -->
+<div class="px-space-lg py-space-md bg-surface-container flex flex-wrap items-center justify-between gap-space-md">
+<div class="flex items-center gap-space-md">
+<div class="flex items-center gap-1.5">
+<div class="w-3 h-3 rounded-full bg-surface-bright"></div>
+<div class="w-3 h-3 rounded-full bg-surface-bright"></div>
+<div class="w-3 h-3 rounded-full bg-surface-bright"></div>
+</div>
+<div class="flex items-center gap-space-xs font-label-code text-label-code text-on-surface-variant">
+<span class="text-tertiary">●</span>
+<span class="">THREAD-ID: <strong class="text-on-surface font-mono">gm-18d4f092ae8</strong></span>
+</div>
+</div>
+<!-- Mode Toggle Switch -->
+<div class="flex items-center p-0.5 rounded-full bg-surface-container-highest"><button class="px-space-md py-1 rounded-full font-label-caps text-label-caps bg-inverse-surface text-inverse-on-surface shadow-sm font-semibold transition-all" id="toggle-lumen" onclick="setWorkbenchMode('lumen')">Lumen Clean (Stream)</button><button class="px-space-md py-1 rounded-full font-label-caps text-label-caps text-on-surface-variant hover:text-white transition-all" id="toggle-rfc" onclick="setWorkbenchMode('rfc')">Raw RFC 5322 MIME</button></div>
+</div>
+<!-- Thread Context Strip (Clutter removed: small badges removed, sleek clean context) -->
+<div class="px-space-xl py-space-md bg-surface-container-lowest/60 flex flex-wrap items-center justify-between gap-space-md font-body-sm text-body-sm">
+<div class="flex flex-wrap items-center gap-space-md">
+<div>
+<span class="text-white font-headline-sm text-[16px] font-medium">Sprint Sync &amp; Master Services Contract Review</span>
+</div>
+<span class="hidden md:inline text-surface-bright">•</span>
+<div class="inline-flex items-center gap-1 text-secondary font-label-code text-[12px]">
+<span class="material-symbols-outlined text-[14px]">event_upcoming</span>
+<span class="">Confirm Tuesday Schedule</span>
+</div>
+</div>
+<div class="flex items-center gap-2">
+<div class="flex -space-x-2">
+<div class="w-7 h-7 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-xs">EL</div>
+<div class="w-7 h-7 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center font-bold text-xs">MK</div>
+<div class="w-7 h-7 rounded-full bg-surface-bright text-on-surface flex items-center justify-center font-bold text-xs">YOU</div>
+</div>
+<span class="font-label-code text-label-code text-on-surface-variant">3 participants</span>
+</div>
+</div>
+<!-- Dynamic Content View -->
+<!-- VIEW A: LUMEN CLEAN (Default) -->
+<div class="p-space-xl flex flex-col gap-space-lg" id="view-lumen">
+<!-- Message 1 -->
+<div class="flex items-start gap-space-md">
+<div class="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center font-bold text-xs shrink-0 mt-1">
+              EL
+            </div>
+<div class="flex-1 max-w-2xl bg-surface-container rounded-xl p-space-md">
+<div class="flex items-center justify-between mb-1">
+<span class="font-headline-sm text-body-sm font-semibold text-primary">Elena Rostova</span>
+<span class="font-label-code text-[11px] text-on-surface-variant">10:14 AM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface leading-relaxed">
+                Drafted the updated API licensing clauses in Section 8. Can we do a 20-minute checkpoint Tuesday afternoon to sign off?
+              </p>
+</div>
+</div>
+<!-- Message 2 -->
+<div class="flex items-start gap-space-md">
+<div class="w-8 h-8 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center font-bold text-xs shrink-0 mt-1">
+              MK
+            </div>
+<div class="flex-1 max-w-2xl bg-surface-container rounded-xl p-space-md">
+<div class="flex items-center justify-between mb-1">
+<span class="font-headline-sm text-body-sm font-semibold text-secondary">Marcus Vance</span>
+<span class="font-label-code text-[11px] text-on-surface-variant">10:22 AM</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface leading-relaxed mb-space-sm">
+                Reviewed Section 8. Redlines uploaded. Tuesday works — anytime after 2:00 PM EST.
+              </p>
+<!-- Collapsed Noise Pill -->
+<div class="rounded bg-surface-container-low px-space-sm py-1.5 flex items-center justify-between text-on-surface-variant font-label-code text-[11px]">
+<span class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[14px] text-outline">verified_user</span>
+                  Stripped: 38-line corporate disclosure &amp; Outlook signature block
+                </span>
+<button class="hover:text-primary transition-colors text-xs font-semibold" onclick="this.parentElement.nextElementSibling.classList.toggle('hidden')">Inspect</button>
+</div>
+<pre class="hidden mt-2 p-2 rounded bg-surface-container-lowest font-label-code text-[10px] text-on-surface-variant overflow-x-auto">CONFIDENTIALITY NOTE: The information contained in this transmission may contain privileged and confidential information. If you are not the intended recipient, any review or dissemination is strictly prohibited...</pre>
+</div>
+</div>
+<!-- Suggestion Action Toolbar -->
+<div class="pt-space-md mt-space-sm flex flex-wrap items-center justify-between gap-space-md bg-surface-container-low/80 p-space-md rounded-xl">
+<div class="flex items-center gap-space-sm">
+<span class="material-symbols-outlined text-secondary text-[18px]">auto_awesome</span>
+<span class="font-label-code text-label-code text-on-surface">Suggested reply prepared:</span>
+<span class="font-body-sm text-body-sm text-on-surface-variant italic">"Tuesday 2:30 PM EST works for me. Adding calendar link."</span>
+</div>
+<div class="flex items-center gap-space-sm">
+<button class="px-space-md py-1.5 rounded-full bg-primary-container text-on-primary-container hover:bg-primary transition-colors font-headline-sm text-[12px] font-semibold flex items-center gap-1">
+<span class="">Send via Gmail</span>
+<span class="material-symbols-outlined text-[14px]">send</span>
+</button>
+</div>
+</div>
+</div>
+<!-- VIEW B: RAW RFC 5322 MIME (Initially Hidden) -->
+<div class="p-space-xl hidden font-label-code text-[11px] leading-relaxed text-on-surface-variant overflow-x-auto bg-surface-container-lowest max-h-[380px]" id="view-rfc">
+<span class="text-outline">MIME-Version: 1.0</span><br/>
+<span class="text-outline">Received: by mail-wm1-f44.google.com with SMTP id 18d4f092ae8...</span><br/>
+<span class="text-primary">Content-Type: multipart/alternative; boundary="0000000000007b8b70061e89"</span><br/>
+<span class="text-secondary">Subject: Re: Sprint Sync &amp; Master Services Contract Review</span><br/>
+<span class="text-outline">From: Marcus Vance &lt;m.vance@enterprise-corp.example&gt;</span><br/>
+<span class="text-outline">To: Elena Rostova &lt;elena@venture.example&gt;, Alex Dev &lt;alex@lumen.example&gt;</span><br/>
+<br/>
+          --0000000000007b8b70061e89<br/>
+          Content-Type: text/plain; charset="UTF-8"<br/>
+<br/>
+          Reviewed Section 8. Redlines uploaded. Tuesday works — anytime after 2:00 PM EST.<br/>
+<br/>
+          &gt; On Mon, Oct 24, 2025 at 10:14 AM Elena Rostova wrote:<br/>
+          &gt; &gt; Drafted the updated API licensing clauses in Section 8.<br/>
+          &gt; &gt; Can we do a 20-minute checkpoint Tuesday afternoon to sign off?<br/>
+          &gt; &gt; --<br/>
+          &gt; &gt; Elena Rostova | Partner Relations<br/>
+          &gt; &gt; Sent from my iPhone with high priority flags<br/>
+<br/>
+          ___________________________________________________________<br/>
+          CONFIDENTIALITY NOTICE: This transmission is intended strictly for the individual named above. 
+          Contains proprietary trade secrets subject to strict NDA. If received in error, permanently purge...
+        </div>
+</div>
+</div>
+</section>
+<!-- 2. EDITORIAL FEATURE SECTIONS (Asymmetric Alternating Split Layout) -->
+<section class="w-full py-space-3xl px-margin md:px-margin-desktop space-y-space-3xl">
+<!-- FEATURE 1: Inbound Normalization (Headline Left, Visual Right) -->
+<div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-space-xl items-center">
+<div class="lg:col-span-5 flex flex-col gap-space-md">
+<div class="inline-flex items-center gap-space-xs font-label-caps text-label-caps text-primary uppercase tracking-wider">
+<span class="w-1.5 h-1.5 rounded-full bg-primary-container"></span>
+          RFC Decomposition Engine
+        </div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">
+          Inbound normalization: extracting the message from the envelope.
+        </h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant">
+          Legacy email software forces your brain to manually scan through 70% boilerplates, greetings, and duplicated quotes just to locate the human intention.
+        </p>
+<ul class="space-y-space-sm pt-space-xs font-body-md text-body-md text-on-surface">
+<li class="flex items-start gap-space-sm">
+<span class="material-symbols-outlined text-primary text-[20px] shrink-0 mt-0.5">remove_done</span>
+<span class="">Cleans out redundant openings like <em>"Hope this email finds you well"</em> and automated meeting link templates.</span>
+</li>
+<li class="flex items-start gap-space-sm">
+<span class="material-symbols-outlined text-primary text-[20px] shrink-0 mt-0.5">compress</span>
+<span class="">Collapses 40-line nested quote pyramids into an effortless chronological message stream.</span>
+</li>
+<li class="flex items-start gap-space-sm">
+<span class="material-symbols-outlined text-tertiary text-[20px] shrink-0 mt-0.5">lock_reset</span>
+<span class=""><strong>Zero data loss:</strong> Original MIME trees stay byte-for-byte pristine in your Gmail account.</span>
+</li>
+</ul>
+</div>
+<div class="lg:col-span-7">
+<div class="rounded-xl bg-surface-container-low p-space-xl shadow-xl flex flex-col gap-space-md">
+<div class="flex items-center justify-between pb-space-sm">
+<span class="font-label-caps text-label-caps text-on-surface-variant uppercase tracking-wider">Real-time Stream Parser</span>
+<span class="px-space-sm py-0.5 rounded-full bg-surface-container-high font-label-code text-label-code text-tertiary">14ms parse latency</span>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-space-md">
+<!-- Traditional Left -->
+<div class="rounded bg-surface-container-lowest p-space-md flex flex-col justify-between opacity-50">
+<div class="font-label-caps text-[10px] text-error uppercase mb-2">Traditional Email Client</div>
+<div class="space-y-2 font-label-code text-[10px] text-on-surface-variant">
+<div class="h-2 w-3/4 bg-surface-bright rounded"></div>
+<div class="h-2 w-full bg-surface-bright rounded"></div>
+<div class="p-2 rounded bg-surface-container text-[9px] text-outline">
+                  &gt; &gt; On Oct 22, 2025 at 3:12 PM...<br/>
+                  &gt; &gt; &gt; Can we reschedule?<br/>
+                  &gt; &gt; &gt; Best regards,<br/>
+                  &gt; &gt; &gt; Sent via Mobile
+                </div>
+<div class="p-1 text-[8px] text-outline truncate">
+                  CONFIDENTIAL LEGAL NOTICE: This electronic...
+                </div>
+</div>
+<div class="mt-4 font-label-code text-[11px] text-error">Cognitive Load: High (74% noise)</div>
+</div>
+<!-- Lumen Right -->
+<div class="rounded bg-surface-container p-space-md flex flex-col justify-between shadow-sm">
+<div class="font-label-caps text-[10px] text-tertiary uppercase mb-2">Lumen Normalized Stream</div>
+<div class="space-y-2">
+<div class="p-space-sm rounded bg-surface-container-high font-body-sm text-[13px] text-on-surface">
+<div class="font-semibold text-primary text-[11px] mb-0.5">David Chen</div>
+                  Let's push our review to Thursday at 3 PM.
+                </div>
+<div class="flex items-center gap-1.5 px-2 py-1 rounded bg-surface-container-low font-label-code text-[10px] text-on-surface-variant">
+<span class="material-symbols-outlined text-[13px] text-secondary">cleaning_services</span>
+<span class="">Stripped 14 quoted lines &amp; legal disclosure</span>
+</div>
+</div>
+<div class="mt-4 font-label-code text-[11px] text-tertiary">Cognitive Load: Minimal (Pure Signal)</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- FEATURE 2: State-Based Triage (Visual Left, Headline Right) -->
+<div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-space-xl items-center">
+<!-- Live Interactive Triage Queues Widget (Left) -->
+<div class="lg:col-span-7 order-2 lg:order-1">
+<div class="rounded-xl bg-surface-container-low p-space-xl shadow-xl space-y-space-md">
+<div class="flex items-center justify-between pb-space-sm">
+<div class="flex items-center gap-space-sm">
+<span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Triage Dispatcher</span>
+<span class="px-2 py-0.5 rounded bg-surface-container-highest font-label-code text-[11px] text-secondary">3 Active Queues</span>
+</div>
+<span class="font-label-code text-label-code text-on-surface-variant">Shortcut: [E] Archive · [R] Reply · [S] Snooze</span>
+</div>
+<!-- Queue Item 1 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex items-center justify-between gap-space-md">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-2.5 h-2.5 rounded-full bg-primary shrink-0"></div>
+<div class="min-w-0">
+<div class="flex items-center gap-space-sm">
+<span class="font-headline-sm text-body-sm font-semibold text-on-surface">Stripe Security Audit</span>
+<span class="px-2 py-0.5 rounded-full bg-primary-container/20 text-primary font-label-caps text-[10px] uppercase">Needs Your Reply</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant truncate">Pending clarification on token storage encryption scheme</p>
+</div>
+</div>
+<span class="font-label-code text-label-code text-on-surface-variant shrink-0">2m ago</span>
+</div>
+<!-- Queue Item 2 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex items-center justify-between gap-space-md">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-2.5 h-2.5 rounded-full bg-secondary shrink-0"></div>
+<div class="min-w-0">
+<div class="flex items-center gap-space-sm">
+<span class="font-headline-sm text-body-sm font-semibold text-on-surface">Series A Term Sheet Closing</span>
+<span class="px-2 py-0.5 rounded-full bg-secondary-container/20 text-secondary font-label-caps text-[10px] uppercase">Waiting on Others</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant truncate">Awaiting signature from Cooley Legal Counsel</p>
+</div>
+</div>
+<span class="font-label-code text-label-code text-on-surface-variant shrink-0">4h ago</span>
+</div>
+<!-- Queue Item 3 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex items-center justify-between gap-space-md">
+<div class="flex items-center gap-space-md min-w-0">
+<div class="w-2.5 h-2.5 rounded-full bg-surface-bright shrink-0"></div>
+<div class="min-w-0">
+<div class="flex items-center gap-space-sm">
+<span class="font-headline-sm text-body-sm font-semibold text-on-surface">Linear Production Deploy Alert</span>
+<span class="px-2 py-0.5 rounded-full bg-surface-container-high text-on-surface-variant font-label-caps text-[10px] uppercase">Informational</span>
+</div>
+<p class="font-body-sm text-body-sm text-on-surface-variant truncate">Release v2.4.1 deployed to us-east-1 successfully</p>
+</div>
+</div>
+<span class="font-label-code text-label-code text-on-surface-variant shrink-0">1d ago</span>
+</div>
+</div>
+</div>
+<div class="lg:col-span-5 flex flex-col gap-space-md order-1 lg:order-2">
+<div class="inline-flex items-center gap-space-xs font-label-caps text-label-caps text-secondary uppercase tracking-wider">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+          Action-Oriented Architecture
+        </div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">
+          State-based triage: Needs action, Waiting, and Informational.
+        </h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant">
+          Folders and arbitrary labels are graveyard constructs. Lumen auto-indexes each email thread by its operational status. You always know exactly what requires your mental bandwidth right now.
+        </p>
+<p class="font-body-md text-body-md text-on-surface-variant">
+          Threads in "Waiting" automatically resurface when a counterparty replies or if a self-selected follow-up horizon elapses.
+        </p>
+</div>
+</div>
+<!-- FEATURE 3: Consolidated Media Index (Headline Left, Visual Right) -->
+<div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-space-xl items-center">
+<div class="lg:col-span-5 flex flex-col gap-space-md">
+<div class="inline-flex items-center gap-space-xs font-label-caps text-label-caps text-tertiary uppercase tracking-wider">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+          Zero File Hunting
+        </div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">
+          Consolidated media index: all files surfaced per conversation.
+        </h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant">
+          Never click through twelve separate back-and-forth messages searching for the actual revised PDF or slide deck.
+        </p>
+<p class="font-body-md text-body-md text-on-surface-variant">
+          Lumen extracts every payload attachment into a unified asset drawer pinned right beside the discussion, grouped chronologically by version.
+        </p>
+<div class="flex items-center gap-space-md pt-space-xs">
+<div class="flex items-center gap-2 font-label-code text-label-code text-primary">
+<span class="material-symbols-outlined text-[18px]">verified</span>
+            Direct Google Drive API Integration
+          </div>
+</div>
+</div>
+<div class="lg:col-span-7">
+<div class="rounded-xl bg-surface-container-low p-space-xl shadow-xl flex flex-col gap-space-md">
+<div class="flex items-center justify-between pb-space-sm">
+<span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Conversation Asset Index</span>
+<span class="font-label-code text-label-code text-on-surface-variant">4 extracted documents</span>
+</div>
+<div class="grid grid-cols-1 sm:grid-cols-3 gap-space-md">
+<!-- File 1 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex flex-col justify-between h-36">
+<div class="flex items-center justify-between">
+<span class="material-symbols-outlined text-primary text-[24px]">picture_as_pdf</span>
+<span class="font-label-caps text-[10px] text-on-surface-variant uppercase">v2.4</span>
+</div>
+<div>
+<span class="font-headline-sm text-body-sm font-medium text-on-surface block truncate">MSA_Signed_Final.pdf</span>
+<span class="font-label-code text-[11px] text-on-surface-variant">2.4 MB · Elena</span>
+</div>
+</div>
+<!-- File 2 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex flex-col justify-between h-36">
+<div class="flex items-center justify-between">
+<span class="material-symbols-outlined text-secondary text-[24px]">table_chart</span>
+<span class="font-label-caps text-[10px] text-on-surface-variant uppercase">Sheet</span>
+</div>
+<div>
+<span class="font-headline-sm text-body-sm font-medium text-on-surface block truncate">Cap_Table_Model.xlsx</span>
+<span class="font-label-code text-[11px] text-on-surface-variant">840 KB · Marcus</span>
+</div>
+</div>
+<!-- File 3 -->
+<div class="p-space-md rounded-xl bg-surface-container hover:bg-surface-bright transition-colors flex flex-col justify-between h-36">
+<div class="flex items-center justify-between">
+<span class="material-symbols-outlined text-tertiary text-[24px]">slideshow</span>
+<span class="font-label-caps text-[10px] text-on-surface-variant uppercase">Deck</span>
+</div>
+<div>
+<span class="font-headline-sm text-body-sm font-medium text-on-surface block truncate">Board_Review_Q4.key</span>
+<span class="font-label-code text-[11px] text-on-surface-variant">14.1 MB · Marcus</span>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+<!-- FEATURE 4: Outbound Composition (Visual Left, Headline Right) -->
+<div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-space-xl items-center">
+<!-- Interactive Transformation Box (Left) -->
+<div class="lg:col-span-7 order-2 lg:order-1">
+<div class="rounded-xl bg-surface-container-low p-space-xl shadow-xl flex flex-col gap-space-md">
+<div class="flex items-center justify-between pb-space-sm">
+<span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Outbound Protocol Transformer</span>
+<span class="font-label-code text-label-code text-tertiary">Real-time MIME Builder</span>
+</div>
+<div class="space-y-space-md">
+<!-- Chat Input -->
+<div class="p-space-md rounded-xl bg-surface-container">
+<span class="font-label-caps text-[10px] text-primary uppercase block mb-1">What you type in Lumen (Casual Stream):</span>
+<p class="font-body-md text-body-md text-on-surface font-mono">
+                "Sure thing, pushed the code to staging. Let me know when you review the logs."
+              </p>
+</div>
+<div class="flex justify-center -my-2 relative z-10">
+<div class="p-1.5 rounded-full bg-surface-container-highest text-secondary shadow-md">
+<span class="material-symbols-outlined text-[16px] block">arrow_downward</span>
+</div>
+</div>
+<!-- Standard Output -->
+<div class="p-space-md rounded-xl bg-surface-container-highest">
+<span class="font-label-caps text-[10px] text-secondary uppercase block mb-1">What your client receives in standard Gmail / Outlook:</span>
+<p class="font-body-sm text-body-sm text-on-surface-variant mb-2">
+                "Hi Elena,<br/><br/>
+                Sure thing, I've pushed the code to staging. Please let me know once you have reviewed the logs so we can proceed with the release.<br/><br/>
+                Best regards,<br/>
+                Alex Dev"
+              </p>
+<div class="font-label-code text-[10px] text-outline">
+                Encoded as multipart/alternative with RFC 5322 compliant threading references.
+              </div>
+</div>
+</div>
+</div>
+</div>
+<div class="lg:col-span-5 flex flex-col gap-space-md order-1 lg:order-2">
+<div class="inline-flex items-center gap-space-xs font-label-caps text-label-caps text-primary uppercase tracking-wider">
+<span class="w-1.5 h-1.5 rounded-full bg-primary-container"></span>
+          Asymmetric Communication
+        </div>
+<h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">
+          Outbound composition: short-form input, standard email output.
+        </h2>
+<p class="font-body-lg text-body-lg text-on-surface-variant">
+          You don't have to force your clients or partners to download a new app or join a proprietary network.
+        </p>
+<p class="font-body-md text-body-md text-on-surface-variant">
+          Type lightning-fast replies like you're chatting in Slack or WhatsApp. Lumen seamlessly wraps your notes into dignified, professional RFC-compliant email payloads with your standard company signatures.
+        </p>
+</div>
+</div>
+</section>
+<!-- 3. PROTOCOL INTEGRITY & GUARANTEES (3-Column Architecture Cards) -->
+<section class="w-full py-space-3xl px-margin md:px-margin-desktop bg-surface-container-lowest">
+<div class="max-w-7xl mx-auto flex flex-col gap-space-2xl">
+<div class="max-w-2xl">
+<div class="inline-flex items-center gap-space-xs font-label-caps text-label-caps text-secondary uppercase tracking-wider mb-space-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+          Engineering Principles
+        </div>
+<h2 class="font-display-lg text-display-lg text-on-surface tracking-tight">
+          Built for clarity, sovereign by design.
+        </h2>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-3 gap-space-lg">
+<!-- Card 1 -->
+<div class="p-space-xl rounded-xl bg-surface-container flex flex-col justify-between space-y-space-xl shadow-lg">
+<div>
+<div class="w-10 h-10 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center mb-space-md">
+<span class="material-symbols-outlined text-[20px]">no_accounts</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-space-sm">Zero Lock-in</h3>
+<p class="font-body-md text-body-md text-on-surface-variant">
+              Lumen maintains no secondary proprietary mail storage. We connect directly to your Google account using standard OAuth 2.0. If you close Lumen, your Gmail account remains 100% untouched.
+            </p>
+</div>
+<div class="pt-space-md font-label-code text-label-code text-primary">
+            Direct IMAP / REST Sync
+          </div>
+</div>
+<!-- Card 2 -->
+<div class="p-space-xl rounded-xl bg-surface-container flex flex-col justify-between space-y-space-xl shadow-lg">
+<div>
+<div class="w-10 h-10 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center mb-space-md">
+<span class="material-symbols-outlined text-[20px]">speed</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-space-sm">Local Client Speed</h3>
+<p class="font-body-md text-body-md text-on-surface-variant">
+              Every keystroke, thread switch, and triage command executes locally in under 50ms with optimistic caching. You never wait on network spinners or laggy web wrappers.
+            </p>
+</div>
+<div class="pt-space-md font-label-code text-label-code text-secondary">
+            Sub-50ms Interaction Budget
+          </div>
+</div>
+<!-- Card 3 -->
+<div class="p-space-xl rounded-xl bg-surface-container flex flex-col justify-between space-y-space-xl shadow-lg">
+<div>
+<div class="w-10 h-10 rounded-full bg-tertiary-container text-on-tertiary flex items-center justify-center mb-space-md">
+<span class="material-symbols-outlined text-[20px]">psychology</span>
+</div>
+<h3 class="font-headline-md text-headline-md text-on-surface mb-space-sm">Human in the Loop</h3>
+<p class="font-body-md text-body-md text-on-surface-variant">
+              No autonomous AI agents hallucinating replies or spamming your contacts. Lumen synthesizes incoming facts, summarizes action items, and waits for your confirmation click.
+            </p>
+</div>
+<div class="pt-space-md font-label-code text-label-code text-tertiary">
+            Zero Auto-Send Guarantee
+          </div>
+</div>
+</div>
+</div>
+</section>
+<!-- 4. FAQ ACCORDION ("Before you connect") -->
+<section class="w-full py-space-3xl px-margin md:px-margin-desktop">
+<div class="max-w-4xl mx-auto flex flex-col gap-space-xl">
+<div class="text-left">
+<span class="font-label-caps text-label-caps text-primary uppercase tracking-wider block mb-space-xs">Technical FAQ</span>
+<h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">
+          Before you connect your Gmail.
+        </h2>
+</div>
+<div class="space-y-space-sm">
+<!-- Accordion Item 1 -->
+<div class="rounded-xl bg-surface-container p-space-md">
+<button class="w-full flex items-center justify-between text-left font-headline-sm text-headline-sm text-on-surface" onclick="toggleFaq(this)">
+<span class="">Does Lumen store or train models on my private emails?</span>
+<span class="material-symbols-outlined text-[20px] transition-transform duration-200">expand_more</span>
+</button>
+<div class="faq-content hidden pt-space-sm font-body-md text-body-md text-on-surface-variant">
+            No. Lumen operates an ephemeral runtime engine. Normalization and summarization run over strictly isolated memory instances. Your emails are never added to model training corpora, nor do we persist raw email copy on proprietary database clusters.
+          </div>
+</div>
+<!-- Accordion Item 2 -->
+<div class="rounded-xl bg-surface-container p-space-md">
+<button class="w-full flex items-center justify-between text-left font-headline-sm text-headline-sm text-on-surface" onclick="toggleFaq(this)">
+<span class="">Will other people know I am using Lumen?</span>
+<span class="material-symbols-outlined text-[20px] transition-transform duration-200">expand_more</span>
+</button>
+<div class="faq-content hidden pt-space-sm font-body-md text-body-md text-on-surface-variant">
+            Never. When you send messages through Lumen, they are compiled into standard RFC 5322 MIME formats with appropriate HTML/plaintext boundaries. There are no "Sent with Lumen" badges or forced promotional footers.
+          </div>
+</div>
+<!-- Accordion Item 3 -->
+<div class="rounded-xl bg-surface-container p-space-md">
+<button class="w-full flex items-center justify-between text-left font-headline-sm text-headline-sm text-on-surface" onclick="toggleFaq(this)">
+<span class="">Can I switch back to standard Gmail at any time?</span>
+<span class="material-symbols-outlined text-[20px] transition-transform duration-200">expand_more</span>
+</button>
+<div class="faq-content hidden pt-space-sm font-body-md text-body-md text-on-surface-variant">
+            Instantly. Because Lumen works as a transparent rendering and interaction layer over native Gmail APIs, every email, draft, label, and archive action is synchronized bi-directionally in real time. Simply close the tab and open mail.google.com without losing a single message.
+          </div>
+</div>
+<!-- Accordion Item 4 -->
+<div class="rounded-xl bg-surface-container p-space-md">
+<button class="w-full flex items-center justify-between text-left font-headline-sm text-headline-sm text-on-surface" onclick="toggleFaq(this)">
+<span class="">What permissions does Lumen ask for during Google OAuth?</span>
+<span class="material-symbols-outlined text-[20px] transition-transform duration-200">expand_more</span>
+</button>
+<div class="faq-content hidden pt-space-sm font-body-md text-body-md text-on-surface-variant">
+            We request standard Gmail API read/write scopes to fetch incoming threads and broadcast your authorized drafts. Lumen undergoes regular Google CASA Tier-2 security assessments and SOC 2 Type II audits.
+          </div>
+</div>
+</div>
+</div>
+</section>
+<!-- 5. SIGNATURE BOTTOM CTA BANNER (Warm Red-Orange Cadmium Gradient) -->
+<section class="w-full py-space-3xl px-margin md:px-margin-desktop">
+<div class="max-w-7xl mx-auto rounded-xl bg-gradient-to-r from-primary-container via-[#e64a19] to-secondary-container p-space-xl md:p-space-2xl text-on-primary-container shadow-2xl relative overflow-hidden">
+<div class="relative z-10 max-w-3xl flex flex-col gap-space-lg">
+<div class="inline-flex items-center gap-space-xs px-space-sm py-1 rounded-full bg-black/20 text-on-primary-container backdrop-blur-md w-fit">
+<span class="w-2 h-2 rounded-full bg-surface"></span>
+<span class="font-label-caps text-label-caps uppercase tracking-wider">Fast-track setup</span>
+</div>
+<h2 class="font-display-lg text-display-lg font-bold tracking-tight text-white">
+          Experience conversational velocity on standard Gmail.
+        </h2>
+<p class="font-body-lg text-body-lg text-white/90">
+          Authenticate with Google OAuth in 15 seconds. No credit card required. No new inbox to create.
+        </p>
+<div class="flex flex-wrap items-center gap-space-md pt-space-sm">
+<a class="inline-flex items-center gap-space-sm px-space-xl py-3.5 rounded-full bg-surface text-on-surface hover:bg-surface-container transition-all font-headline-sm text-[15px] font-semibold tracking-tight shadow-xl group" href="#">
+<svg class="w-4 h-4 fill-current" viewbox="0 0 24 24">
+<path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"></path>
+<path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"></path>
+<path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"></path>
+<path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"></path>
+</svg>
+<span class="">Connect with Google OAuth</span>
+<span class="material-symbols-outlined text-[16px] group-hover:translate-x-0.5 transition-transform">arrow_forward</span>
+</a>
+<a class="inline-flex items-center gap-space-xs px-space-lg py-3.5 rounded-full bg-black/30 hover:bg-black/40 text-white transition-colors font-headline-sm text-[14px]" href="#">
+<span class="">Read Architecture Specs</span>
+<span class="material-symbols-outlined text-[16px]">menu_book</span>
+</a>
+</div>
+<div class="flex flex-wrap items-center gap-space-lg pt-space-xs font-label-code text-[12px] text-white/80">
+<span class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[15px]">verified_user</span>
+            Google Cloud Verified App
+          </span>
+<span class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[15px]">security</span>
+            SOC 2 Type II Certified
+          </span>
+<span class="flex items-center gap-1.5">
+<span class="material-symbols-outlined text-[15px]">lock</span>
+            Encrypted End-to-End
+          </span>
+</div>
+</div>
+<!-- Subtle Geometric Backdrop Graphic -->
+<div class="absolute -right-16 -bottom-16 w-96 h-96 rounded-full bg-white/10 blur-2xl pointer-events-none"></div>
+</div>
+</section>
+<!-- Interactive Workbench & FAQ Handler Script -->
+<script>
+    function setWorkbenchMode(mode) {
+      const viewLumen = document.getElementById('view-lumen');
+      const viewRfc = document.getElementById('view-rfc');
+      const toggleLumen = document.getElementById('toggle-lumen');
+      const toggleRfc = document.getElementById('toggle-rfc');
+
+      if (mode === 'lumen') {
+        viewLumen.classList.remove('hidden');
+        viewRfc.classList.add('hidden');
+        toggleLumen.className = 'px-space-md py-1 rounded-full font-label-caps text-label-caps bg-inverse-surface text-inverse-on-surface transition-all';
+        toggleRfc.className = 'px-space-md py-1 rounded-full font-label-caps text-label-caps text-on-surface-variant hover:text-on-surface transition-all';
+      } else {
+        viewLumen.classList.add('hidden');
+        viewRfc.classList.remove('hidden');
+        toggleRfc.className = 'px-space-md py-1 rounded-full font-label-caps text-label-caps bg-inverse-surface text-inverse-on-surface transition-all';
+        toggleLumen.className = 'px-space-md py-1 rounded-full font-label-caps text-label-caps text-on-surface-variant hover:text-on-surface transition-all';
+      }
+    }
+
+    function toggleFaq(btn) {
+      const content = btn.nextElementSibling;
+      const icon = btn.querySelector('.material-symbols-outlined');
+      const isHidden = content.classList.contains('hidden');
+      
+      content.classList.toggle('hidden');
+      if (isHidden) {
+        icon.style.transform = 'rotate(180deg)';
+      } else {
+        icon.style.transform = 'rotate(0deg)';
+      }
+    }
+  </script>
+</div></main><footer class="w-full bg-[#040405] border-t border-white/10"><div class="max-w-7xl mx-auto px-margin md:px-margin-desktop pt-space-2xl pb-space-xl"><div class="grid grid-cols-2 md:grid-cols-5 gap-space-xl mb-space-2xl"><div class="col-span-2 flex flex-col gap-space-md"><div class="flex items-center gap-space-sm"><div class="w-5 h-5 rounded bg-primary-container flex items-center justify-center"><div class="w-1.5 h-1.5 bg-inverse-surface rounded-xs"></div></div><span class="font-headline-sm text-headline-sm text-on-surface font-semibold tracking-tight">lumen</span></div><p class="font-body-sm text-body-sm text-on-surface-variant max-w-sm">Conversational intelligence engineered on top of native Gmail API. Pure speed, cryptographic safety, and human-first spatial email triage.</p><div class="flex items-center gap-space-sm"><div class="w-2 h-2 rounded-full bg-tertiary"></div><span class="font-label-code text-label-code text-on-surface-variant">All systems operational · Google Cloud Verified</span></div></div><div class="flex flex-col gap-space-sm"><span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Architecture</span><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="product" href="#">Conversational Flow</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="how-it-works" href="#">Gmail Sync Engine</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="docs" href="#">Keyboard Protocols</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="docs" href="#">Changelog</a></div><div class="flex flex-col gap-space-sm"><span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Trust &amp; Safe</span><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="security" href="#">Zero-Lockin Architecture</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="security" href="#">SOC 2 Type II Status</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="security" href="#">Local Vault &amp; Keys</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="security" href="#">GDPR Compliance</a></div><div class="flex flex-col gap-space-sm"><span class="font-label-caps text-label-caps text-on-surface uppercase tracking-wider">Manifesto</span><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="principles" href="#">Radical Simplicity</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="principles" href="#">No Proprietary DB</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="docs" href="#">API References</a><a class="font-body-sm text-body-sm text-on-surface-variant hover:text-on-surface transition-colors" data-path="docs" href="#">Open Source Core</a></div></div><div class="pt-space-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-space-md"><div class="flex flex-col sm:flex-row items-start sm:items-center gap-space-sm md:gap-space-lg font-body-sm text-body-sm text-on-surface-variant"><span class="">© 2025 Lumen Technologies, Inc.</span><span class="">Zero-lockin guarantee: All messages remain in your standard Gmail.</span></div><div class="flex items-center gap-space-md font-label-code text-label-code text-on-surface-variant"><span class="text-tertiary">E2E Ephemeral Runtime</span><span class="">v0.9.4r</span></div></div></div></footer>
+</body></html>

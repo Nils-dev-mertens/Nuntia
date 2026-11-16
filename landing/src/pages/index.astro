@@ -1,0 +1,1101 @@
+---
+/**
+ * The landing page.
+ *
+ * Layout from `stitch/` (hero with a workbench, four alternating feature rows,
+ * principles, FAQ, closing call to action), copy from
+ * `docs/landing-page-info.md`. Everything here is static HTML; the only island
+ * is the hero visual, because it is the only thing that responds to a click.
+ *
+ * The page deliberately leaves out the mock-up's badges (SOC 2, "zero
+ * training"), because the product has neither, and it does not call anything
+ * "real-time", "end-to-end encrypted" or "free forever".
+ */
+import '../styles/global.css'
+import HeroVisual from '../components/HeroVisual'
+
+const appUrl = (import.meta.env.PUBLIC_APP_URL ?? 'http://localhost:3000').replace(
+  /\/$/,
+  '',
+)
+
+const steps = [
+  {
+    number: '01',
+    title: 'Connect a mailbox',
+    body: 'Sign in with Google or Microsoft and approve read and send access. Nuntia brings in the last thirty days and keeps a local copy so reading and search are quick.',
+  },
+  {
+    number: '02',
+    title: 'Let the rules sort',
+    body: 'Built-in rules put each thread in one of four states. If you add an AI key, it can score importance and pick up the cases the rules cannot decide.',
+  },
+  {
+    number: '03',
+    title: 'Reply when you are ready',
+    body: 'Your greeting, signature and the quoted original come back automatically. A suggested draft waits in the box for you to edit — nothing is sent on its own.',
+  },
+]
+
+const triage = [
+  {
+    state: 'Needs action',
+    what: 'Ana asked for the monthly update',
+    tone: 'border-primary/40 bg-primary/10 text-primary',
+  },
+  {
+    state: 'Waiting for reply',
+    what: 'Invoice sent, payment in thirty days',
+    tone: 'border-warning/40 bg-warning/10 text-warning',
+  },
+  {
+    state: 'Information',
+    what: 'Design notes, no decision needed',
+    tone: 'border-border bg-muted text-muted-foreground',
+  },
+  {
+    state: 'Low priority',
+    what: 'A newsletter you keep for later',
+    tone: 'border-border bg-muted text-muted-foreground/70',
+  },
+]
+
+const searchHits = [
+  { subject: 'Seed round — monthly update', who: 'Ana de Vries', tag: 'investor' },
+  { subject: 'Board pack v3 (draft)', who: 'Me', tag: 'internal' },
+  { subject: 'Q3 numbers from the accountant', who: 'Piet Bakker', tag: 'supplier' },
+]
+
+const faqs = [
+  {
+    question: 'Which mail accounts work?',
+    answer:
+      'Gmail and Outlook — a personal Outlook.com address or a Microsoft 365 work account. You can connect more than one, from either service, and read them in one inbox. Mail from another provider is not supported.',
+  },
+  {
+    question: 'Where does my mail live?',
+    answer:
+      'Your provider keeps the original. Nuntia keeps a copy in one file on the machine where it runs, which is what makes search and reading fast. Google or Microsoft sign-ins and AI keys are stored locked. Nuntia asks for read and send access and cannot delete mail.',
+  },
+  {
+    question: 'Does it ever send without me?',
+    answer:
+      'No. A suggested reply is placed in the reply box for you to edit, and it is not saved anywhere. There is no automatic reply and no scheduled send.',
+  },
+  {
+    question: 'Do I need an AI key?',
+    answer:
+      'No. Without one, Nuntia still sorts mail by its built-in rules and reply composition works fully. With a key from Anthropic, OpenAI or Google, it can also score importance, name topics, keep notes on people, suggest tags, draft tag descriptions and propose replies.',
+  },
+  {
+    question: 'Can I run it myself?',
+    answer:
+      'Yes. The project ships as a Docker image and needs a small app registration with Google or Microsoft so those services accept the connection. The first sync brings in the last thirty days, and new mail is checked on a timer.',
+  },
+  {
+    question: 'What does it not do yet?',
+    answer:
+      'No other mail providers, no spam handling or deleted-mail view, no phone or desktop app, and no shared workspace for a team. There is no calendar, no contact import from Google or Microsoft, no scheduled sending and no automatic replies.',
+  },
+]
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nuntia — read email like chat</title>
+    <meta
+      name="description"
+      content="Nuntia is a private-beta mail client for Gmail and Outlook: one inbox, threads as conversations, four states that say what needs you, tags for the people you write to, and optional AI drafts you review. Nothing is sent without you."
+    />
+    <meta property="og:title" content="Nuntia — read email like chat" />
+    <meta
+      property="og:description"
+      content="One inbox for Gmail and Outlook. Threads as conversations, four states, people you can tag, and AI drafts you approve."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="color-scheme" content="dark" />
+    <noscript>
+      <style>
+        [data-reveal] {
+          opacity: 1;
+          transform: none;
+        }
+      </style>
+    </noscript>
+  </head>
+
+  <body>
+    <header
+      id="site-header"
+      class="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur-sm"
+    >
+      <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-5 md:px-12">
+        <a href="/" class="flex items-center gap-2.5" aria-label="Nuntia home">
+          <span
+            aria-hidden="true"
+            class="flex size-[30px] items-center justify-center rounded-[6px] bg-primary font-display text-[15px] font-bold text-primary-foreground"
+          >
+            N
+          </span>
+          <span class="font-display text-xl font-semibold tracking-tight">Nuntia</span>
+          <span
+            class="ml-1 hidden rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[10px] tracking-[0.1em] text-muted-foreground uppercase sm:inline"
+          >
+            beta
+          </span>
+        </a>
+
+        <nav
+          aria-label="Landing"
+          class="hidden items-center gap-7 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase md:flex"
+        >
+          <a class="transition-colors hover:text-foreground" href="#how">How it works</a>
+          <a class="transition-colors hover:text-foreground" href="#features">Features</a>
+          <a class="transition-colors hover:text-foreground" href="#tags">Tags</a>
+          <a class="transition-colors hover:text-foreground" href="#faq">FAQ</a>
+        </nav>
+
+        <div class="flex items-center gap-2">
+          <a
+            href={`${appUrl}/sign-in`}
+            class="hidden h-9 items-center px-3 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors hover:text-foreground sm:inline-flex"
+          >
+            Sign in
+          </a>
+          <a
+            href={`${appUrl}/request-access`}
+            class="inline-flex h-9 items-center gap-2 rounded-[4px] bg-white px-4 text-[13px] font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
+          >
+            Request access
+            <span aria-hidden="true">→</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <!-- Hero -->
+      <section
+        class="relative overflow-hidden border-b border-border px-5 pt-16 pb-14 md:px-12 md:pt-24 md:pb-20"
+      >
+        <div
+          aria-hidden="true"
+          class="pointer-events-none absolute inset-x-0 top-0 -z-10 mx-auto h-[420px] max-w-4xl bg-[radial-gradient(ellipse_at_top,rgba(255,87,34,0.16),rgba(255,160,0,0.05)_45%,transparent_70%)]"
+        >
+        </div>
+
+        <div class="mx-auto flex max-w-5xl flex-col items-center text-center">
+          <p
+            class="rise flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+          >
+            <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+            Private beta · Gmail + Outlook
+          </p>
+
+          <h1
+            class="rise-late mt-6 max-w-4xl font-display text-[40px] leading-[1.03] font-semibold tracking-[-0.04em] text-balance md:text-[72px] md:leading-[1.01]"
+          >
+            Read email like chat.
+            <span class="mt-1 block text-muted-foreground md:mt-2">
+              Keep your mail where it is.
+            </span>
+          </h1>
+
+          <p
+            class="rise-late mt-6 max-w-2xl text-[15px] leading-7 text-muted-foreground md:text-lg md:leading-8"
+          >
+            Nuntia puts Gmail and Outlook in one inbox, shows each thread as a
+            conversation, and sorts it into what needs you. AI is optional, runs on
+            your own key, and never sends anything.
+          </p>
+
+          <div class="mt-8 flex flex-col items-center gap-3 sm:flex-row">
+            <a
+              href={`${appUrl}/request-access`}
+              class="inline-flex h-11 items-center gap-2 rounded-[4px] bg-white px-6 text-sm font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
+            >
+              Request early access
+              <span aria-hidden="true">→</span>
+            </a>
+            <a
+              href="#how"
+              class="inline-flex h-11 items-center gap-2 rounded-[4px] border border-border px-6 font-mono text-[11px] tracking-[0.12em] text-foreground uppercase transition-colors hover:bg-muted"
+            >
+              See how it works
+            </a>
+          </div>
+
+          <p
+            class="mt-6 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase"
+          >
+            Invite only · No price yet · Nothing sent without you
+          </p>
+        </div>
+
+        <HeroVisual client:load />
+      </section>
+
+      <!-- How it works -->
+      <section
+        id="how"
+        data-reveal
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto max-w-7xl">
+          <p
+            class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+          >
+            <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+            How it works
+          </p>
+          <div class="mt-4 grid gap-8 md:grid-cols-3 md:gap-10">
+            {
+              steps.map((step, index) => (
+                <div
+                  data-reveal
+                  style={`--reveal-delay: ${index * 80}ms`}
+                  class="flex flex-col gap-3 border-t border-border pt-5"
+                >
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground">
+                    {step.number}
+                  </span>
+                  <h3 class="font-display text-xl font-medium tracking-tight">
+                    {step.title}
+                  </h3>
+                  <p class="text-[14px] leading-6 text-muted-foreground">{step.body}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      <!-- Features -->
+      <section id="features" class="divide-y divide-border border-b border-border">
+        <!-- 1: stripped envelope -->
+        <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
+          <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
+            <div class="md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <p
+                  class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+                >
+                  <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                  The message, not the envelope
+                </p>
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  Quoted history, greetings and signatures get out of the way.
+                </h2>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Most of a long thread is the same text repeated under a new line.
+                  Nuntia removes the quoted reply, the greeting and the signature
+                  when it reads, and puts yours back when you write.
+                </p>
+              </div>
+              <ul class="mt-6 flex flex-col gap-2.5">
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Read the newest message without scrolling past three copies of it.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Your greeting and signature return on send, in your own words.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Per-sender rules when one correspondent formats mail differently.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="md:col-span-7">
+              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+                <div class="flex items-center justify-between gap-3 pb-4">
+                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                    Same thread, two readings
+                  </span>
+                  <span class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                    original untouched
+                  </span>
+                </div>
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <div class="rounded-[6px] border border-border bg-background/60 p-3">
+                    <p class="font-mono text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
+                      Raw email
+                    </p>
+                    <div class="mt-3 flex flex-col gap-2 font-mono text-[10px] leading-5 text-muted-foreground/70">
+                      <span>Hope this finds you well.</span>
+                      <span class="text-foreground/70">Can we move the review to Thursday?</span>
+                      <span class="border-l border-border pl-2">
+                        &gt; On Monday, you wrote:<br />
+                        &gt; &gt; Can we keep the Tuesday slot?<br />
+                        &gt; &gt; Sent from my phone
+                      </span>
+                      <span class="truncate border-t border-border pt-2 text-[9px]">
+                        CONFIDENTIALITY NOTICE: this transmission…
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="rounded-[6px] border border-primary/25 bg-primary/[0.04] p-3">
+                    <p class="font-mono text-[9px] tracking-[0.1em] text-primary uppercase">
+                      Nuntia
+                    </p>
+                    <div class="mt-3 flex flex-col gap-2">
+                      <div class="rounded-[4px] bg-muted/60 p-2">
+                        <p class="text-[10px] font-medium text-primary">David Chen</p>
+                        <p class="text-[12px] leading-5">Can we move the review to Thursday?</p>
+                      </div>
+                      <div
+                        class="flex items-center gap-1.5 rounded-[3px] border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground"
+                      >
+                        <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+                        Quoted reply, greeting and signature folded away
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 2: states -->
+        <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
+          <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
+            <div class="order-2 md:order-1 md:col-span-7">
+              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+                <div class="flex items-center justify-between gap-3 pb-4">
+                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                    Triage
+                  </span>
+                  <span class="font-mono text-[9px] text-muted-foreground">four states, always</span>
+                </div>
+                <div class="flex flex-col gap-2">
+                  {
+                    triage.map((row) => (
+                      <div class="flex flex-wrap items-center gap-2 rounded-[6px] border border-border bg-background/40 px-3 py-2.5">
+                        <span
+                          class={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] uppercase ${row.tone}`}
+                        >
+                          {row.state}
+                        </span>
+                        <span class="text-[12px] text-foreground/80">{row.what}</span>
+                      </div>
+                    ))
+                  }
+                </div>
+                <p class="mt-4 border-t border-border pt-3 font-mono text-[9px] text-muted-foreground">
+                  Rename the states, explain what they mean, add sections of your own.
+                </p>
+              </div>
+            </div>
+
+            <div class="order-1 md:order-2 md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <p
+                  class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+                >
+                  <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                  Sorted by what it needs
+                </p>
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  Four states that answer one question: does this need me?
+                </h2>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Folders collect mail. States answer a question. Every thread lands in
+                  exactly one of four places, and you can rename them and write what each
+                  one means to you.
+                </p>
+              </div>
+              <ul class="mt-6 flex flex-col gap-2.5">
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Needs action, waiting for reply, information, low priority — your wording, your meaning.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Your own sections for a client, a project, or anything worth more than one label.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Done moves a thread out of the way; a new message brings it back.</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3: search -->
+        <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
+          <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
+            <div class="md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <p
+                  class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+                >
+                  <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                  One search, every mailbox
+                </p>
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  Find the thread you half remember.
+                </h2>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Search runs over every message Nuntia has saved — subject, topic, the
+                  people on the thread and the text itself. It works across all your
+                  connected addresses at once, and it does not wait on the mail provider.
+                </p>
+              </div>
+              <ul class="mt-6 flex flex-col gap-2.5">
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>One box for Gmail and Outlook, together.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Results as you type, including mail filed under Done.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Attachments stay with the message they arrived on.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="md:col-span-7">
+              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+                <div
+                  class="flex items-center gap-2 rounded-[4px] border border-border bg-background/60 px-3 py-2"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="size-3.5 text-muted-foreground"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                  >
+                    <circle cx="11" cy="11" r="7"></circle>
+                    <path d="m17 17 4 4"></path>
+                  </svg>
+                  <span class="text-[12px] text-foreground/80">retention numbers</span>
+                  <span aria-hidden="true" class="ml-auto h-4 w-px animate-pulse bg-primary"></span>
+                </div>
+                <div class="mt-3 flex flex-col divide-y divide-border">
+                  {
+                    searchHits.map((hit) => (
+                      <div class="flex items-center gap-2 py-2.5">
+                        <span class="min-w-0 flex-1">
+                          <span class="block truncate text-[12px] text-foreground/90">
+                            {hit.subject}
+                          </span>
+                          <span class="block truncate text-[11px] text-muted-foreground">
+                            {hit.who}
+                          </span>
+                        </span>
+                        <span class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase">
+                          {hit.tag}
+                        </span>
+                      </div>
+                    ))
+                  }
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4: outbound -->
+        <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
+          <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
+            <div class="order-2 md:order-1 md:col-span-7">
+              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+                <div class="flex items-center justify-between gap-3 pb-4">
+                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                    What you type
+                  </span>
+                  <span class="font-mono text-[9px] text-muted-foreground">
+                    what they receive
+                  </span>
+                </div>
+                <div class="rounded-[6px] border border-border bg-background/60 p-3">
+                  <p class="text-[13px] leading-6">
+                    Sure — pushed it to staging. Let me know when you have looked at the
+                    logs.
+                  </p>
+                </div>
+                <div class="flex justify-center py-2">
+                  <span aria-hidden="true" class="text-muted-foreground">↓</span>
+                </div>
+                <div class="rounded-[6px] border border-primary/25 bg-primary/[0.04] p-3">
+                  <p class="text-[13px] leading-6 text-foreground/90">
+                    Hi Elena,<br /><br />
+                    Sure — I have pushed the code to staging. Let me know once you have
+                    reviewed the logs so we can continue with the release.<br /><br />
+                    Best regards,<br />
+                    Alex
+                  </p>
+                  <p class="mt-3 border-t border-border pt-2 font-mono text-[9px] text-muted-foreground">
+                    Your greeting and signature, added on the way out.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div class="order-1 md:order-2 md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <p
+                  class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+                >
+                  <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                  Still ordinary email
+                </p>
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  Write quickly. It leaves as email.
+                </h2>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  The person you are writing to does not need a new app. Replies carry
+                  your greeting, your signature and the message you are answering,
+                  because the recipient is reading normal mail in Gmail or Outlook.
+                </p>
+              </div>
+              <ul class="mt-6 flex flex-col gap-2.5">
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>One reply box, with the thread already quoted underneath.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>New messages and attachments, with the same rules.</span>
+                </li>
+                <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                  <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                  <span>Nothing is sent automatically. Not even a suggested draft.</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tags -->
+      <section
+        id="tags"
+        data-reveal
+        class="border-b border-border bg-[#0d0d0f] px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
+          <div class="md:col-span-5">
+            <div class="flex flex-col gap-4">
+              <p
+                class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+              >
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                People, not threads
+              </p>
+              <h2
+                class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+              >
+                Tags describe who someone is to you.
+              </h2>
+              <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                A state says what a thread needs. A tag says who the person is: a
+                client, an investor, a supplier. One person can carry several, and a tag
+                can be used by any number of people.
+              </p>
+            </div>
+            <ul class="mt-6 flex flex-col gap-2.5">
+              <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                <span>Write a description once — what the tag means and how you work with these people.</span>
+              </li>
+              <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                <span>Nuntia suggests tags from your correspondence and can add its own; tags you add are never renamed or removed by it.</span>
+              </li>
+              <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                <span>When the people in a tag change, its description is refreshed from the mail — unless you wrote it yourself.</span>
+              </li>
+              <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
+                <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                <span>The last fifty additions and removals are listed, so you can see why a description says what it says.</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="md:col-span-7">
+            <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+              <div class="flex items-center justify-between gap-3">
+                <span
+                  class="flex items-center gap-2 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase"
+                >
+                  Tags &amp; descriptions
+                </span>
+                <span class="font-mono text-[9px] text-muted-foreground">3 people</span>
+              </div>
+
+              <div class="mt-4 rounded-[6px] border border-primary/25 bg-primary/[0.04] p-4">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span
+                    class="rounded-[3px] bg-primary px-2 py-0.5 font-mono text-[10px] tracking-[0.08em] text-primary-foreground uppercase"
+                  >
+                    investor
+                  </span>
+                  <span
+                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
+                  >
+                    written by Nuntia
+                  </span>
+                </div>
+                <p class="mt-2 text-[13px] leading-6 text-foreground/90">
+                  People who have put money into the company. They expect a short update
+                  every month and should always get a reply within a day.
+                </p>
+                <div class="mt-3 flex items-center gap-2">
+                  <span class="flex -space-x-1.5">
+                    {
+                      ['AV', 'MK', 'JS'].map((initials) => (
+                        <span class="flex size-6 items-center justify-center rounded-full border border-card bg-muted font-display text-[9px] font-semibold">
+                          {initials}
+                        </span>
+                      ))
+                    }
+                  </span>
+                  <span class="font-mono text-[9px] text-muted-foreground">
+                    Ana, Marcus and Joost carry it
+                  </span>
+                </div>
+              </div>
+
+              <div class="mt-3 rounded-[6px] border border-border">
+                <p
+                  class="border-b border-border px-3 py-2 font-mono text-[9px] tracking-[0.1em] text-muted-foreground uppercase"
+                >
+                  Recent changes
+                </p>
+                <div class="divide-y divide-border font-mono text-[10px] text-muted-foreground">
+                  <div class="flex items-center justify-between gap-3 px-3 py-2">
+                    <span>Joost added</span><span>2 days ago</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 px-3 py-2">
+                    <span>Description refreshed from mail</span><span>2 days ago</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 px-3 py-2">
+                    <span>Marcus added</span><span>3 weeks ago</span>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[6px] border border-border px-3 py-2"
+              >
+                <span class="font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase">
+                  Suggested from recent mail
+                </span>
+                <span class="flex gap-1.5">
+                  <span
+                    class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[9px] text-foreground/80"
+                  >
+                    board observer
+                  </span>
+                  <span
+                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground"
+                  >
+                    + add
+                  </span>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Principles -->
+      <section
+        id="privacy"
+        data-reveal
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto max-w-7xl">
+          <div class="max-w-2xl">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+              Principles
+            </p>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
+            >
+              Built for clarity, sovereign by design.
+            </h2>
+            <p class="mt-4 text-[15px] leading-7 text-muted-foreground">
+              These are properties of how the app works, not promises about how it feels.
+              They are also the things the beta measures itself against.
+            </p>
+          </div>
+
+          <div class="mt-10 grid gap-4 md:grid-cols-3">
+            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
+              <div>
+                <span
+                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="size-4 text-primary"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M12 3 4.5 6v5.5c0 4.4 3 8 7.5 9.5 4.5-1.5 7.5-5.1 7.5-9.5V6L12 3Z"></path>
+                    <path d="m8.5 12 2.5 2.5 4.5-5"></path>
+                  </svg>
+                </span>
+                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
+                  Your provider stays the source of truth
+                </h3>
+                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
+                  Mail is read and sent through Gmail or Outlook. Nuntia keeps a local
+                  copy so search and reading are fast, and it cannot delete anything —
+                  not in Nuntia, not in your mailbox.
+                </p>
+              </div>
+              <p
+                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
+              >
+                Read and send access · no delete permission
+              </p>
+            </div>
+
+            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
+              <div>
+                <span
+                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="size-4 text-warning"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <circle cx="8" cy="8" r="4"></circle>
+                    <path d="m11 11 9 9"></path>
+                    <path d="m17 17 2-2"></path>
+                  </svg>
+                </span>
+                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
+                  Your keys, your AI
+                </h3>
+                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
+                  The two AI helpers are optional and use your own account with
+                  Anthropic, OpenAI or Google. Turn on one, both or neither. Sign-ins and
+                  keys are locked, and the AI log stores no message text.
+                </p>
+              </div>
+              <p
+                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
+              >
+                Anthropic · OpenAI · Gemini
+              </p>
+            </div>
+
+            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
+              <div>
+                <span
+                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="size-4 text-success"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path d="M22 2 11 13"></path>
+                    <path d="m22 2-7 20-4-9-9-4 20-7Z"></path>
+                  </svg>
+                </span>
+                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
+                  You press send
+                </h3>
+                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
+                  A draft is text in the reply box. It is not saved, not sent, and it
+                  does not replace your own writing. Done is a mark only you can make,
+                  and a state you set outranks the machine.
+                </p>
+              </div>
+              <p
+                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
+              >
+                No auto-send · no scheduled replies
+              </p>
+            </div>
+          </div>
+
+          <div class="mt-4 grid gap-4 border-t border-border pt-6 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              [
+                ['Mail providers', 'Gmail and Outlook, together'],
+                ['New mail', 'Checked on a timer'],
+                ['First sync', 'The last 30 days'],
+                ['Data', 'One file, backed up by the operator'],
+              ].map(([label, value]) => (
+                <div class="flex flex-col gap-1">
+                  <span class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+                    {label}
+                  </span>
+                  <span class="text-[13px] text-foreground/90">{value}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      <!-- FAQ -->
+      <section
+        id="faq"
+        data-reveal
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto grid max-w-7xl gap-10 md:grid-cols-12 md:gap-14">
+          <div class="md:col-span-4">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+              Before you ask for access
+            </p>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
+            >
+              Questions with plain answers.
+            </h2>
+            <p class="mt-4 text-[14px] leading-6 text-muted-foreground">
+              If something is missing, ask in the access request — the beta exists to
+              find out what is still wrong.
+            </p>
+          </div>
+
+          <div class="md:col-span-8">
+            <div class="divide-y divide-border border-y border-border">
+              {
+                faqs.map((item) => (
+                  <details class="group">
+                    <summary class="flex cursor-pointer list-none items-center justify-between gap-4 py-4 text-left text-[15px] font-medium transition-colors hover:text-primary [&::-webkit-details-marker]:hidden">
+                      {item.question}
+                      <span
+                        aria-hidden="true"
+                        class="flex size-6 shrink-0 items-center justify-center rounded-[3px] border border-border text-muted-foreground transition-transform duration-200 group-open:rotate-45"
+                      >
+                        +
+                      </span>
+                    </summary>
+                    <p class="faq-answer max-w-2xl pb-4 text-[14px] leading-6 text-muted-foreground">
+                      {item.answer}
+                    </p>
+                  </details>
+                ))
+              }
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Closing call to action -->
+      <section data-reveal class="px-5 py-16 md:px-12 md:py-20">
+        <div
+          class="relative mx-auto max-w-7xl overflow-hidden rounded-lg bg-[linear-gradient(100deg,#ff5722_0%,#ff7a2f_45%,#ffa000_100%)] px-6 py-12 md:px-12 md:py-16"
+        >
+          <div
+            aria-hidden="true"
+            class="cta-orb pointer-events-none absolute -top-24 -right-16 size-72 rounded-full bg-white/10"
+          >
+          </div>
+          <div class="relative z-10 max-w-3xl">
+            <span
+              class="inline-flex items-center gap-2 rounded-[3px] bg-black/20 px-2 py-1 font-mono text-[10px] tracking-[0.12em] text-white uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-white"></span>
+              Private beta
+            </span>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.05] font-semibold tracking-[-0.03em] text-balance text-white md:text-[48px]"
+            >
+              Read your mail as conversations, without moving it.
+            </h2>
+            <p class="mt-3 max-w-xl text-[15px] leading-7 text-white/90">
+              Request an invitation, connect a mailbox, and see whether the four states
+              are enough for the way you work. No price, no card, no new address.
+            </p>
+            <div class="mt-7 flex flex-col gap-3 sm:flex-row">
+              <a
+                href={`${appUrl}/request-access`}
+                class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] bg-white px-6 text-sm font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
+              >
+                Request access
+                <span aria-hidden="true">→</span>
+              </a>
+              <a
+                href={`${appUrl}/sign-in`}
+                class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] border border-black/20 bg-black/20 px-6 text-sm font-medium text-white transition-colors hover:bg-black/30"
+              >
+                Sign in
+              </a>
+            </div>
+            <p class="mt-4 font-mono text-[9px] tracking-[0.1em] text-white/80 uppercase">
+              Invite only · Gmail + Outlook · AI optional
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="border-t border-border bg-[#08080a] px-5 pt-12 pb-8 md:px-12">
+      <div class="mx-auto max-w-7xl">
+        <div class="grid gap-10 md:grid-cols-12">
+          <div class="md:col-span-5">
+            <a href="/" class="flex items-center gap-2.5" aria-label="Nuntia home">
+              <span
+                aria-hidden="true"
+                class="flex size-6 items-center justify-center rounded-[4px] bg-primary font-display text-[11px] font-bold text-primary-foreground"
+              >
+                N
+              </span>
+              <span class="font-display text-lg font-semibold tracking-tight">Nuntia</span>
+            </a>
+            <p class="mt-3 max-w-sm text-[13px] leading-6 text-muted-foreground">
+              A mail client for Gmail and Outlook that reads threads as conversations.
+              Your provider keeps the mail; you keep the last word.
+            </p>
+            <p
+              class="mt-4 flex items-center gap-2 font-mono text-[10px] tracking-[0.08em] text-muted-foreground"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+              Private beta · invite only
+            </p>
+          </div>
+
+          <div class="md:col-span-2">
+            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+              Product
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <a class="transition-colors hover:text-foreground" href="#features">Features</a>
+              <a class="transition-colors hover:text-foreground" href="#tags">Tags</a>
+              <a class="transition-colors hover:text-foreground" href="#how">How it works</a>
+              <a class="transition-colors hover:text-foreground" href="#faq">FAQ</a>
+            </div>
+          </div>
+
+          <div class="md:col-span-2">
+            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+              Get started
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <a class="transition-colors hover:text-foreground" href={`${appUrl}/request-access`}>
+                Request access
+              </a>
+              <a class="transition-colors hover:text-foreground" href={`${appUrl}/sign-in`}>
+                Sign in
+              </a>
+              <a class="transition-colors hover:text-foreground" href={`${appUrl}/join`}>
+                Enter an invite
+              </a>
+            </div>
+          </div>
+
+          <div class="md:col-span-3">
+            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+              What it works with
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                Gmail
+              </span>
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+                Outlook · Microsoft 365
+              </span>
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+                Anthropic · OpenAI · Gemini
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="mt-10 flex flex-col gap-3 border-t border-border pt-5 font-mono text-[10px] tracking-[0.08em] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
+        >
+          <p>© 2026 Nuntia</p>
+          <p>One file · your keys · nothing sent without you</p>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      /*
+       * Two small jobs, no framework. Reveal every `[data-reveal]` element the
+       * first time it enters the viewport, and let the header change once the
+       * page has scrolled. Reduced motion shows everything immediately.
+       */
+      const reducedMotion = window.matchMedia(
+        '(prefers-reduced-motion: reduce)',
+      ).matches
+      const revealables = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-reveal]'),
+      )
+
+      if (reducedMotion || !('IntersectionObserver' in window)) {
+        revealables.forEach((node) => node.classList.add('is-visible'))
+      } else {
+        const revealer = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue
+              entry.target.classList.add('is-visible')
+              revealer.unobserve(entry.target)
+            }
+          },
+          { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
+        )
+
+        revealables.forEach((node) => revealer.observe(node))
+      }
+
+      const header = document.getElementById('site-header')
+      if (header) {
+        const updateHeader = () =>
+          header.classList.toggle('is-scrolled', window.scrollY > 24)
+        updateHeader()
+        window.addEventListener('scroll', updateHeader, { passive: true })
+      }
+    </script>
+  </body>
+</html>

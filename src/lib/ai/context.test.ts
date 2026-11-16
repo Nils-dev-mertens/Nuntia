@@ -144,4 +144,26 @@ describe('parseContextUpdate', () => {
     // correct, so the profile is simply not offered this time.
     expect(parsed?.contact).toBeNull()
   })
+
+  test('takes a company description only when the answer carries one', () => {
+    const parsed = parseContextUpdate(
+      JSON.stringify({
+        topic: 'Invoice 4021',
+        companyFocus: '  Builds warehouse\nrobots ',
+      }),
+    )
+    expect(parsed?.companyFocus).toBe('Builds warehouse robots')
+
+    // Absent, not empty: the writer must queue no suggestion when the mail did
+    // not describe the company.
+    expect(
+      parseContextUpdate(JSON.stringify({ topic: 'Invoice 4021' })),
+    ).not.toHaveProperty('companyFocus')
+
+    // A description alone is a usable answer.
+    expect(
+      parseContextUpdate(JSON.stringify({ companyFocus: 'ISO consultancy' }))
+        ?.companyFocus,
+    ).toBe('ISO consultancy')
+  })
 })

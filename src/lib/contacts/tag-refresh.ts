@@ -25,6 +25,7 @@ import { contactContexts, contactTags } from '#/db/schema.ts'
 import type { LlmConfig } from '#/lib/ai/llm.ts'
 import { getAiPipelineConfig } from '#/lib/ai/settings.ts'
 
+import { isServiceContact } from './person.ts'
 import { suggestContactTagDescription, suggestContactTags } from './tag-ai.ts'
 import type { ContactTagMeaningSource } from './tag-ai.ts'
 import { tagDescriptionNeedsRefresh } from './tag-name.ts'
@@ -147,8 +148,12 @@ export async function suggestNewTags(
       .limit(24),
   ])
 
+  // A service desk is not a person to label, so it is never evidence for a new
+  // word either — the same rule the automatic writer follows.
   const contacts = profiles.filter(
-    (profile) => profile.roleCompany || profile.relationship || profile.summary,
+    (profile) =>
+      !isServiceContact(profile.email) &&
+      (profile.roleCompany || profile.relationship || profile.summary),
   )
   if (contacts.length === 0) return []
 

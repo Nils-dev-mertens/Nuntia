@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  autoContactTags,
   normaliseContactTag,
   normaliseContactTagDescription,
   normaliseContactTagList,
@@ -55,6 +56,34 @@ describe('normaliseContactTagList', () => {
   test('is empty for anything that is not a list', () => {
     expect(normaliseContactTagList(null)).toEqual([])
     expect(normaliseContactTagList('investor')).toEqual([])
+  })
+})
+
+describe('autoContactTags', () => {
+  test('keeps a proposed word the user already owns', () => {
+    expect(autoContactTags(['Acme', 'investor'], ['acme', 'Investor'])).toEqual(
+      ['Acme', 'investor'],
+    )
+  })
+
+  test('drops a word nobody in the address book has', () => {
+    // This is the bug: a refresh filing one address under its own role must not
+    // be able to create that group.
+    expect(autoContactTags(['recruiter', 'Acme'], ['acme'])).toEqual(['Acme'])
+  })
+
+  test('never applies more than a handful at once', () => {
+    expect(autoContactTags(['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd'])).toEqual(
+      ['a', 'b', 'c'],
+    )
+  })
+
+  test('ignores repeats and unusable entries', () => {
+    expect(autoContactTags(['Acme', 'acme', ''], ['acme'])).toEqual(['Acme'])
+  })
+
+  test('is empty when the vocabulary is empty', () => {
+    expect(autoContactTags(['investor'], [])).toEqual([])
   })
 })
 

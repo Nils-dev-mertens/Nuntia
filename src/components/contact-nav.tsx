@@ -9,7 +9,7 @@ export function ContactNav({
   active,
   email,
 }: {
-  active: 'index' | 'contact' | 'tags'
+  active: 'index' | 'contact' | 'tags' | 'organisations'
   /** The address shown under the navigation on a single contact. */
   email?: string | null
 }) {
@@ -36,6 +36,18 @@ export function ContactNav({
         )}
       >
         All contacts
+      </Link>
+      <Link
+        to="/contacts/organisations"
+        aria-current={active === 'organisations' ? 'page' : undefined}
+        className={cn(
+          'flex h-9 items-center rounded-[4px] px-2.5 text-[12.5px] font-medium transition-colors hover:bg-muted/40',
+          active === 'organisations'
+            ? 'bg-muted/70 font-semibold text-foreground'
+            : 'text-foreground/90',
+        )}
+      >
+        Organisations
       </Link>
       <Link
         to="/contacts/tags"

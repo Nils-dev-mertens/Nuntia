@@ -6,10 +6,12 @@
  * wants to find the person by later ("investor", "school", "waiting on legal").
  *
  * Two writers, and the `source` column is what keeps them apart. The user adds
- * and removes tags by hand; an automatic profile refresh may also propose tags,
- * which land as `auto`. A refresh only ever revises its own tags — a tag the
- * user typed is theirs, so the app can neither replace nor silently reuse it,
- * and a tag the app added disappears when the mail stops supporting it.
+ * and removes tags by hand; an automatic profile refresh may also file a person
+ * under one, but only a word the user already owns — a tag they put on someone,
+ * or one they defined on the tags screen. A refresh never invents a word, only
+ * revises its own rows on this contact, and never removes a tag the user set, so
+ * a tag the app applied disappears when the mail stops supporting it and the
+ * vocabulary stays something a person wrote.
  *
  * A tag belongs to the address, not to a mailbox: the same person is one entry
  * in the directory however many of the user's accounts they write to.
@@ -28,8 +30,10 @@ import {
 import type { ContactTagEventAction, ContactTagSource } from '#/db/schema.ts'
 
 import { normaliseContactEmail } from './matching.ts'
+import { isServiceContact } from './person.ts'
 import {
   CONTACT_TAG_LIMITS,
+  autoContactTags,
   normaliseContactTag,
   normaliseContactTagDescription,
   normaliseContactTagList,
@@ -60,6 +64,31 @@ async function readContactTags(
     .from(contactTags)
     .where(and(eq(contactTags.userId, owner), eq(contactTags.email, address)))
     .orderBy(asc(contactTags.createdAt))
+}
+
+/**
+ * The words the user owns: tags they put on anyone by hand, and the tag
+ * definitions they created.
+ *
+ * The app's own older rows are deliberately absent. A model that once filed an
+ * address under "recruiter" must not find that row here and spread the word to
+ * the next person — the vocabulary has to be able to say no to itself.
+ */
+async function readTagVocabulary(owner: string): Promise<string[]> {
+  const [definitions, userTags] = await Promise.all([
+    db
+      .select({ tag: contactTagDescriptions.tag })
+      .from(contactTagDescriptions)
+      .where(eq(contactTagDescriptions.userId, owner)),
+    db
+      .select({ tag: contactTags.tag })
+      .from(contactTags)
+      .where(
+        and(eq(contactTags.userId, owner), eq(contactTags.source, 'user')),
+      ),
+  ])
+
+  return [...new Set([...definitions, ...userTags].map((row) => row.tag))]
 }
 
 /**
@@ -207,8 +236,17 @@ export async function applyAutoContactTags(
   const address = normaliseContactEmail(email)
   if (!owner || !address) return []
 
-  const tags = normaliseContactTagList(proposed)
-  const current = await readContactTags(owner, address)
+  const [current, vocabulary] = await Promise.all([
+    readContactTags(owner, address),
+    readTagVocabulary(owner),
+  ])
+  // Only words the user already owns may be written by the app; see
+  // `autoContactTags`. A service desk is never filed at all: a label says what
+  // kind of person this is, and a desk is not one. Any automatic word left on a
+  // service address is retired by the same call (an empty proposal).
+  const tags = isServiceContact(address)
+    ? []
+    : autoContactTags(normaliseContactTagList(proposed), vocabulary)
   const wanted = new Set(tags.map((tag) => tag.toLowerCase()))
 
   // Only the app's own tags are reconsidered. A user tag that happens to differ

@@ -390,6 +390,12 @@ export async function decideAndSave(
                 next: decision.contact,
               }
             : null,
+        // A company description stated in the mail is queued, not filed: the
+        // organisations screen is where a signed-off line becomes the note.
+        organizationFocus:
+          decision.companyFocus && otherParty
+            ? { email: otherParty, focus: decision.companyFocus }
+            : null,
       })
     } catch (error) {
       // The decision is already stored; a failed refresh must not fail the sync.

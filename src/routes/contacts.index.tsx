@@ -9,125 +9,17 @@
  */
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { createServerFn } from '@tanstack/react-start'
 import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { ChevronRight, Search, X } from 'lucide-react'
 
 import { AppShell } from '#/components/app-shell.tsx'
 import { ContactNav } from '#/components/contact-nav.tsx'
-import { getSession, listAccounts } from '#/lib/auth/index.ts'
-import { listContactContexts } from '#/lib/contacts/context.ts'
-import { contactContextDescription } from '#/lib/contacts/description.ts'
-import { listContactActivity } from '#/lib/contacts/history.ts'
-import { listContactSuggestions } from '#/lib/contacts/index.ts'
-import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
-import { listContactTags } from '#/lib/contacts/tags.ts'
+import { fetchContactDirectory } from '#/lib/contacts/directory.ts'
 import { cn } from '#/lib/utils'
-
-type ConnectedAccount = { id: string; email: string }
-
-type ContactListItem = {
-  email: string
-  name: string | null
-  description: string | null
-  importance: number | null
-  /** The newest thread they appear on, or null when only a note exists. */
-  latestThreadSubject: string | null
-  /** ISO string of that thread's last message. */
-  lastInteractionAt: string | null
-  /** The user's own tags for this person, in display order. */
-  tags: string[]
-}
-
-type ContactsPageData =
-  | { signedIn: false }
-  | {
-      signedIn: true
-      contacts: ContactListItem[]
-      accounts: ConnectedAccount[]
-    }
-
-const fetchContacts = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<ContactsPageData> => {
-    const session = await getSession()
-    if (!session) return { signedIn: false }
-
-    const accounts = await listAccounts(session.userId)
-    const owners = new Set(
-      accounts.map((account) => account.email.trim().toLowerCase()),
-    )
-
-    const [suggestions, contexts, activity, tagsByEmail] = await Promise.all([
-      // A directory is expected to hold everyone, so the list's usual cap is
-      // lifted far enough that a real address book fits in one read.
-      listContactSuggestions(
-        accounts.map((account) => account.id),
-        owners,
-        1_000,
-      ),
-      listContactContexts(session.userId),
-      listContactActivity(session.userId),
-      // One read for every contact's tags: the rows all show them, and a tag is
-      // the other half of finding a person quickly.
-      listContactTags(session.userId),
-    ])
-
-    const byEmail = new Map<string, ContactListItem>()
-    for (const suggestion of suggestions) {
-      const email = normaliseContactEmail(suggestion.email)
-      if (!email) continue
-      byEmail.set(email, {
-        email,
-        name: suggestion.name,
-        description: null,
-        importance: null,
-        latestThreadSubject: null,
-        lastInteractionAt: null,
-        tags: tagsByEmail.get(email) ?? [],
-      })
-    }
-
-    // A profile outranks the learned contact only for the fields it owns: the
-    // name still comes from the mail, which is what the user last saw there.
-    for (const context of contexts) {
-      const existing = byEmail.get(context.email)
-      byEmail.set(context.email, {
-        email: context.email,
-        name: existing?.name ?? null,
-        description: contactContextDescription(context),
-        importance: context.importance,
-        latestThreadSubject: null,
-        lastInteractionAt: null,
-        tags: tagsByEmail.get(context.email) ?? existing?.tags ?? [],
-      })
-    }
-
-    // One lookup per contact rather than per query: the activity map is already
-    // the newest thread for every address the accounts have met.
-    for (const contact of byEmail.values()) {
-      const latest = activity.get(contact.email)
-      contact.latestThreadSubject = latest?.subject ?? null
-      contact.lastInteractionAt = latest?.lastMessageAt ?? null
-    }
-
-    const contacts = [...byEmail.values()].sort((a, b) =>
-      (a.name ?? a.email).localeCompare(b.name ?? b.email),
-    )
-
-    return {
-      signedIn: true,
-      contacts,
-      accounts: accounts.map((account) => ({
-        id: account.id,
-        email: account.email,
-      })),
-    }
-  },
-)
 
 export const Route = createFileRoute('/contacts/')({
   loader: async () => {
-    const payload = await fetchContacts()
+    const payload = await fetchContactDirectory()
     if (!payload.signedIn) throw redirect({ to: '/sign-in' })
     return payload
   },
@@ -160,6 +52,8 @@ function ContactsPage() {
   const data = Route.useLoaderData()
   const [query, setQuery] = useState('')
   const [activeTag, setActiveTag] = useState<string | null>(null)
+  /** The organisation domain being filtered on, or null for all of them. */
+  const [activeOrg, setActiveOrg] = useState<string | null>(null)
   const deferredQuery = useDeferredValue(query)
   const searchRef = useRef<HTMLInputElement>(null)
 
@@ -188,7 +82,8 @@ function ContactsPage() {
   }, [])
 
   const needle = deferredQuery.trim().toLowerCase()
-  const filtering = needle.length > 0 || activeTag !== null
+  const filtering =
+    needle.length > 0 || activeTag !== null || activeOrg !== null
 
   // Filtered in the browser on purpose: the directory is already one read of at
   // most a thousand people, and a search that waited for a round trip would be
@@ -196,6 +91,9 @@ function ContactsPage() {
   const contacts = useMemo(
     () =>
       data.contacts.filter((contact) => {
+        if (activeOrg && contact.organization?.domain !== activeOrg) {
+          return false
+        }
         if (
           activeTag &&
           !contact.tags.some(
@@ -209,10 +107,12 @@ function ContactsPage() {
           contact.name,
           contact.email,
           contact.description,
+          contact.organization?.name,
+          contact.organization?.domain,
           ...contact.tags,
         ].some((value) => value?.toLowerCase().includes(needle))
       }),
-    [data.contacts, needle, activeTag],
+    [data.contacts, needle, activeTag, activeOrg],
   )
 
   const allTags = useMemo(
@@ -223,9 +123,23 @@ function ContactsPage() {
     [data.contacts],
   )
 
+  /** One entry per organisation domain, named after the domain's own label. */
+  const allOrganizations = useMemo(() => {
+    const byDomain = new Map<string, string>()
+    for (const contact of data.contacts) {
+      if (contact.organization) {
+        byDomain.set(contact.organization.domain, contact.organization.name)
+      }
+    }
+    return [...byDomain].sort((a, b) =>
+      a[1].localeCompare(b[1], undefined, { sensitivity: 'base' }),
+    )
+  }, [data.contacts])
+
   function clearFilters() {
     setQuery('')
     setActiveTag(null)
+    setActiveOrg(null)
   }
 
   return (
@@ -327,6 +241,41 @@ function ContactsPage() {
           </Link>
         </div>
 
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold tracking-[0.12em] text-muted-foreground/70 uppercase">
+            Organisations
+          </span>
+          {allOrganizations.map(([domain, name]) => (
+            <button
+              key={domain}
+              type="button"
+              aria-pressed={activeOrg === domain}
+              title={domain}
+              onClick={() => setActiveOrg(activeOrg === domain ? null : domain)}
+              className={cn(
+                'rounded-full border px-2 py-0.5 text-[11px] transition-colors',
+                activeOrg === domain
+                  ? 'border-primary/40 bg-primary/15 font-medium text-primary'
+                  : 'border-border text-muted-foreground hover:bg-muted/40 hover:text-foreground',
+              )}
+            >
+              {name}
+            </button>
+          ))}
+          {allOrganizations.length === 0 ? (
+            <span className="text-[11px] text-muted-foreground">
+              No company addresses yet — personal mail stays ungrouped.
+            </span>
+          ) : null}
+          {/** The grouped view has its own tab; this row stays for quick filters. */}
+          <Link
+            to="/contacts/organisations"
+            className="ml-auto shrink-0 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            View all
+          </Link>
+        </div>
+
         {data.contacts.length === 0 ? (
           <p className="mt-6 rounded-lg border border-border bg-card p-4 text-sm text-muted-foreground">
             No contacts yet. People appear here as your mail syncs.
@@ -368,8 +317,16 @@ function ContactsPage() {
                     >
                       {contact.description ?? 'No relationship description yet'}
                     </span>
-                    {contact.tags.length > 0 ? (
-                      <span className="mt-1 flex flex-wrap gap-1">
+                    {contact.tags.length > 0 || contact.organization ? (
+                      <span className="mt-1 flex flex-wrap items-center gap-1">
+                        {contact.organization ? (
+                          <span
+                            title={`Organisation · ${contact.organization.domain}`}
+                            className="rounded-full border border-border px-1.5 py-0.5 text-[10.5px] text-muted-foreground"
+                          >
+                            {contact.organization.name}
+                          </span>
+                        ) : null}
                         {contact.tags.map((tag) => (
                           <span
                             key={tag}

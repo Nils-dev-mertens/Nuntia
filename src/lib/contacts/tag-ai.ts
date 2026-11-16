@@ -148,7 +148,8 @@ export async function suggestContactTags(
  *
  * Deliberately not mail: a tag is how the user files people, so the evidence is
  * the roles and relationships the app already understands. Proposing from a
- * thread would produce tags about one piece of work rather than about a group.
+ * thread would produce tags about one piece of work rather than about a kind of
+ * person.
  */
 export function tagSuggestionPrompt(source: TagSuggestionSource): string {
   const contacts = source.contacts
@@ -167,11 +168,12 @@ export function tagSuggestionPrompt(source: TagSuggestionSource): string {
 
   const prompt = [
     'You propose short filing tags for a personal address book.',
-    'A tag is a word the person will use to find and group contacts later — "investor", "school", "waiting on legal".',
+    'A tag is the label you would put on a contact in your phone: what kind of person this is — "client", "investor", "family", "supplier" — or a group of people such as a company or a team.',
     '',
     'Rules:',
     `- Propose at most ${CONTACT_TAG_LIMITS.perProposal} tags, each one to three words, lower case unless it is a proper noun.`,
     '- A tag has to describe a group that more than one of the contacts below belongs to; never one person on their own.',
+    '- A tag is never a service desk, a department mailbox, a product, a project, a thread or a topic. Do not propose words like "support", "billing", "newsletter" or "waiting on legal".',
     '- Do not repeat or re-spell a tag that already exists.',
     '- Never invent a company, a project or a name that is not in the list.',
     '- Reply with a JSON array of strings only — no explanation, no markdown fence.',

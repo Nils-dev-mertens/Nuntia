@@ -533,7 +533,9 @@ function TagsPage() {
               Vocabulary
             </h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              A description says what the tag is for, so a word added months ago
+              A tag labels a person — client, investor, family, the people at
+              one company — not a service desk, a thread or a topic. A
+              description says what the tag is for, so a word added months ago
               still reads the same way today. Every change to who carries a tag
               is recorded, and a description the app wrote is rewritten when
               that log moves past it. Renaming moves every contact with it;
@@ -651,7 +653,8 @@ function TagsPage() {
           {tags.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">
               No tags yet. Add one above, put one on a person from their contact
-              page, or let an automatic profile refresh propose one.
+              page, or let an automatic profile refresh file someone under a
+              word you already use.
             </p>
           ) : (
             <ul className="divide-y divide-border">

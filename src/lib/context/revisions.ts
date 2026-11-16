@@ -36,6 +36,7 @@ import type {
   ContactContextTextFields,
 } from '#/lib/contacts/context.ts'
 import { normaliseContactSummary } from '#/lib/contacts/context.ts'
+import { suggestOrganizationFocus } from '#/lib/contacts/organization-store.ts'
 import { applyAutoContactTags } from '#/lib/contacts/tags.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
 
@@ -102,6 +103,15 @@ export type AutoContextUpdate = {
     previousSummary?: string | null
     next: ContactContextProposal
   } | null
+  /**
+   * A company description the mail stated in its own words, if it stated one.
+   *
+   * Held apart from the contact on purpose: the company is shared by everyone at
+   * the domain, and this is only a suggestion. It waits on the organisations
+   * screen until the user keeps it, so the person's own note never carries a
+   * sentence about their employer that they did not choose.
+   */
+  organizationFocus?: { email: string; focus: string } | null
 }
 
 /**
@@ -251,8 +261,33 @@ export async function writeAutoContextUpdate(
   // lock: they are additive, they carry their own provenance, and a failure here
   // should cost the tags rather than the profile the user is waiting for.
   await writeProposedTags(owner, input)
+  await writeProposedOrganizationFocus(owner, input)
 
   return written
+}
+
+/**
+ * Queue a mail-stated company description as a suggestion.
+ *
+ * Never the accepted text: a signature is evidence, not a verdict, so it waits
+ * on the organisations screen. Best-effort for the same reason tags are — the
+ * profile has already been written, and this is the optional extra.
+ */
+async function writeProposedOrganizationFocus(
+  owner: string,
+  input: AutoContextUpdate,
+): Promise<void> {
+  const proposed = input.organizationFocus
+  if (!proposed) return
+
+  try {
+    await suggestOrganizationFocus(owner, proposed.email, proposed.focus)
+  } catch (error) {
+    console.error(
+      '[context] could not suggest the organisation description:',
+      error,
+    )
+  }
 }
 
 /**

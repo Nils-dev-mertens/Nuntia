@@ -25,8 +25,6 @@ export type ShellSection = {
   count: number
   /** The user's own label, rather than one of the four states. */
   custom?: boolean
-  /** Done is a filing decision, so its row stays quiet. */
-  muted?: boolean
 }
 
 /** "ND" from "nils@nuntia.app" — enough for a 32px avatar. */
@@ -42,6 +40,7 @@ export function AppShell({
   activeSection = '',
   onSelectSection,
   accounts,
+  doneCount = 0,
   onCompose,
   nav,
   profileEmail,
@@ -52,6 +51,8 @@ export function AppShell({
   activeSection?: string
   onSelectSection?: (key: string) => void
   accounts: Array<{ id: string; email: string }>
+  /** Handled mail, whose only home in the shell is the Done row in the nav. */
+  doneCount?: number
   /** Opens the compose overlay; the design puts it beside the list. */
   onCompose?: () => void
   /**
@@ -73,7 +74,7 @@ export function AppShell({
           <div className="flex items-center gap-2.5">
             <span
               aria-hidden="true"
-              className="flex size-[30px] items-center justify-center rounded-[6px] bg-primary font-display text-[15px] font-bold text-primary-foreground"
+              className="flex size-[30px] items-center justify-center bg-primary font-display text-[15px] font-bold text-primary-foreground"
             >
               N
             </span>
@@ -103,18 +104,17 @@ export function AppShell({
                   onClick={() => onSelectSection?.('all')}
                   icon={<Inbox aria-hidden="true" className="size-4" />}
                   label="Inbox"
-                  count={sections
-                    .filter((section) => !section.muted)
-                    .reduce((total, section) => total + section.count, 0)}
+                  count={sections.reduce(
+                    (total, section) => total + section.count,
+                    0,
+                  )}
                 />
                 <NavRow
                   active={activeSection === 'done'}
                   onClick={() => onSelectSection?.('done')}
                   icon={<Check aria-hidden="true" className="size-4" />}
                   label="Done"
-                  count={
-                    sections.find((section) => section.key === 'done')?.count
-                  }
+                  count={doneCount}
                 />
                 <Link
                   to="/contacts"
@@ -144,7 +144,6 @@ export function AppShell({
                         activeSection === section.key
                           ? 'bg-muted/70 font-semibold text-foreground'
                           : 'font-medium text-foreground/90 hover:bg-muted/40',
-                        section.muted && 'text-muted-foreground',
                       )}
                     >
                       <span
