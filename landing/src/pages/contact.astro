@@ -1,0 +1,129 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro'
+
+const appUrl = (import.meta.env.PUBLIC_APP_URL ?? 'http://localhost:3000').replace(
+  /\/$/,
+  '',
+)
+const contactEmail = 'nilsdevmertens@gmail.com'
+
+const topics = [
+  {
+    title: 'Get access',
+    body: 'The beta is invite-only. Use the request form to ask for a place.',
+    linkLabel: 'Request access',
+    href: `${appUrl}/request-access`,
+  },
+  {
+    title: 'Privacy and your data',
+    body: 'Ask for a copy, correction or deletion of the data Nuntia holds about you.',
+    linkLabel: 'Read the privacy policy',
+    href: '/privacy',
+  },
+  {
+    title: 'Security',
+    body: 'Tell us what you found, where it happened and how to reproduce it. Please leave other people’s mail out of the report.',
+    linkLabel: 'Report a security issue',
+    href: `mailto:${contactEmail}?subject=Security%20report`,
+  },
+  {
+    title: 'Everything else',
+    body: 'Bugs, missing features, or questions about how Nuntia reads a thread.',
+    linkLabel: 'Write to us',
+    href: `mailto:${contactEmail}`,
+  },
+]
+---
+
+<SiteLayout
+  title="Contact — Nuntia"
+  description="Write to Nuntia about the private beta, privacy and data requests, security reports, or anything else."
+  path="/contact"
+>
+  <main>
+    <article class="px-5 py-16 md:px-12 md:py-24">
+      <div class="mx-auto max-w-3xl">
+        <a
+          href="/"
+          class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors hover:text-foreground"
+        >
+          ← Back to Nuntia
+        </a>
+
+        <h1
+          class="mt-6 font-display text-[36px] leading-[1.05] font-medium tracking-[-0.03em] text-balance md:text-[52px]"
+        >
+          Contact
+        </h1>
+        <p class="mt-6 text-[15px] leading-7 text-muted-foreground md:text-base">
+          Nuntia is a small private beta. There is no ticket queue — one address
+          reaches the people who run it.
+        </p>
+
+        <div class="mt-10 border-y border-border py-8">
+          <a
+            href={`mailto:${contactEmail}`}
+            class="group inline-flex items-baseline gap-3 font-display text-2xl font-medium tracking-tight text-foreground md:text-3xl"
+          >
+            <span
+              class="underline decoration-border underline-offset-8 transition-colors group-hover:decoration-primary"
+            >
+              {contactEmail}
+            </span>
+            <span
+              aria-hidden="true"
+              class="text-primary transition-transform group-hover:translate-x-1"
+            >
+              →
+            </span>
+          </a>
+          <p class="mt-4 max-w-xl text-[14px] leading-7 text-muted-foreground">
+            Use this address for the beta, privacy requests and security reports.
+            If you already have an invitation, write from the address you signed
+            up with so we can find your account.
+          </p>
+        </div>
+
+        <div class="mt-10 grid gap-4 sm:grid-cols-2">
+          {
+            topics.map((topic) => (
+              <section class="flex flex-col rounded-[4px] border border-border bg-card p-5">
+                <h2 class="font-display text-lg font-medium tracking-tight">
+                  {topic.title}
+                </h2>
+                <p class="mt-2 flex-1 text-[14px] leading-7 text-muted-foreground">
+                  {topic.body}
+                </p>
+                <a
+                  href={topic.href}
+                  class="mt-4 font-mono text-[11px] tracking-[0.1em] text-foreground uppercase underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+                >
+                  {topic.linkLabel} →
+                </a>
+              </section>
+            ))
+          }
+        </div>
+
+        <p
+          class="mt-12 border-t border-border pt-6 text-[14px] leading-7 text-muted-foreground"
+        >
+          Looking for the rules? Read the{' '}
+          <a
+            class="text-foreground underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+            href="/privacy"
+          >
+            privacy policy
+          </a>{' '}
+          and the{' '}
+          <a
+            class="text-foreground underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+            href="/terms"
+          >
+            terms of use
+          </a>.
+        </p>
+      </div>
+    </article>
+  </main>
+</SiteLayout>

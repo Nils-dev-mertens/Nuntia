@@ -11,11 +11,12 @@ RUN bun install --frozen-lockfile
 
 COPY . .
 
-# Astro inlines PUBLIC_APP_URL into the Sign in and Request access links at build
-# time, so it is a build argument: changing the app's origin means rebuilding
-# this image, not restarting it.
+# Astro inlines both public origins at build time, so they are build arguments:
+# changing either origin means rebuilding this image, not restarting it.
 ARG PUBLIC_APP_URL=http://localhost:3000
+ARG PUBLIC_SITE_URL=https://nuntia.app
 ENV PUBLIC_APP_URL=$PUBLIC_APP_URL
+ENV PUBLIC_SITE_URL=$PUBLIC_SITE_URL
 RUN bun run build
 
 FROM nginx:1.29-alpine

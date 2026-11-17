@@ -1,0 +1,294 @@
+---
+import '../styles/global.css'
+import { absoluteUrl } from '../lib/site'
+
+interface Props {
+  title: string
+  description: string
+  /** Root-relative path of this page, for the canonical and share URLs. */
+  path: string
+  /** Shorter description for share cards; falls back to `description`. */
+  shareDescription?: string
+}
+
+const { title, description, path, shareDescription = description } = Astro.props
+
+const appUrl = (import.meta.env.PUBLIC_APP_URL ?? 'http://localhost:3000').replace(
+  /\/$/,
+  '',
+)
+const canonicalUrl = absoluteUrl(path)
+const shareImageUrl = absoluteUrl('/og.png')
+
+// Anchors point at the landing page when read from a legal page.
+const href = (hash: string) => (path === '/' ? hash : `/${hash}`)
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalUrl} />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0a0c" />
+
+    <meta property="og:site_name" content="Nuntia" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={shareDescription} />
+    <meta property="og:image" content={shareImageUrl} />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Nuntia — read email like chat. Keep your mail where it is."
+    />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={shareDescription} />
+    <meta name="twitter:image" content={shareImageUrl} />
+    <meta
+      name="twitter:image:alt"
+      content="Nuntia — read email like chat. Keep your mail where it is."
+    />
+    <noscript>
+      <style>
+        [data-reveal] {
+          opacity: 1;
+          transform: none;
+        }
+      </style>
+    </noscript>
+  </head>
+
+  <body>
+    <header
+      id="site-header"
+      class="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur-sm"
+    >
+      <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-5 md:px-12">
+        <a href="/" class="flex items-center gap-2.5" aria-label="Nuntia home">
+          <span
+            aria-hidden="true"
+            class="flex size-[30px] items-center justify-center rounded-[6px] bg-primary font-display text-[15px] font-bold text-primary-foreground"
+          >
+            N
+          </span>
+          <span class="font-display text-xl font-semibold tracking-tight">Nuntia</span>
+          <span
+            class="ml-1 hidden rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase sm:inline"
+          >
+            beta
+          </span>
+        </a>
+
+        <nav
+          aria-label="Landing"
+          class="hidden items-center gap-5 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase md:flex lg:gap-6"
+        >
+          <a class="transition-colors hover:text-foreground" href={href('#how')}>
+            How it works
+          </a>
+          <a class="transition-colors hover:text-foreground" href={href('#features')}>
+            Inbox
+          </a>
+          <a class="transition-colors hover:text-foreground" href={href('#people')}>
+            People
+          </a>
+          <a
+            class="hidden transition-colors hover:text-foreground lg:inline"
+            href={href('#tags')}
+          >
+            Tags
+          </a>
+          <a
+            class="hidden transition-colors hover:text-foreground lg:inline"
+            href={href('#ai')}
+          >
+            AI
+          </a>
+          <a class="transition-colors hover:text-foreground" href={href('#faq')}>FAQ</a>
+          <a
+            class="transition-colors hover:text-foreground"
+            href="/contact"
+            aria-current={path === '/contact' ? 'page' : undefined}
+          >
+            Contact
+          </a>
+        </nav>
+
+        <div class="flex items-center gap-2">
+          <a
+            href={`${appUrl}/sign-in`}
+            class="hidden h-9 items-center px-3 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors hover:text-foreground sm:inline-flex"
+          >
+            Sign in
+          </a>
+          <a
+            href={`${appUrl}/request-access`}
+            class="inline-flex h-9 items-center gap-2 rounded-[4px] bg-white px-4 text-[13px] font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
+          >
+            Request access
+            <span aria-hidden="true">→</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <slot />
+
+    <footer class="border-t border-border bg-[#08080a] px-5 pt-12 pb-8 md:px-12">
+      <div class="mx-auto max-w-7xl">
+        <div class="grid gap-10 md:grid-cols-12">
+          <div class="md:col-span-5">
+            <a href="/" class="flex items-center gap-2.5" aria-label="Nuntia home">
+              <span
+                aria-hidden="true"
+                class="flex size-6 items-center justify-center rounded-[4px] bg-primary font-display text-[11px] font-bold text-primary-foreground"
+              >
+                N
+              </span>
+              <span class="font-display text-lg font-semibold tracking-tight">Nuntia</span>
+            </a>
+            <p class="mt-3 max-w-sm text-[13px] leading-6 text-muted-foreground">
+              A mail client for Gmail and Outlook that reads threads as conversations and
+              keeps notes on the people you write to. Your provider keeps the mail; you
+              keep the last word.
+            </p>
+            <p
+              class="mt-4 flex items-center gap-2 font-mono text-[11px] tracking-[0.08em] text-muted-foreground"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+              Private beta · invite only
+            </p>
+          </div>
+
+          <div class="md:col-span-2">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+              Product
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <a class="transition-colors hover:text-foreground" href={href('#what')}>
+                What it is
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#features')}>
+                Inbox
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#people')}>
+                People
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#tags')}>
+                Tags
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#ai')}>AI</a>
+            </div>
+          </div>
+
+          <div class="md:col-span-2">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+              Get started
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <a
+                class="transition-colors hover:text-foreground"
+                href={`${appUrl}/request-access`}
+              >
+                Request access
+              </a>
+              <a class="transition-colors hover:text-foreground" href={`${appUrl}/sign-in`}>
+                Sign in
+              </a>
+              <a class="transition-colors hover:text-foreground" href={`${appUrl}/join`}>
+                Enter an invite
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#start')}>
+                What you need
+              </a>
+              <a class="transition-colors hover:text-foreground" href={href('#limits')}>
+                Not there yet
+              </a>
+            </div>
+          </div>
+
+          <div class="md:col-span-3">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+              What it works with
+            </p>
+            <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                Gmail
+              </span>
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+                Outlook · Microsoft 365
+              </span>
+              <span class="flex items-center gap-2">
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+                Anthropic · OpenAI · Gemini
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="mt-10 flex flex-col gap-3 border-t border-border pt-5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
+        >
+          <p>© 2026 Nuntia</p>
+          <div class="flex items-center gap-4">
+            <a class="transition-colors hover:text-foreground" href="/contact">Contact</a>
+            <a class="transition-colors hover:text-foreground" href="/privacy">Privacy</a>
+            <a class="transition-colors hover:text-foreground" href="/terms">Terms</a>
+          </div>
+          <p>One file · your keys · nothing sent without you</p>
+        </div>
+      </div>
+    </footer>
+
+    <script>
+      /*
+       * Two small jobs, no framework. Reveal every `[data-reveal]` element the
+       * first time it enters the viewport, and let the header change once the
+       * page has scrolled. Reduced motion shows everything immediately.
+       */
+      const reducedMotion = window.matchMedia(
+        '(prefers-reduced-motion: reduce)',
+      ).matches
+      const revealables = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-reveal]'),
+      )
+
+      if (reducedMotion || !('IntersectionObserver' in window)) {
+        revealables.forEach((node) => node.classList.add('is-visible'))
+      } else {
+        const revealer = new IntersectionObserver(
+          (entries) => {
+            for (const entry of entries) {
+              if (!entry.isIntersecting) continue
+              entry.target.classList.add('is-visible')
+              revealer.unobserve(entry.target)
+            }
+          },
+          { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
+        )
+
+        revealables.forEach((node) => revealer.observe(node))
+      }
+
+      const header = document.getElementById('site-header')
+      if (header) {
+        const updateHeader = () =>
+          header.classList.toggle('is-scrolled', window.scrollY > 24)
+        updateHeader()
+        window.addEventListener('scroll', updateHeader, { passive: true })
+      }
+    </script>
+  </body>
+</html>

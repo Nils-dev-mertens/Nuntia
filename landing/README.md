@@ -32,14 +32,19 @@ it.
 ```bash
 cd landing
 bun install
-cp .env.example .env        # set PUBLIC_APP_URL to where the app runs
+cp .env.example .env        # set both origins for your deployment
 bun run dev                 # http://localhost:4321
 bun run build               # static files in landing/dist
 bun run preview
 ```
 
-`PUBLIC_APP_URL` is read at build time for the **Sign in** and **Request access**
-links. Without it they point at `http://localhost:3000`.
+Both variables are read at build time. `PUBLIC_APP_URL` fills the **Sign in** and
+**Request access** links; without it they point at `http://localhost:3000`.
+`PUBLIC_SITE_URL` is the landing site's own origin and is used in the canonical
+link, the Open Graph/Twitter image URL, `robots.txt` and `sitemap.xml`; it falls
+back to `https://nuntia.app`.
+
+The share card is `public/og.png` (1200×630).
 
 ## Deploying
 

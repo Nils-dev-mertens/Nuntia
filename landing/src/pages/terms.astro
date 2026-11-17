@@ -1,0 +1,161 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro'
+
+const updated = '17 November 2026'
+const contactEmail = 'nilsdevmertens@gmail.com'
+
+const sections = [
+  {
+    title: 'The beta',
+    body: [
+      'Nuntia is in private beta. Access is approved by hand and is limited to the address that requested it. Features can change or be withdrawn while the beta runs.',
+      'There is no price and no payment step. The beta is not a promise of a paid plan, a launch date or continued availability.',
+    ],
+  },
+  {
+    title: 'Your mailbox',
+    body: [
+      'Connect only mailboxes you are allowed to use. You are responsible for the accounts you connect and for what is sent from them.',
+      'Nuntia asks for read, send and mark-read access. It cannot delete mail, and it does not replace Gmail or Outlook as the place where your mail is kept.',
+    ],
+  },
+  {
+    title: 'Acceptable use',
+    body: ['Use the beta as a mail client, not as a way to reach people who did not ask to hear from you.'],
+    bullets: [
+      'No unlawful, abusive, deceptive or spam mail.',
+      'No attempts to access another person’s account or data.',
+      'No probing, overloading or disrupting the service or its host.',
+      'No reselling beta access or the service itself.',
+      'No using the AI helpers in a way that breaks your provider’s terms.',
+    ],
+  },
+  {
+    title: 'AI output',
+    body: [
+      'The AI helpers return suggestions: scores, topics, notes, tags and draft replies. They can be wrong. You review and send; Nuntia never sends by itself and never marks a thread Done on its own.',
+      'You are responsible for what you send and for the instructions you give the model.',
+    ],
+  },
+  {
+    title: 'Your content',
+    body: [
+      'Your mail, notes and tags remain yours. You give the operator only the permission needed to run the beta: store, read, search, display and send through your connected accounts.',
+      'We do not use your mail to train models or to advertise.',
+    ],
+  },
+  {
+    title: 'Availability and data loss',
+    body: [
+      'The beta is provided as it is. There is no uptime commitment. Back up anything you cannot lose, and keep the original mail in Gmail or Outlook.',
+      'Nuntia can be unavailable, and a beta can lose data.',
+    ],
+  },
+  {
+    title: 'Running it yourself',
+    body: [
+      'The project can be self-hosted. If you run your own copy, you are responsible for its host, its data file, its keys, its backups and its compliance.',
+    ],
+  },
+  {
+    title: 'Third-party services',
+    body: [
+      'Nuntia depends on Google and Microsoft for mail, and on Anthropic, OpenAI or Google if you enable AI. Their terms and availability apply to their part of the service.',
+    ],
+  },
+  {
+    title: 'Ending access',
+    body: [
+      'You can stop using the beta at any time. Access can be suspended or ended if these terms are broken, if the beta closes, or if continuing would put the service or others at risk.',
+      'When access ends, Nuntia’s local copy can be removed. Mail in Gmail or Outlook is unaffected.',
+    ],
+  },
+  {
+    title: 'Disclaimers and liability',
+    body: [
+      'The beta is provided without warranties to the extent the law allows. The operator is not liable for indirect or consequential loss, lost profits, or loss of mail or data that also exists with your provider, again to the extent the law allows.',
+      'Nothing in these terms limits liability that cannot be limited by law.',
+    ],
+  },
+  {
+    title: 'Changes to these terms',
+    body: [
+      'The date at the top changes when these terms change. Continuing to use the beta after a change means accepting the new terms.',
+    ],
+  },
+]
+---
+
+<SiteLayout
+  title="Terms — Nuntia"
+  description="The terms for the Nuntia private beta: access, acceptable use, AI suggestions, your content, availability and liability."
+  path="/terms"
+>
+  <main>
+    <article class="px-5 py-16 md:px-12 md:py-24">
+      <div class="mx-auto max-w-3xl">
+        <a
+          href="/"
+          class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors hover:text-foreground"
+        >
+          ← Back to Nuntia
+        </a>
+
+        <h1
+          class="mt-6 font-display text-[36px] leading-[1.05] font-medium tracking-[-0.03em] text-balance md:text-[52px]"
+        >
+          Terms of use
+        </h1>
+        <p
+          class="mt-3 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase"
+        >
+          Last updated {updated}
+        </p>
+        <p class="mt-6 text-[15px] leading-7 text-muted-foreground md:text-base">
+          These terms cover the hosted Nuntia private beta and the use of this
+          landing page. By requesting access, accepting an invitation or using the
+          beta, you agree to them.
+        </p>
+
+        <div class="mt-12 flex flex-col gap-8">
+          {
+            sections.map((section) => (
+              <section class="border-t border-border pt-6">
+                <h2 class="font-display text-xl font-medium tracking-tight md:text-2xl">
+                  {section.title}
+                </h2>
+                <div class="mt-3 flex flex-col gap-3 text-[14px] leading-7 text-muted-foreground">
+                  {section.body.map((paragraph) => (
+                    <p>{paragraph}</p>
+                  ))}
+                  {section.bullets && (
+                    <ul class="flex flex-col gap-2">
+                      {section.bullets.map((item) => (
+                        <li class="flex gap-3">
+                          <span
+                            aria-hidden="true"
+                            class="mt-2.5 size-1.5 shrink-0 rounded-full bg-primary"
+                          />
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </section>
+            ))
+          }
+        </div>
+
+        <p
+          class="mt-12 border-t border-border pt-6 text-[14px] leading-7 text-muted-foreground"
+        >
+          Questions about these terms? Write to{' '}
+          <a
+            class="text-foreground underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+            href={`mailto:${contactEmail}`}>{contactEmail}</a>.
+        </p>
+      </div>
+    </article>
+  </main>
+</SiteLayout>

@@ -119,19 +119,20 @@ body {
 }
 
 /*
- * The hero demo starts at 82% and grows to the viewport as the page scrolls.
- * The same number lives in `HeroVisual` as DEMO_START_SCALE; this rule only sets
- * the first paint so the card does not flash at full size before hydration.
- * Without scripting there is no scroll driver, so it stays full size — and the
+ * The hero demo starts tilted back at 84% and squares up to the viewport as the
+ * page scrolls. The same numbers live in `HeroVisual`; this rule only sets the
+ * first paint so the card does not flash upright before hydration. Without
+ * scripting there is no scroll driver, so it stays flat and full size — and the
  * media query is what keeps that true without inline styles on the element.
  */
 .hero-demo-frame {
   transform: scale(1);
+  transform-origin: 50% 0%;
 }
 
 @media (scripting: enabled) and (prefers-reduced-motion: no-preference) {
   .hero-demo-frame {
-    transform: scale(0.82);
+    transform: perspective(2400px) translateY(8%) rotateX(18deg) scale(0.84);
   }
 }
 

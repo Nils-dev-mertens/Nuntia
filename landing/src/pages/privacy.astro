@@ -1,0 +1,170 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro'
+
+const updated = '17 November 2026'
+const contactEmail = 'nilsdevmertens@gmail.com'
+
+const sections = [
+  {
+    title: 'What this policy covers',
+    body: [
+      'This policy covers the Nuntia private beta and this landing page. It describes what Nuntia stores, where that data lives, who it reaches, and what you can ask the operator to do with it.',
+      'Nuntia can also be run by you. If you run your own copy, you are its operator and decide how its data file and keys are handled. In that case this policy describes how the software behaves, not a service we run.',
+    ],
+  },
+  {
+    title: 'What Nuntia stores',
+    body: [
+      'Nuntia keeps only what it needs to show, search and answer your mail:',
+    ],
+    bullets: [
+      'The mail you connect: message contents, headers, labels and attachments that Nuntia reads through Gmail or Outlook.',
+      'The access it asks for: read mail, send mail and mark mail read. Nuntia does not request permission to delete.',
+      'Your sign-ins: Google or Microsoft OAuth tokens, and an AI provider key if you add one.',
+      'What you write: notes about people, tags, importance ratings, sections, and draft text you keep.',
+      'The address you used to request an invitation, and the state of that invitation.',
+    ],
+  },
+  {
+    title: 'Where the mail lives',
+    body: [
+      'Google or Microsoft remains the source of truth and keeps the original message. Nuntia keeps a copy in one file on the machine where it runs; that local copy is what makes reading and search fast.',
+      'Sign-ins and AI keys are encrypted at rest with a key held by the operator. If you run Nuntia yourself, that operator is you.',
+    ],
+  },
+  {
+    title: 'The AI helpers',
+    body: [
+      'The AI helpers are off unless you connect your own key with Anthropic, OpenAI or Google. When you use a helper, the part of the mail it needs is sent to that provider under your account. Nuntia does not train models on your mail.',
+      'Nuntia’s AI log records the service, model, outcome and duration of each call. It does not record the message text. What the provider does with a request is governed by your agreement with that provider.',
+    ],
+  },
+  {
+    title: 'The landing page',
+    body: [
+      'This site is static HTML. It sets no cookies, runs no analytics and has no tracking pixels. The inbox preview on the landing page is synthetic and runs in your browser; what you type into it is not sent anywhere.',
+      'The page loads its fonts from Google Fonts, so your browser contacts Google when the page loads. The host that serves the site may keep ordinary access logs such as IP address, user agent and requested URL.',
+    ],
+  },
+  {
+    title: 'Who it is shared with',
+    body: ['Nuntia does not sell your data and does not share it for advertising.'],
+    bullets: [
+      'Google or Microsoft, to read and send the mail you connected.',
+      'Your AI provider, when you run a helper with your own key.',
+      'The hosting provider that runs the beta and this landing page.',
+      'Authorities, where the law requires it.',
+    ],
+  },
+  {
+    title: 'How long it is kept',
+    body: [
+      'Mail and notes stay for as long as your beta account is active. Removing Nuntia’s data file removes its copy; it does not remove anything from Gmail or Outlook.',
+      'Invitation records are kept while the beta runs. Server logs are kept only as long as the host needs them.',
+    ],
+  },
+  {
+    title: 'Security',
+    body: [
+      'Sign-ins and AI keys are encrypted at rest. Message HTML is cleaned before it is shown: scripts are removed and the message is isolated from the rest of the page.',
+      'No service can promise perfect security. If you find a problem, tell us through the address below.',
+    ],
+  },
+  {
+    title: 'Your choices',
+    body: [],
+    bullets: [
+      'Disconnect a mailbox, which stops Nuntia reading or sending through it.',
+      'Delete notes, tags, sections and ratings you created.',
+      'Ask for a copy, correction or deletion of the data Nuntia holds about you.',
+      'Run your own copy of Nuntia and keep the data yourself.',
+    ],
+  },
+  {
+    title: 'Children',
+    body: [
+      'Nuntia is not intended for anyone under 16, and the beta is not offered to them.',
+    ],
+  },
+  {
+    title: 'Changes',
+    body: [
+      'If this policy changes, the date at the top changes with it. Material changes will be mentioned in the beta.',
+    ],
+  },
+]
+---
+
+<SiteLayout
+  title="Privacy policy — Nuntia"
+  description="How Nuntia stores mail, sign-ins and AI keys, where that data lives, who it reaches, and the choices you have."
+  path="/privacy"
+>
+  <main>
+    <article class="px-5 py-16 md:px-12 md:py-24">
+      <div class="mx-auto max-w-3xl">
+        <a
+          href="/"
+          class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase transition-colors hover:text-foreground"
+        >
+          ← Back to Nuntia
+        </a>
+
+        <h1
+          class="mt-6 font-display text-[36px] leading-[1.05] font-medium tracking-[-0.03em] text-balance md:text-[52px]"
+        >
+          Privacy policy
+        </h1>
+        <p
+          class="mt-3 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase"
+        >
+          Last updated {updated}
+        </p>
+        <p class="mt-6 text-[15px] leading-7 text-muted-foreground md:text-base">
+          Your provider keeps the mail. Nuntia keeps a working copy, the notes you
+          write and the keys it needs to connect. This page says exactly what that
+          means.
+        </p>
+
+        <div class="mt-12 flex flex-col gap-8">
+          {
+            sections.map((section) => (
+              <section class="border-t border-border pt-6">
+                <h2 class="font-display text-xl font-medium tracking-tight md:text-2xl">
+                  {section.title}
+                </h2>
+                <div class="mt-3 flex flex-col gap-3 text-[14px] leading-7 text-muted-foreground">
+                  {section.body.map((paragraph) => (
+                    <p>{paragraph}</p>
+                  ))}
+                  {section.bullets && (
+                    <ul class="flex flex-col gap-2">
+                      {section.bullets.map((item) => (
+                        <li class="flex gap-3">
+                          <span
+                            aria-hidden="true"
+                            class="mt-2.5 size-1.5 shrink-0 rounded-full bg-primary"
+                          />
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </section>
+            ))
+          }
+        </div>
+
+        <p
+          class="mt-12 border-t border-border pt-6 text-[14px] leading-7 text-muted-foreground"
+        >
+          Questions about this policy, or a request about your data? Write to{' '}
+          <a
+            class="text-foreground underline decoration-border underline-offset-4 transition-colors hover:decoration-primary"
+            href={`mailto:${contactEmail}`}>{contactEmail}</a>.
+        </p>
+      </div>
+    </article>
+  </main>
+</SiteLayout>

@@ -130,13 +130,18 @@ function usePrefersReducedMotion() {
 /**
  * The hero's scroll gesture.
  *
- * The demo is laid out at exactly one viewport and starts scaled down, so the
- * whole inbox fits the screen when the reader has scrolled through the stage.
- * Scaling a fixed layout is one composited transform per frame; animating width
- * and height instead would re-layout the entire inbox on every scroll event.
+ * The demo is laid out at exactly one viewport and starts tilted back and
+ * scaled down, like a screen seen at an angle, then squares up to full width as
+ * the reader scrolls through the stage. All of it is one composited transform
+ * per frame; animating width and height instead would re-layout the entire
+ * inbox on every scroll event.
  */
-const DEMO_START_SCALE = 0.82
-/** How much of the stage is spent growing, before it holds at full size. */
+const DEMO_START_SCALE = 0.84
+/** Degrees of backward tilt at the top of the stage, removed on the way down. */
+const DEMO_START_TILT = 18
+/** Vanishing distance for that tilt. Larger is flatter. */
+const DEMO_PERSPECTIVE = 2400
+/** How much of the stage is spent straightening up, before it holds full size. */
 const DEMO_GROWTH_SHARE = 0.85
 
 const INITIAL_THREADS: Thread[] = [
@@ -463,8 +468,14 @@ export default function HeroVisual() {
       const growth = travel * DEMO_GROWTH_SHARE
       const progress =
         growth <= 0 ? 1 : Math.min(1, Math.max(0, -rect.top / growth))
-      const scale = DEMO_START_SCALE + (1 - DEMO_START_SCALE) * progress
-      frame.style.transform = `scale(${scale.toFixed(4)})`
+      // Smoothstep, so the tilt comes away without a noticeable start or stop.
+      const eased = progress * progress * (3 - 2 * progress)
+      const scale = DEMO_START_SCALE + (1 - DEMO_START_SCALE) * eased
+      const tilt = DEMO_START_TILT * (1 - eased)
+      // Scaling about the top edge leaves a gap below, so the frame also sits a
+      // little lower at the start and rises as it squares up.
+      const drop = (1 - eased) * 8
+      frame.style.transform = `perspective(${DEMO_PERSPECTIVE}px) translateY(${drop.toFixed(2)}%) rotateX(${tilt.toFixed(2)}deg) scale(${scale.toFixed(4)})`
     }
 
     const schedule = () => {
@@ -624,6 +635,23 @@ export default function HeroVisual() {
     setNotice('Draft moved into the reply box — edit it or send it yourself')
   }
 
+  // Sending is simulated: the reply joins the thread as a sent message, but
+  // there is no mailbox behind this page. The copy around the composer says so.
+  const sendReply = () => {
+    const body = reply.trim()
+    if (!active || !body) return
+    updateActive((thread) => ({
+      ...thread,
+      messages: [
+        ...thread.messages,
+        { who: 'Me', initials: 'ME', time: 'Now', body },
+      ],
+      draft: null,
+    }))
+    setReply('')
+    setNotice('Added to the thread — this demo does not send real mail')
+  }
+
   const resetDemo = () => {
     setThreads(resetThreads())
     setSection('all')
@@ -681,7 +709,7 @@ export default function HeroVisual() {
 
         <div
           ref={frameRef}
-          className="hero-demo-frame flex h-full w-full origin-center flex-col will-change-transform"
+          className="hero-demo-frame flex h-full w-full origin-top flex-col will-change-transform"
         >
           <motion.div
             initial={reduceMotion ? false : { opacity: 0, y: 26 }}
@@ -691,7 +719,7 @@ export default function HeroVisual() {
                 ? { duration: 0 }
                 : { duration: 0.7, ease: [0.22, 1, 0.36, 1] }
             }
-            className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-card/95 text-left backdrop-blur-sm"
+            className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-[18px] rounded-b-lg border border-white/15 bg-card/95 text-left shadow-[0_40px_120px_-48px_rgba(0,0,0,0.9)] backdrop-blur-sm"
           >
             <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[214px_minmax(0,1fr)_minmax(0,1.15fr)]">
               {/**
@@ -711,7 +739,7 @@ export default function HeroVisual() {
                     Nuntia
                   </span>
                   <span
-                    title="Synthetic mail. Nothing is sent from this page."
+                    title="Synthetic mail. Replies stay on this page."
                     className="ml-auto rounded-[2px] border border-border px-1 font-mono text-[8px] tracking-[0.1em] text-muted-foreground uppercase"
                   >
                     demo
@@ -720,7 +748,9 @@ export default function HeroVisual() {
 
                 <button
                   type="button"
-                  onClick={() => setNotice('Nothing is sent from this page.')}
+                  onClick={() =>
+                    setNotice('Compose is not in this demo — open a thread to reply.')
+                  }
                   className="mt-3 flex h-[34px] items-center justify-center gap-1.5 rounded-[4px] bg-white text-[12px] font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
                 >
                   <PenLine aria-hidden="true" className="size-3.5" />
@@ -1202,29 +1232,44 @@ export default function HeroVisual() {
                     </div>
 
                     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-                      {active.messages.map((message) => (
-                        <div
-                          key={`${message.who}-${message.time}`}
-                          className="flex gap-2"
-                        >
-                          <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted font-display text-[8px] font-semibold">
-                            {message.initials}
-                          </span>
-                          <div className="min-w-0 rounded-[5px] bg-muted/40 px-2.5 py-2">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[11px] font-medium">
-                                {message.who}
-                              </span>
-                              <span className="font-mono text-[8px] text-muted-foreground">
-                                {message.time}
-                              </span>
+                      {active.messages.map((message, index) => {
+                        const mine = message.who === 'Me'
+                        return (
+                          <div
+                            key={`${message.who}-${index}`}
+                            className={`flex gap-2 ${mine ? 'flex-row-reverse' : ''}`}
+                          >
+                            <span
+                              className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full font-display text-[8px] font-semibold ${
+                                mine
+                                  ? 'bg-primary text-primary-foreground'
+                                  : 'bg-muted'
+                              }`}
+                            >
+                              {message.initials}
+                            </span>
+                            <div
+                              className={`min-w-0 max-w-[85%] rounded-[5px] px-2.5 py-2 ${
+                                mine
+                                  ? 'border border-primary/25 bg-primary/10'
+                                  : 'bg-muted/40'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] font-medium">
+                                  {message.who}
+                                </span>
+                                <span className="font-mono text-[8px] text-muted-foreground">
+                                  {message.time}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-[12px] leading-5 text-foreground/90">
+                                {message.body}
+                              </p>
                             </div>
-                            <p className="mt-1 text-[12px] leading-5 text-foreground/90">
-                              {message.body}
-                            </p>
                           </div>
-                        </div>
-                      ))}
+                        )
+                      })}
 
                       <AnimatePresence initial={false}>
                         {active.draft && (
@@ -1323,13 +1368,22 @@ export default function HeroVisual() {
                       />
                       <div className="mt-1.5 flex items-center justify-between gap-2">
                         <span className="font-mono text-[8px] text-muted-foreground">
-                          Nothing is sent from this page.
+                          Demo only — replies stay on this page.
                         </span>
                         <button
                           type="button"
-                          disabled
-                          title="The demo does not send mail"
-                          className="flex cursor-not-allowed items-center gap-1 rounded-[3px] bg-primary/40 px-2 py-1 font-mono text-[8px] tracking-[0.06em] text-primary-foreground uppercase"
+                          onClick={sendReply}
+                          disabled={!reply.trim()}
+                          title={
+                            reply.trim()
+                              ? 'Add the reply to this demo thread'
+                              : 'Write a reply first'
+                          }
+                          className={`flex items-center gap-1 rounded-[3px] px-2 py-1 font-mono text-[8px] tracking-[0.06em] uppercase transition-colors ${
+                            reply.trim()
+                              ? 'bg-primary text-primary-foreground hover:opacity-90'
+                              : 'cursor-not-allowed bg-primary/40 text-primary-foreground'
+                          }`}
                         >
                           <Send aria-hidden="true" className="size-2.5" />
                           Send
