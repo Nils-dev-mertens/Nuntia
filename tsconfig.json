@@ -1,5 +1,11 @@
 {
   "include": ["**/*.ts", "**/*.tsx", "eslint.config.js", "prettier.config.js", "vite.config.js"],
+
+  // The landing site is its own package with its own dependencies (Astro,
+  // motion), installed separately. Typechecking it from here failed on a fresh
+  // checkout because `motion/react` was never installed at the root; its own
+  // tsconfig and CI step cover it instead.
+  "exclude": ["landing", "node_modules", "dist"],
   
   "compilerOptions": {
     "target": "ES2022",

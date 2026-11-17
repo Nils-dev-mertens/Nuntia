@@ -2,14 +2,20 @@
 /**
  * The landing page.
  *
- * Layout from `stitch/` (hero with a workbench, four alternating feature rows,
- * principles, FAQ, closing call to action), copy from
- * `docs/landing-page-info.md`. Everything here is static HTML; the only island
- * is the hero visual, because it is the only thing that responds to a click.
+ * The hero and its interactive demo are kept from the Stitch layout. Everything
+ * below it is written as information rather than as a pitch: what Nuntia is and
+ * what it needs, how a thread is read, what it knows about the people you write
+ * to, what the optional AI helpers do, where the mail lives, what is not built
+ * yet, and what you need to start.
  *
- * The page deliberately leaves out the mock-up's badges (SOC 2, "zero
- * training"), because the product has neither, and it does not call anything
- * "real-time", "end-to-end encrypted" or "free forever".
+ * Style follows `stitch/DESIGN.md`: obsidian canvas, hairline rules, flat
+ * blocks, one cadmium accent, Space Grotesk headings and JetBrains Mono labels.
+ * The mock-up's gradients, badges (SOC 2, "zero training") and "real-time" or
+ * "end-to-end encrypted" claims are deliberately absent, because the product has
+ * none of them. Every claim below comes from `docs/landing-page-info.md` and the
+ * contacts features in `src/lib/contacts/`.
+ *
+ * Everything here is static HTML; the only island is the hero visual.
  */
 import '../styles/global.css'
 import HeroVisual from '../components/HeroVisual'
@@ -19,38 +25,63 @@ const appUrl = (import.meta.env.PUBLIC_APP_URL ?? 'http://localhost:3000').repla
   '',
 )
 
+const specs = [
+  { label: 'Works with', value: 'Gmail and Outlook (Microsoft 365 or outlook.com). One or more addresses, in one inbox.' },
+  { label: 'Runs in', value: 'The browser. No phone app, no desktop app, no extension.' },
+  { label: 'Status', value: 'Private beta. You request access, a person reviews it, and the invite link works once.' },
+  { label: 'Price', value: 'None set. There is no payment step anywhere in the app.' },
+  { label: 'AI', value: 'Optional. You connect your own account with Anthropic, OpenAI or Google.' },
+  { label: 'Storage', value: 'One file on the machine where Nuntia runs, plus the original in Gmail or Outlook.' },
+  { label: 'Permissions', value: 'Read mail, send mail, mark it read. Nuntia cannot delete anything.' },
+]
+
+const audience = [
+  {
+    title: 'Two or more addresses',
+    body: 'A work Gmail and a personal Outlook, read in one place. When the same conversation reaches both, it shows up once.',
+  },
+  {
+    title: 'A thread pile',
+    body: 'The inbox is a list of threads, and the real question is whether this one needs an answer from you. Four states answer that.',
+  },
+  {
+    title: 'AI, on your terms',
+    body: 'You want help, but with your own key, seeing the result before it is used, and keeping the last word.',
+  },
+]
+
 const steps = [
   {
     number: '01',
     title: 'Connect a mailbox',
-    body: 'Sign in with Google or Microsoft and approve read and send access. Nuntia brings in the last thirty days and keeps a local copy so reading and search are quick.',
+    body: 'Sign in with Google or Microsoft and approve read, send and mark-read access. The first connection brings in the last thirty days; older mail is not fetched.',
   },
   {
     number: '02',
     title: 'Let the rules sort',
-    body: 'Built-in rules put each thread in one of four states. If you add an AI key, it can score importance and pick up the cases the rules cannot decide.',
+    body: 'Built-in rules place each thread in one of four states, and they win where they apply. An optional AI key adds importance, urgency, and the cases the rules cannot decide. Your own choice outranks both.',
   },
   {
     number: '03',
-    title: 'Reply when you are ready',
-    body: 'Your greeting, signature and the quoted original come back automatically. A suggested draft waits in the box for you to edit — nothing is sent on its own.',
+    title: 'Read, then reply',
+    body: 'Your greeting, signature and the quoted original are put back on send. A suggested reply, if you ask for one, waits in the box to edit. Nothing is sent without you.',
   },
 ]
 
 const triage = [
   {
     state: 'Needs action',
-    what: 'Ana asked for the monthly update',
+    what: 'Priya needs the signed NDA resent',
     tone: 'border-primary/40 bg-primary/10 text-primary',
   },
   {
     state: 'Waiting for reply',
-    what: 'Invoice sent, payment in thirty days',
+    what: 'Quote sent to Northwind; answer due in two weeks',
     tone: 'border-warning/40 bg-warning/10 text-warning',
   },
   {
     state: 'Information',
-    what: 'Design notes, no decision needed',
+    what: 'Site notes from the contractor; no decision needed',
     tone: 'border-border bg-muted text-muted-foreground',
   },
   {
@@ -61,9 +92,107 @@ const triage = [
 ]
 
 const searchHits = [
-  { subject: 'Seed round — monthly update', who: 'Ana de Vries', tag: 'investor' },
-  { subject: 'Board pack v3 (draft)', who: 'Me', tag: 'internal' },
-  { subject: 'Q3 numbers from the accountant', who: 'Piet Bakker', tag: 'supplier' },
+  { subject: 'NDA — signed copy for Northwind', who: 'Priya Raman', tag: 'client' },
+  { subject: 'Retainer quote, first quarter', who: 'Piet Bakker', tag: 'supplier' },
+  { subject: 'Monthly update to investors', who: 'Ana de Vries', tag: 'investor' },
+]
+
+const peopleNotes = [
+  {
+    title: 'A profile you write, or one Nuntia drafts',
+    body: 'Role and company, how you know the person, what you usually talk about, what they are working on, and a sentence or two summarising your history. Nuntia can draft it from the correspondence; you edit it.',
+  },
+  {
+    title: 'A change log with Undo',
+    body: 'Every note Nuntia writes is stored as a revision with what changed and an Undo, the last twenty per person. It never overwrites a field you wrote yourself.',
+  },
+  {
+    title: 'Importance from 1 to 10',
+    body: 'Your rating counts when Nuntia decides how much attention a thread deserves. That is one of the few things a person can tell the app that the mail cannot.',
+  },
+  {
+    title: 'A directory that works like one',
+    body: 'Alphabetical, not by recency. Press / to search, filter by tag or by company, and open one person to see every stored thread they appear on and their colleagues at the same address.',
+  },
+  {
+    title: 'Companies come from the address',
+    body: 'Addresses at one domain are grouped, and the one-line description of what the company does is yours — or one you accept from a signature in the mail. It is never guessed from the domain.',
+  },
+  {
+    title: 'A desk is not a person',
+    body: 'support@, billing@ and info@ never get a person tag automatically. The mail stays in the inbox; only the label meant for a person is withheld.',
+  },
+]
+
+const aiCards = [
+  {
+    label: 'The decision helper',
+    title: 'Scores, not sentences',
+    body: 'For each thread it asks how important this is, how urgent, whether a reply is possible at all, and which state it belongs in when the rules cannot tell. It returns a score, not prose.',
+    footnote: 'Importance · urgency · replyability',
+    accent: 'bg-primary',
+  },
+  {
+    label: 'The writing helper',
+    title: 'Words, when you ask',
+    body: 'It names what a thread is about, drafts the notes about a person, suggests tags and writes tag descriptions, and proposes a reply. All of it lands as text you can edit.',
+    footnote: 'Topic · notes · tags · drafts',
+    accent: 'bg-warning',
+  },
+  {
+    label: 'The boundaries',
+    title: 'Rules first, you last',
+    body: 'The helpers never send, never decide that a thread is Done, and never override the built-in rules. The AI log records the service, model, outcome and duration — never the mail.',
+    footnote: 'No auto-send · no message text in logs',
+    accent: 'bg-success',
+  },
+]
+
+const privacyCards = [
+  {
+    title: 'Your provider stays the source of truth',
+    body: 'Mail is read and sent through Gmail or Outlook. Nuntia keeps a copy in one file on the machine where it runs, which is what makes reading and search fast — and it cannot delete anything, there or in your mailbox.',
+    footnote: 'Read and send access · no delete',
+    accent: 'bg-primary',
+  },
+  {
+    title: 'Keys are locked, not shared',
+    body: 'Your Google or Microsoft sign-in and your AI key are encrypted at rest with a key the person running Nuntia holds. Mail is cleaned before it is shown: scripts removed, and the message walled off from the rest of the page.',
+    footnote: 'Encrypted at rest · sanitised mail',
+    accent: 'bg-warning',
+  },
+  {
+    title: 'What leaves the machine, and when',
+    body: 'Mail is read from and sent to Google or Microsoft. Text goes to your AI provider only when a helper is switched on. A Gravatar photo is requested only if you turn photos on. Nothing else is sent anywhere.',
+    footnote: 'Three destinations, no tracking',
+    accent: 'bg-success',
+  },
+]
+
+const limited = [
+  'Only Gmail and Outlook. No other mail providers.',
+  'No spam handling, spam rules or deleted-mail view.',
+  'No phone app and no desktop app. It runs in the browser.',
+  'No shared workspace for a team. Everyone has their own.',
+  'No calendar, and no address book imported from Google or Microsoft.',
+  'No scheduled sending and no automatic replies.',
+  'AI needs your own key. There is no included model.',
+  'Tags show on threads but do not change a suggested reply yet; only the topic and your goal do.',
+  'Mail is not instant unless Gmail’s extra setup is done.',
+]
+
+const betaSteps = [
+  'You ask for access with a short form.',
+  'A person running the beta reviews the request and approves it.',
+  'You receive an email with a link that works once.',
+  'You choose a password, connect a mailbox, and you are in. After that you sign in with your address and password.',
+]
+
+const needs = [
+  'A Gmail or Outlook address — one of them is enough.',
+  'An invitation from whoever runs the Nuntia you are joining, or a computer of your own to run it on.',
+  'To run your own: a small app registration with Google or Microsoft, once, so they know Nuntia may connect. The setup guides walk through it and it takes a few minutes per provider.',
+  'The first connection brings in the last thirty days of mail. New mail is checked on a timer; with extra setup, Gmail can say the moment something arrives.',
 ]
 
 const faqs = [
@@ -78,6 +207,16 @@ const faqs = [
       'Your provider keeps the original. Nuntia keeps a copy in one file on the machine where it runs, which is what makes search and reading fast. Google or Microsoft sign-ins and AI keys are stored locked. Nuntia asks for read and send access and cannot delete mail.',
   },
   {
+    question: 'What do the notes about people contain?',
+    answer:
+      'Role and company, how you know them, what you usually talk about, what they are working on, and a short summary of your history. You write them or let Nuntia draft them, and it tracks which fields it wrote so it never overwrites yours. Every automatic change can be undone.',
+  },
+  {
+    question: 'Can I import my address book?',
+    answer:
+      'No. There is no import from Google or Microsoft, and no calendar. The directory is built from the mail itself: a person appears once you have exchanged mail with them. Companies are read from the domain of the address, not from a stored company record.',
+  },
+  {
     question: 'Does it ever send without me?',
     answer:
       'No. A suggested reply is placed in the reply box for you to edit, and it is not saved anywhere. There is no automatic reply and no scheduled send.',
@@ -90,7 +229,7 @@ const faqs = [
   {
     question: 'Can I run it myself?',
     answer:
-      'Yes. The project ships as a Docker image and needs a small app registration with Google or Microsoft so those services accept the connection. The first sync brings in the last thirty days, and new mail is checked on a timer.',
+      'Yes. The project ships as a Docker image and needs a small app registration with Google or Microsoft so those services accept the connection. The first sync brings in the last thirty days. New mail is checked on a timer, or pushed the moment it arrives once Gmail’s extra setup is done.',
   },
   {
     question: 'What does it not do yet?',
@@ -108,12 +247,12 @@ const faqs = [
     <title>Nuntia — read email like chat</title>
     <meta
       name="description"
-      content="Nuntia is a private-beta mail client for Gmail and Outlook: one inbox, threads as conversations, four states that say what needs you, tags for the people you write to, and optional AI drafts you review. Nothing is sent without you."
+      content="Nuntia is a private-beta mail client for Gmail and Outlook: one inbox, threads read as conversations, four states that say what needs you, a directory of the people you write to, and optional AI drafts you review. Nothing is sent without you."
     />
     <meta property="og:title" content="Nuntia — read email like chat" />
     <meta
       property="og:description"
-      content="One inbox for Gmail and Outlook. Threads as conversations, four states, people you can tag, and AI drafts you approve."
+      content="One inbox for Gmail and Outlook. Threads as conversations, four states, notes on the people you write to, and AI drafts you approve."
     />
     <meta property="og:type" content="website" />
     <meta name="color-scheme" content="dark" />
@@ -142,7 +281,7 @@ const faqs = [
           </span>
           <span class="font-display text-xl font-semibold tracking-tight">Nuntia</span>
           <span
-            class="ml-1 hidden rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[10px] tracking-[0.1em] text-muted-foreground uppercase sm:inline"
+            class="ml-1 hidden rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase sm:inline"
           >
             beta
           </span>
@@ -150,11 +289,13 @@ const faqs = [
 
         <nav
           aria-label="Landing"
-          class="hidden items-center gap-7 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase md:flex"
+          class="hidden items-center gap-5 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase md:flex lg:gap-6"
         >
           <a class="transition-colors hover:text-foreground" href="#how">How it works</a>
-          <a class="transition-colors hover:text-foreground" href="#features">Features</a>
-          <a class="transition-colors hover:text-foreground" href="#tags">Tags</a>
+          <a class="transition-colors hover:text-foreground" href="#features">Inbox</a>
+          <a class="transition-colors hover:text-foreground" href="#people">People</a>
+          <a class="hidden transition-colors hover:text-foreground lg:inline" href="#tags">Tags</a>
+          <a class="hidden transition-colors hover:text-foreground lg:inline" href="#ai">AI</a>
           <a class="transition-colors hover:text-foreground" href="#faq">FAQ</a>
         </nav>
 
@@ -229,13 +370,82 @@ const faqs = [
           </div>
 
           <p
-            class="mt-6 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase"
+            class="mt-6 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase"
           >
             Invite only · No price yet · Nothing sent without you
           </p>
         </div>
 
         <HeroVisual client:load />
+      </section>
+
+      <!-- What it is -->
+      <section
+        id="what"
+        data-reveal
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto max-w-7xl">
+          <div class="grid gap-10 md:grid-cols-12 md:gap-14">
+            <div class="md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <p
+                  class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+                >
+                  <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                  The product
+                </p>
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  A mail client that keeps the mailbox you already have.
+                </h2>
+                <p class="text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Nuntia reads and sends through Gmail and Outlook. It shows each
+                  thread the way a chat looks — messages one under another, oldest
+                  first — and keeps a local copy so that reading and search do not
+                  wait on the provider.
+                </p>
+                <p class="text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Alongside the mail it keeps a small, editable record of the people
+                  you write to, because who someone is to you is not in the message
+                  headers. That record is yours; the mail stays in your mailbox.
+                </p>
+              </div>
+            </div>
+
+            <div class="md:col-span-7">
+              <dl class="border-t border-border">
+                {
+                  specs.map((row) => (
+                    <div class="flex flex-col gap-1 border-b border-border py-3 sm:flex-row sm:gap-8">
+                      <dt class="shrink-0 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase sm:w-32">
+                        {row.label}
+                      </dt>
+                      <dd class="text-[14px] leading-6 text-foreground/90">{row.value}</dd>
+                    </div>
+                  ))
+                }
+              </dl>
+            </div>
+          </div>
+
+          <div class="mt-12 grid gap-8 border-t border-border pt-8 md:grid-cols-3 md:gap-10">
+            <p
+              class="font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase md:col-span-3"
+            >
+              Who it is for
+            </p>
+            {
+              audience.map((item) => (
+                <div class="flex flex-col gap-2 border-t border-border pt-4">
+                  <h3 class="font-display text-lg font-medium tracking-tight">{item.title}</h3>
+                  <p class="text-[14px] leading-6 text-muted-foreground">{item.body}</p>
+                </div>
+              ))
+            }
+          </div>
+        </div>
       </section>
 
       <!-- How it works -->
@@ -270,10 +480,14 @@ const faqs = [
               ))
             }
           </div>
+          <p class="mt-8 border-t border-border pt-4 font-mono text-[11px] leading-5 text-muted-foreground">
+            First sync: the last 30 days · New mail: checked on a timer, or pushed
+            with Gmail’s extra setup · Older mail: not fetched
+          </p>
         </div>
       </section>
 
-      <!-- Features -->
+      <!-- Inbox -->
       <section id="features" class="divide-y divide-border border-b border-border">
         <!-- 1: stripped envelope -->
         <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
@@ -289,73 +503,79 @@ const faqs = [
                 <h2
                   class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
                 >
-                  Quoted history, greetings and signatures get out of the way.
+                  Greetings, signatures and quoted history are folded away.
                 </h2>
                 <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
                   Most of a long thread is the same text repeated under a new line.
                   Nuntia removes the quoted reply, the greeting and the signature
-                  when it reads, and puts yours back when you write.
+                  when it reads, and puts your own back when you write.
                 </p>
               </div>
               <ul class="mt-6 flex flex-col gap-2.5">
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Read the newest message without scrolling past three copies of it.</span>
+                  <span>Messages in order, a divider for each day, attachments with the message they came with.</span>
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Your greeting and signature return on send, in your own words.</span>
+                  <span>What was removed is still stored, and can be inspected per message.</span>
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Per-sender rules when one correspondent formats mail differently.</span>
+                  <span>Per-sender overrides when one correspondent formats mail differently.</span>
                 </li>
               </ul>
             </div>
 
             <div class="md:col-span-7">
-              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+              <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
                 <div class="flex items-center justify-between gap-3 pb-4">
-                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
                     Same thread, two readings
                   </span>
-                  <span class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                  <span class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
                     original untouched
                   </span>
                 </div>
                 <div class="grid gap-3 sm:grid-cols-2">
-                  <div class="rounded-[6px] border border-border bg-background/60 p-3">
-                    <p class="font-mono text-[9px] tracking-[0.1em] text-muted-foreground uppercase">
+                  <div class="rounded-[4px] border border-border bg-background/60 p-3">
+                    <p class="font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
                       Raw email
                     </p>
-                    <div class="mt-3 flex flex-col gap-2 font-mono text-[10px] leading-5 text-muted-foreground/70">
-                      <span>Hope this finds you well.</span>
-                      <span class="text-foreground/70">Can we move the review to Thursday?</span>
+                    <div class="mt-3 flex flex-col gap-2 font-mono text-[11px] leading-5 text-muted-foreground/70">
+                      <span>Hi Priya,</span>
+                      <span class="text-foreground/70">Could you resend the signed NDA? The copy I have is missing schedule 2.</span>
                       <span class="border-l border-border pl-2">
-                        &gt; On Monday, you wrote:<br />
-                        &gt; &gt; Can we keep the Tuesday slot?<br />
+                        &gt; On Tue, 3 Nov, you wrote:<br />
+                        &gt; &gt; I’ll send it over today.<br />
                         &gt; &gt; Sent from my phone
                       </span>
-                      <span class="truncate border-t border-border pt-2 text-[9px]">
+                      <span class="truncate border-t border-border pt-2 text-[11px]">
+                        Priya Raman | Operations, Northwind
+                      </span>
+                      <span class="truncate text-[11px]">
                         CONFIDENTIALITY NOTICE: this transmission…
                       </span>
                     </div>
                   </div>
 
-                  <div class="rounded-[6px] border border-primary/25 bg-primary/[0.04] p-3">
-                    <p class="font-mono text-[9px] tracking-[0.1em] text-primary uppercase">
+                  <div class="rounded-[4px] border border-primary/25 bg-primary/[0.04] p-3">
+                    <p class="font-mono text-[11px] tracking-[0.1em] text-primary uppercase">
                       Nuntia
                     </p>
                     <div class="mt-3 flex flex-col gap-2">
                       <div class="rounded-[4px] bg-muted/60 p-2">
-                        <p class="text-[10px] font-medium text-primary">David Chen</p>
-                        <p class="text-[12px] leading-5">Can we move the review to Thursday?</p>
+                        <p class="text-[11px] font-medium text-primary">Priya Raman</p>
+                        <p class="text-[13px] leading-5">
+                          Could you resend the signed NDA? The copy I have is missing
+                          schedule 2.
+                        </p>
                       </div>
                       <div
-                        class="flex items-center gap-1.5 rounded-[3px] border border-border px-2 py-1 font-mono text-[9px] text-muted-foreground"
+                        class="flex items-center gap-1.5 rounded-[3px] border border-border px-2 py-1 font-mono text-[11px] text-muted-foreground"
                       >
                         <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
-                        Quoted reply, greeting and signature folded away
+                        Greeting, signature and 2 quoted messages folded away
                       </div>
                     </div>
                   </div>
@@ -369,29 +589,33 @@ const faqs = [
         <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
           <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
             <div class="order-2 md:order-1 md:col-span-7">
-              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+              <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
                 <div class="flex items-center justify-between gap-3 pb-4">
-                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
                     Triage
                   </span>
-                  <span class="font-mono text-[9px] text-muted-foreground">four states, always</span>
+                  <span class="font-mono text-[11px] text-muted-foreground">
+                    four states, always
+                  </span>
                 </div>
                 <div class="flex flex-col gap-2">
                   {
                     triage.map((row) => (
-                      <div class="flex flex-wrap items-center gap-2 rounded-[6px] border border-border bg-background/40 px-3 py-2.5">
+                      <div class="flex flex-wrap items-center gap-2 rounded-[4px] border border-border bg-background/40 px-3 py-2.5">
                         <span
-                          class={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] uppercase ${row.tone}`}
+                          class={`rounded-[3px] border px-1.5 py-0.5 font-mono text-[11px] tracking-[0.08em] uppercase ${row.tone}`}
                         >
                           {row.state}
                         </span>
-                        <span class="text-[12px] text-foreground/80">{row.what}</span>
+                        <span class="text-[13px] text-foreground/80">{row.what}</span>
                       </div>
                     ))
                   }
                 </div>
-                <p class="mt-4 border-t border-border pt-3 font-mono text-[9px] text-muted-foreground">
-                  Rename the states, explain what they mean, add sections of your own.
+                <p class="mt-4 border-t border-border pt-3 font-mono text-[11px] leading-5 text-muted-foreground">
+                  Rename a state and write what it means to you. Your own sections sit
+                  above them. Done takes a thread out of all four; a new message brings
+                  it back.
                 </p>
               </div>
             </div>
@@ -411,8 +635,8 @@ const faqs = [
                 </h2>
                 <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
                   Folders collect mail. States answer a question. Every thread lands in
-                  exactly one of four places, and you can rename them and write what each
-                  one means to you.
+                  exactly one of four places, and you can rename them and write what
+                  each one means.
                 </p>
               </div>
               <ul class="mt-6 flex flex-col gap-2.5">
@@ -426,14 +650,14 @@ const faqs = [
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Done moves a thread out of the way; a new message brings it back.</span>
+                  <span>Move a thread yourself, or set it back to Automatic. Your call survives the next sync.</span>
                 </li>
               </ul>
             </div>
           </div>
         </div>
 
-        <!-- 3: search -->
+        <!-- 3: search + done -->
         <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
           <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
             <div class="md:col-span-5">
@@ -452,30 +676,28 @@ const faqs = [
                 <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
                   Search runs over every message Nuntia has saved — subject, topic, the
                   people on the thread and the text itself. It works across all your
-                  connected addresses at once, and it does not wait on the mail provider.
+                  connected addresses at once and does not wait on the mail provider.
                 </p>
               </div>
               <ul class="mt-6 flex flex-col gap-2.5">
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>One box for Gmail and Outlook, together.</span>
+                  <span>Results as you type, including threads you have marked Done.</span>
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Results as you type, including mail filed under Done.</span>
+                  <span>Done is a mark only you can make, and it is searchable but out of the way.</span>
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Attachments stay with the message they arrived on.</span>
+                  <span>Read and unread stay in step with Gmail, one thread or several at a time.</span>
                 </li>
               </ul>
             </div>
 
             <div class="md:col-span-7">
-              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
-                <div
-                  class="flex items-center gap-2 rounded-[4px] border border-border bg-background/60 px-3 py-2"
-                >
+              <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
+                <div class="flex items-center gap-2 rounded-[4px] border border-border bg-background/60 px-3 py-2">
                   <svg
                     aria-hidden="true"
                     class="size-3.5 text-muted-foreground"
@@ -488,7 +710,7 @@ const faqs = [
                     <circle cx="11" cy="11" r="7"></circle>
                     <path d="m17 17 4 4"></path>
                   </svg>
-                  <span class="text-[12px] text-foreground/80">retention numbers</span>
+                  <span class="text-[13px] text-foreground/80">nda schedule</span>
                   <span aria-hidden="true" class="ml-auto h-4 w-px animate-pulse bg-primary"></span>
                 </div>
                 <div class="mt-3 flex flex-col divide-y divide-border">
@@ -496,20 +718,23 @@ const faqs = [
                     searchHits.map((hit) => (
                       <div class="flex items-center gap-2 py-2.5">
                         <span class="min-w-0 flex-1">
-                          <span class="block truncate text-[12px] text-foreground/90">
+                          <span class="block truncate text-[13px] text-foreground/90">
                             {hit.subject}
                           </span>
-                          <span class="block truncate text-[11px] text-muted-foreground">
+                          <span class="block truncate text-[12px] text-muted-foreground">
                             {hit.who}
                           </span>
                         </span>
-                        <span class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase">
+                        <span class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
                           {hit.tag}
                         </span>
                       </div>
                     ))
                   }
                 </div>
+                <p class="mt-4 border-t border-border pt-3 font-mono text-[11px] text-muted-foreground">
+                  3 results · Gmail + Outlook · archived mail included
+                </p>
               </div>
             </div>
           </div>
@@ -519,33 +744,33 @@ const faqs = [
         <div data-reveal class="px-5 py-16 md:px-12 md:py-24">
           <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
             <div class="order-2 md:order-1 md:col-span-7">
-              <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+              <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
                 <div class="flex items-center justify-between gap-3 pb-4">
-                  <span class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
                     What you type
                   </span>
-                  <span class="font-mono text-[9px] text-muted-foreground">
+                  <span class="font-mono text-[11px] text-muted-foreground">
                     what they receive
                   </span>
                 </div>
-                <div class="rounded-[6px] border border-border bg-background/60 p-3">
+                <div class="rounded-[4px] border border-border bg-background/60 p-3">
                   <p class="text-[13px] leading-6">
-                    Sure — pushed it to staging. Let me know when you have looked at the
-                    logs.
+                    Signed copy attached — schedule 2 is the one I was missing. Shout if
+                    the billing address needs changing.
                   </p>
                 </div>
                 <div class="flex justify-center py-2">
                   <span aria-hidden="true" class="text-muted-foreground">↓</span>
                 </div>
-                <div class="rounded-[6px] border border-primary/25 bg-primary/[0.04] p-3">
+                <div class="rounded-[4px] border border-primary/25 bg-primary/[0.04] p-3">
                   <p class="text-[13px] leading-6 text-foreground/90">
-                    Hi Elena,<br /><br />
-                    Sure — I have pushed the code to staging. Let me know once you have
-                    reviewed the logs so we can continue with the release.<br /><br />
+                    Hi Priya,<br /><br />
+                    Signed copy attached — schedule 2 is the one I was missing. Shout if
+                    the billing address needs changing.<br /><br />
                     Best regards,<br />
                     Alex
                   </p>
-                  <p class="mt-3 border-t border-border pt-2 font-mono text-[9px] text-muted-foreground">
+                  <p class="mt-3 border-t border-border pt-2 font-mono text-[11px] text-muted-foreground">
                     Your greeting and signature, added on the way out.
                   </p>
                 </div>
@@ -568,7 +793,7 @@ const faqs = [
                 <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
                   The person you are writing to does not need a new app. Replies carry
                   your greeting, your signature and the message you are answering,
-                  because the recipient is reading normal mail in Gmail or Outlook.
+                  because the recipient is reading ordinary mail in Gmail or Outlook.
                 </p>
               </div>
               <ul class="mt-6 flex flex-col gap-2.5">
@@ -578,13 +803,139 @@ const faqs = [
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>New messages and attachments, with the same rules.</span>
+                  <span>New messages and attachments, with the same rules. Addresses you have written to before are offered as you type.</span>
                 </li>
                 <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                   <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                  <span>Nothing is sent automatically. Not even a suggested draft.</span>
+                  <span>Replies go out from the address the conversation belongs to; you can pick another.</span>
                 </li>
               </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- People -->
+      <section
+        id="people"
+        data-reveal
+        class="border-b border-border bg-[#0d0d0f] px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto grid max-w-7xl items-start gap-10 md:grid-cols-12 md:gap-14">
+          <div class="md:col-span-5">
+            <div class="flex flex-col gap-4">
+              <p
+                class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+              >
+                <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+                People, not just threads
+              </p>
+              <h2
+                class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+              >
+                What Nuntia knows about the people you write to.
+              </h2>
+              <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                The address book is your mail, not an import. Every person you have
+                exchanged mail with gets a page: the notes you keep about them, and
+                every stored thread they appear on.
+              </p>
+            </div>
+            <div class="mt-6 flex flex-col divide-y divide-border border-y border-border">
+              {
+                peopleNotes.map((note) => (
+                  <div class="flex flex-col gap-1.5 py-4">
+                    <h3 class="font-display text-base font-medium tracking-tight">
+                      {note.title}
+                    </h3>
+                    <p class="text-[14px] leading-6 text-muted-foreground">{note.body}</p>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+
+          <div class="md:col-span-7 md:sticky md:top-24 md:self-start">
+            <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                  Person · contact page
+                </span>
+                <span class="font-mono text-[11px] text-muted-foreground">
+                  3 threads · 2 colleagues
+                </span>
+              </div>
+
+              <div class="mt-4 flex flex-wrap items-center gap-3">
+                <span
+                  aria-hidden="true"
+                  class="flex size-9 items-center justify-center rounded-full bg-muted font-display text-[12px] font-semibold"
+                >
+                  PR
+                </span>
+                <span class="flex flex-col">
+                  <span class="font-display text-lg font-medium tracking-tight">Priya Raman</span>
+                  <span class="font-mono text-[11px] text-muted-foreground">
+                    Operations lead · Northwind
+                  </span>
+                </span>
+                <span class="ml-auto flex items-center gap-1.5">
+                  <span class="rounded-[3px] bg-primary px-2 py-0.5 font-mono text-[11px] tracking-[0.08em] text-primary-foreground uppercase">
+                    client
+                  </span>
+                  <span class="rounded-[3px] border border-border px-2 py-0.5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
+                    importance 8 / 10
+                  </span>
+                </span>
+              </div>
+
+              <p class="mt-4 rounded-[4px] border border-primary/25 bg-primary/[0.04] p-3 text-[13px] leading-6 text-foreground/90">
+                Handles operations and contracts at Northwind. Keeps the signed
+                paperwork, so anything contractual goes through her.
+              </p>
+
+              <div class="mt-4 border-t border-border">
+                {
+                  [
+                    ['Relationship', 'Client since 2024. NDA, retainer and scheduling.'],
+                    ['Topics', 'Contracts, onboarding, quarterly numbers.'],
+                    ['Current work', 'Renewing the retainer for the first quarter.'],
+                    ['Threads', 'Three stored: NDA, Q1 retainer, onboarding.'],
+                    ['Colleagues', 'Two other people at northwind.com.'],
+                  ].map(([label, value]) => (
+                    <div class="flex flex-col gap-0.5 border-b border-border py-2.5 sm:flex-row sm:gap-6">
+                      <span class="shrink-0 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase sm:w-32">
+                        {label}
+                      </span>
+                      <span class="text-[13px] leading-6 text-foreground/90">{value}</span>
+                    </div>
+                  ))
+                }
+              </div>
+
+              <div class="mt-4 rounded-[4px] border border-border">
+                <p class="border-b border-border px-3 py-2 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
+                  Recent changes
+                </p>
+                <div class="divide-y divide-border font-mono text-[11px] text-muted-foreground">
+                  <div class="flex items-center justify-between gap-3 px-3 py-2">
+                    <span>Summary refreshed from 4 threads</span>
+                    <span class="flex items-center gap-2">
+                      <span class="text-foreground/70">Undo</span>
+                      <span>2 days ago</span>
+                    </span>
+                  </div>
+                  <div class="flex items-center justify-between gap-3 px-3 py-2">
+                    <span>Role and company written by you — not overwritten</span>
+                    <span>3 weeks ago</span>
+                  </div>
+                </div>
+              </div>
+
+              <p class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3 font-mono text-[11px] text-muted-foreground">
+                <span>Directory · 68 people · search with /</span>
+                <span>filter: client · Northwind (3)</span>
+              </p>
             </div>
           </div>
         </div>
@@ -594,7 +945,7 @@ const faqs = [
       <section
         id="tags"
         data-reveal
-        class="border-b border-border bg-[#0d0d0f] px-5 py-16 md:px-12 md:py-24"
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
       >
         <div class="mx-auto grid max-w-7xl items-center gap-10 md:grid-cols-12 md:gap-14">
           <div class="md:col-span-5">
@@ -631,31 +982,31 @@ const faqs = [
               </li>
               <li class="flex gap-3 text-[14px] leading-6 text-foreground/90">
                 <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
-                <span>The last fifty additions and removals are listed, so you can see why a description says what it says.</span>
+                <span>The last fifty additions and removals are listed, and the tag shows next to the sender in every thread.</span>
               </li>
             </ul>
           </div>
 
           <div class="md:col-span-7">
-            <div class="rounded-lg border border-border bg-card p-4 md:p-6">
+            <div class="rounded-[6px] border border-border bg-card p-4 md:p-6">
               <div class="flex items-center justify-between gap-3">
                 <span
-                  class="flex items-center gap-2 font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase"
+                  class="flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase"
                 >
                   Tags &amp; descriptions
                 </span>
-                <span class="font-mono text-[9px] text-muted-foreground">3 people</span>
+                <span class="font-mono text-[11px] text-muted-foreground">3 people</span>
               </div>
 
-              <div class="mt-4 rounded-[6px] border border-primary/25 bg-primary/[0.04] p-4">
+              <div class="mt-4 rounded-[4px] border border-primary/25 bg-primary/[0.04] p-4">
                 <div class="flex flex-wrap items-center gap-2">
                   <span
-                    class="rounded-[3px] bg-primary px-2 py-0.5 font-mono text-[10px] tracking-[0.08em] text-primary-foreground uppercase"
+                    class="rounded-[3px] bg-primary px-2 py-0.5 font-mono text-[11px] tracking-[0.08em] text-primary-foreground uppercase"
                   >
                     investor
                   </span>
                   <span
-                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
+                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground uppercase"
                   >
                     written by Nuntia
                   </span>
@@ -668,25 +1019,25 @@ const faqs = [
                   <span class="flex -space-x-1.5">
                     {
                       ['AV', 'MK', 'JS'].map((initials) => (
-                        <span class="flex size-6 items-center justify-center rounded-full border border-card bg-muted font-display text-[9px] font-semibold">
+                        <span class="flex size-6 items-center justify-center rounded-full border border-card bg-muted font-display text-[11px] font-semibold">
                           {initials}
                         </span>
                       ))
                     }
                   </span>
-                  <span class="font-mono text-[9px] text-muted-foreground">
+                  <span class="font-mono text-[11px] text-muted-foreground">
                     Ana, Marcus and Joost carry it
                   </span>
                 </div>
               </div>
 
-              <div class="mt-3 rounded-[6px] border border-border">
+              <div class="mt-3 rounded-[4px] border border-border">
                 <p
-                  class="border-b border-border px-3 py-2 font-mono text-[9px] tracking-[0.1em] text-muted-foreground uppercase"
+                  class="border-b border-border px-3 py-2 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase"
                 >
                   Recent changes
                 </p>
-                <div class="divide-y divide-border font-mono text-[10px] text-muted-foreground">
+                <div class="divide-y divide-border font-mono text-[11px] text-muted-foreground">
                   <div class="flex items-center justify-between gap-3 px-3 py-2">
                     <span>Joost added</span><span>2 days ago</span>
                   </div>
@@ -700,19 +1051,19 @@ const faqs = [
               </div>
 
               <div
-                class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[6px] border border-border px-3 py-2"
+                class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-[4px] border border-border px-3 py-2"
               >
-                <span class="font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase">
+                <span class="font-mono text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
                   Suggested from recent mail
                 </span>
                 <span class="flex gap-1.5">
                   <span
-                    class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[9px] text-foreground/80"
+                    class="rounded-[3px] border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-foreground/80"
                   >
                     board observer
                   </span>
                   <span
-                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground"
+                    class="rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
                   >
                     + add
                   </span>
@@ -723,7 +1074,88 @@ const faqs = [
         </div>
       </section>
 
-      <!-- Principles -->
+      <!-- AI -->
+      <section
+        id="ai"
+        data-reveal
+        class="border-b border-border bg-[#0d0d0f] px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto max-w-7xl">
+          <div class="max-w-2xl">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+              Optional AI
+            </p>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
+            >
+              Two helpers, your account, your decision.
+            </h2>
+            <p class="mt-4 text-[15px] leading-7 text-muted-foreground">
+              Neither helper is needed to use the app, and neither comes included: you
+              connect your own account with Anthropic, OpenAI or Google, so the service
+              is yours. Switch on one, both, or neither.
+            </p>
+          </div>
+
+          <div class="mt-10 grid gap-4 md:grid-cols-3">
+            {
+              aiCards.map((card) => (
+                <div class="flex flex-col justify-between gap-6 border border-border bg-card p-6">
+                  <div>
+                    <p class="flex items-center gap-2 font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                      <span aria-hidden="true" class={`size-1.5 ${card.accent}`}></span>
+                      {card.label}
+                    </p>
+                    <h3 class="mt-3 font-display text-xl font-medium tracking-tight">
+                      {card.title}
+                    </h3>
+                    <p class="mt-2 text-[14px] leading-6 text-muted-foreground">{card.body}</p>
+                  </div>
+                  <p class="border-t border-border pt-3 font-mono text-[11px] tracking-[0.06em] text-muted-foreground uppercase">
+                    {card.footnote}
+                  </p>
+                </div>
+              ))
+            }
+          </div>
+
+          <div class="mt-8 grid gap-8 border-t border-border pt-6 md:grid-cols-3">
+            <div class="flex flex-col gap-2">
+              <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                What a draft is given
+              </p>
+              <p class="text-[13px] leading-6 text-muted-foreground">
+                The conversation, subject, topic, your goal for the thread, your notes
+                about the person, and any instruction you typed for that one draft.
+              </p>
+            </div>
+            <div class="flex flex-col gap-2">
+              <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                When a draft is offered
+              </p>
+              <p class="text-[13px] leading-6 text-muted-foreground">
+                Only when a key is set, the thread has someone a reply can reach, you did
+                not send the last message, and the thread clears the importance bar. The
+                bar is yours to move.
+              </p>
+            </div>
+            <div class="flex flex-col gap-2">
+              <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                A draft is not a send
+              </p>
+              <p class="text-[13px] leading-6 text-muted-foreground">
+                It appears in the reply box as ordinary text, is not stored, and is never
+                sent by Nuntia. If you leave the box, it is gone.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Privacy -->
       <section
         id="privacy"
         data-reveal
@@ -735,143 +1167,158 @@ const faqs = [
               class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
             >
               <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
-              Principles
+              Where your mail lives
             </p>
             <h2
               class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
             >
-              Built for clarity, sovereign by design.
+              What is stored, what is locked, and what leaves.
             </h2>
             <p class="mt-4 text-[15px] leading-7 text-muted-foreground">
               These are properties of how the app works, not promises about how it feels.
-              They are also the things the beta measures itself against.
+              They are also what the beta measures itself against.
             </p>
           </div>
 
           <div class="mt-10 grid gap-4 md:grid-cols-3">
-            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
-              <div>
-                <span
-                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
-                >
-                  <svg
-                    aria-hidden="true"
-                    class="size-4 text-primary"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M12 3 4.5 6v5.5c0 4.4 3 8 7.5 9.5 4.5-1.5 7.5-5.1 7.5-9.5V6L12 3Z"></path>
-                    <path d="m8.5 12 2.5 2.5 4.5-5"></path>
-                  </svg>
-                </span>
-                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
-                  Your provider stays the source of truth
-                </h3>
-                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
-                  Mail is read and sent through Gmail or Outlook. Nuntia keeps a local
-                  copy so search and reading are fast, and it cannot delete anything —
-                  not in Nuntia, not in your mailbox.
-                </p>
-              </div>
-              <p
-                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
-              >
-                Read and send access · no delete permission
-              </p>
-            </div>
-
-            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
-              <div>
-                <span
-                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
-                >
-                  <svg
-                    aria-hidden="true"
-                    class="size-4 text-warning"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <circle cx="8" cy="8" r="4"></circle>
-                    <path d="m11 11 9 9"></path>
-                    <path d="m17 17 2-2"></path>
-                  </svg>
-                </span>
-                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
-                  Your keys, your AI
-                </h3>
-                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
-                  The two AI helpers are optional and use your own account with
-                  Anthropic, OpenAI or Google. Turn on one, both or neither. Sign-ins and
-                  keys are locked, and the AI log stores no message text.
-                </p>
-              </div>
-              <p
-                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
-              >
-                Anthropic · OpenAI · Gemini
-              </p>
-            </div>
-
-            <div class="flex flex-col justify-between gap-6 rounded-lg border border-border bg-card p-6">
-              <div>
-                <span
-                  class="flex size-9 items-center justify-center rounded-full border border-border bg-background"
-                >
-                  <svg
-                    aria-hidden="true"
-                    class="size-4 text-success"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  >
-                    <path d="M22 2 11 13"></path>
-                    <path d="m22 2-7 20-4-9-9-4 20-7Z"></path>
-                  </svg>
-                </span>
-                <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
-                  You press send
-                </h3>
-                <p class="mt-2 text-[14px] leading-6 text-muted-foreground">
-                  A draft is text in the reply box. It is not saved, not sent, and it
-                  does not replace your own writing. Done is a mark only you can make,
-                  and a state you set outranks the machine.
-                </p>
-              </div>
-              <p
-                class="border-t border-border pt-3 font-mono text-[9px] tracking-[0.08em] text-muted-foreground uppercase"
-              >
-                No auto-send · no scheduled replies
-              </p>
-            </div>
+            {
+              privacyCards.map((card) => (
+                <div class="flex flex-col justify-between gap-6 border border-border bg-card p-6">
+                  <div>
+                    <span aria-hidden="true" class={`block size-2 ${card.accent}`}></span>
+                    <h3 class="mt-4 font-display text-xl font-medium tracking-tight">
+                      {card.title}
+                    </h3>
+                    <p class="mt-2 text-[14px] leading-6 text-muted-foreground">{card.body}</p>
+                  </div>
+                  <p class="border-t border-border pt-3 font-mono text-[11px] tracking-[0.06em] text-muted-foreground uppercase">
+                    {card.footnote}
+                  </p>
+                </div>
+              ))
+            }
           </div>
 
           <div class="mt-4 grid gap-4 border-t border-border pt-6 sm:grid-cols-2 lg:grid-cols-4">
             {
               [
                 ['Mail providers', 'Gmail and Outlook, together'],
-                ['New mail', 'Checked on a timer'],
+                ['New mail', 'Timer, or Gmail push with setup'],
                 ['First sync', 'The last 30 days'],
                 ['Data', 'One file, backed up by the operator'],
+                ['Photos', 'Initials by default; Gravatar is opt-in'],
+                ['Tracking', 'None in the app; stats stay in Nuntia’s file'],
+                ['Drafts', 'Not kept after you leave the reply box'],
+                ['Deleting mail', 'Not possible, in Nuntia or your mailbox'],
               ].map(([label, value]) => (
                 <div class="flex flex-col gap-1">
-                  <span class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
                     {label}
                   </span>
-                  <span class="text-[13px] text-foreground/90">{value}</span>
+                  <span class="text-[13px] leading-5 text-foreground/90">{value}</span>
                 </div>
               ))
             }
+          </div>
+        </div>
+      </section>
+
+      <!-- Not there yet -->
+      <section
+        id="limits"
+        data-reveal
+        class="border-b border-border bg-[#0d0d0f] px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto grid max-w-7xl gap-10 md:grid-cols-12 md:gap-14">
+          <div class="md:col-span-4">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
+              Honest limits
+            </p>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
+            >
+              Not there yet.
+            </h2>
+            <p class="mt-4 text-[14px] leading-6 text-muted-foreground">
+              A beta is more useful when its edges are stated. This is the whole list as
+              the app stands today; if one of these is the thing you need, Nuntia is not
+              the tool for it yet.
+            </p>
+          </div>
+
+          <ul class="md:col-span-8 sm:columns-2 sm:gap-10">
+            {
+              limited.map((item) => (
+                <li class="break-inside-avoid border-t border-border py-3 text-[14px] leading-6 text-foreground/90">
+                  {item}
+                </li>
+              ))
+            }
+          </ul>
+        </div>
+      </section>
+
+      <!-- Getting started -->
+      <section
+        id="start"
+        data-reveal
+        class="border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="mx-auto max-w-7xl">
+          <div class="max-w-2xl">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
+            >
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+              Getting in
+            </p>
+            <h2
+              class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
+            >
+              What you need, and what happens next.
+            </h2>
+          </div>
+
+          <div class="mt-10 grid gap-10 md:grid-cols-12 md:gap-14">
+            <div class="md:col-span-6">
+              <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                The private beta
+              </p>
+              <ol class="mt-4 flex flex-col">
+                {
+                  betaSteps.map((step, index) => (
+                    <li class="flex gap-4 border-t border-border py-4">
+                      <span class="font-mono text-[11px] text-muted-foreground">
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <span class="text-[14px] leading-6 text-foreground/90">{step}</span>
+                    </li>
+                  ))
+                }
+              </ol>
+              <p class="border-t border-border pt-4 text-[14px] leading-6 text-muted-foreground">
+                No price has been set, and there is no payment step anywhere in the app.
+              </p>
+            </div>
+
+            <div class="md:col-span-6">
+              <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                What it takes
+              </p>
+              <ul class="mt-4 flex flex-col">
+                {
+                  needs.map((need) => (
+                    <li class="flex gap-3 border-t border-border py-4 text-[14px] leading-6 text-foreground/90">
+                      <span aria-hidden="true" class="mt-2 size-1.5 shrink-0 rounded-full bg-primary"></span>
+                      <span>{need}</span>
+                    </li>
+                  ))
+                }
+              </ul>
+            </div>
           </div>
         </div>
       </section>
@@ -888,16 +1335,16 @@ const faqs = [
               class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
             >
               <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
-              Before you ask for access
+              Questions
             </p>
             <h2
               class="mt-4 font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px]"
             >
-              Questions with plain answers.
+              Plain answers.
             </h2>
             <p class="mt-4 text-[14px] leading-6 text-muted-foreground">
-              If something is missing, ask in the access request — the beta exists to
-              find out what is still wrong.
+              If something is missing, ask in the access request — the beta exists to find
+              out what is still wrong.
             </p>
           </div>
 
@@ -910,7 +1357,7 @@ const faqs = [
                       {item.question}
                       <span
                         aria-hidden="true"
-                        class="flex size-6 shrink-0 items-center justify-center rounded-[3px] border border-border text-muted-foreground transition-transform duration-200 group-open:rotate-45"
+                        class="flex size-6 shrink-0 items-center justify-center rounded-[3px] border border-border font-mono text-muted-foreground transition-transform duration-200 group-open:rotate-45"
                       >
                         +
                       </span>
@@ -926,50 +1373,46 @@ const faqs = [
         </div>
       </section>
 
-      <!-- Closing call to action -->
+      <!-- Closing -->
       <section data-reveal class="px-5 py-16 md:px-12 md:py-20">
         <div
-          class="relative mx-auto max-w-7xl overflow-hidden rounded-lg bg-[linear-gradient(100deg,#ff5722_0%,#ff7a2f_45%,#ffa000_100%)] px-6 py-12 md:px-12 md:py-16"
+          class="mx-auto flex max-w-7xl flex-col gap-8 border border-border px-6 py-10 md:flex-row md:items-end md:justify-between md:px-12 md:py-14"
         >
-          <div
-            aria-hidden="true"
-            class="cta-orb pointer-events-none absolute -top-24 -right-16 size-72 rounded-full bg-white/10"
-          >
-          </div>
-          <div class="relative z-10 max-w-3xl">
-            <span
-              class="inline-flex items-center gap-2 rounded-[3px] bg-black/20 px-2 py-1 font-mono text-[10px] tracking-[0.12em] text-white uppercase"
+          <div class="max-w-2xl">
+            <p
+              class="flex items-center gap-2 font-mono text-[11px] font-medium tracking-[0.14em] text-muted-foreground uppercase"
             >
-              <span aria-hidden="true" class="size-1.5 rounded-full bg-white"></span>
+              <span aria-hidden="true" class="size-1.5 rounded-full bg-primary"></span>
               Private beta
-            </span>
-            <h2
-              class="mt-4 font-display text-[30px] leading-[1.05] font-semibold tracking-[-0.03em] text-balance text-white md:text-[48px]"
-            >
-              Read your mail as conversations, without moving it.
-            </h2>
-            <p class="mt-3 max-w-xl text-[15px] leading-7 text-white/90">
-              Request an invitation, connect a mailbox, and see whether the four states
-              are enough for the way you work. No price, no card, no new address.
             </p>
-            <div class="mt-7 flex flex-col gap-3 sm:flex-row">
-              <a
-                href={`${appUrl}/request-access`}
-                class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] bg-white px-6 text-sm font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
-              >
-                Request access
-                <span aria-hidden="true">→</span>
-              </a>
-              <a
-                href={`${appUrl}/sign-in`}
-                class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] border border-black/20 bg-black/20 px-6 text-sm font-medium text-white transition-colors hover:bg-black/30"
-              >
-                Sign in
-              </a>
-            </div>
-            <p class="mt-4 font-mono text-[9px] tracking-[0.1em] text-white/80 uppercase">
+            <h2
+              class="mt-3 font-display text-[28px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[36px]"
+            >
+              Request an invitation.
+            </h2>
+            <p class="mt-3 text-[15px] leading-7 text-muted-foreground">
+              Access is approved by hand. Ask for one, connect a mailbox, and see whether
+              four states are enough for the way you work. No price, no card, no new
+              address.
+            </p>
+            <p class="mt-4 font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
               Invite only · Gmail + Outlook · AI optional
             </p>
+          </div>
+          <div class="flex flex-col gap-3 sm:flex-row md:flex-col">
+            <a
+              href={`${appUrl}/request-access`}
+              class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] bg-white px-6 text-sm font-medium text-[#0a0a0c] transition-colors hover:bg-white/90"
+            >
+              Request access
+              <span aria-hidden="true">→</span>
+            </a>
+            <a
+              href={`${appUrl}/sign-in`}
+              class="inline-flex h-11 items-center justify-center gap-2 rounded-[4px] border border-border px-6 text-sm font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              Sign in
+            </a>
           </div>
         </div>
       </section>
@@ -989,11 +1432,12 @@ const faqs = [
               <span class="font-display text-lg font-semibold tracking-tight">Nuntia</span>
             </a>
             <p class="mt-3 max-w-sm text-[13px] leading-6 text-muted-foreground">
-              A mail client for Gmail and Outlook that reads threads as conversations.
-              Your provider keeps the mail; you keep the last word.
+              A mail client for Gmail and Outlook that reads threads as conversations and
+              keeps notes on the people you write to. Your provider keeps the mail; you
+              keep the last word.
             </p>
             <p
-              class="mt-4 flex items-center gap-2 font-mono text-[10px] tracking-[0.08em] text-muted-foreground"
+              class="mt-4 flex items-center gap-2 font-mono text-[11px] tracking-[0.08em] text-muted-foreground"
             >
               <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
               Private beta · invite only
@@ -1001,19 +1445,20 @@ const faqs = [
           </div>
 
           <div class="md:col-span-2">
-            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
               Product
             </p>
             <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
-              <a class="transition-colors hover:text-foreground" href="#features">Features</a>
+              <a class="transition-colors hover:text-foreground" href="#what">What it is</a>
+              <a class="transition-colors hover:text-foreground" href="#features">Inbox</a>
+              <a class="transition-colors hover:text-foreground" href="#people">People</a>
               <a class="transition-colors hover:text-foreground" href="#tags">Tags</a>
-              <a class="transition-colors hover:text-foreground" href="#how">How it works</a>
-              <a class="transition-colors hover:text-foreground" href="#faq">FAQ</a>
+              <a class="transition-colors hover:text-foreground" href="#ai">AI</a>
             </div>
           </div>
 
           <div class="md:col-span-2">
-            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
               Get started
             </p>
             <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
@@ -1026,11 +1471,13 @@ const faqs = [
               <a class="transition-colors hover:text-foreground" href={`${appUrl}/join`}>
                 Enter an invite
               </a>
+              <a class="transition-colors hover:text-foreground" href="#start">What you need</a>
+              <a class="transition-colors hover:text-foreground" href="#limits">Not there yet</a>
             </div>
           </div>
 
           <div class="md:col-span-3">
-            <p class="font-mono text-[9px] tracking-[0.12em] text-muted-foreground uppercase">
+            <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
               What it works with
             </p>
             <div class="mt-3 flex flex-col gap-2 text-[13px] text-foreground/80">
@@ -1051,7 +1498,7 @@ const faqs = [
         </div>
 
         <div
-          class="mt-10 flex flex-col gap-3 border-t border-border pt-5 font-mono text-[10px] tracking-[0.08em] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
+          class="mt-10 flex flex-col gap-3 border-t border-border pt-5 font-mono text-[11px] tracking-[0.08em] text-muted-foreground sm:flex-row sm:items-center sm:justify-between"
         >
           <p>© 2026 Nuntia</p>
           <p>One file · your keys · nothing sent without you</p>

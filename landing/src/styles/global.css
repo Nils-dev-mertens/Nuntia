@@ -123,20 +123,6 @@ details[open] .faq-answer {
   animation: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-/* A slow drift on the closing card's light, so it is not a flat gradient. */
-@keyframes drift {
-  from {
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-  to {
-    transform: translate3d(-28px, 22px, 0) scale(1.1);
-  }
-}
-
-.cta-orb {
-  animation: drift 16s ease-in-out infinite alternate;
-}
-
 @media (prefers-reduced-motion: reduce) {
   [data-reveal] {
     opacity: 1;
@@ -144,8 +130,7 @@ details[open] .faq-answer {
     transition: none;
   }
 
-  details[open] .faq-answer,
-  .cta-orb {
+  details[open] .faq-answer {
     animation: none;
   }
 }

@@ -40,6 +40,15 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # The landing site is a separate package with its own dependencies, so the
+      # root check excludes it. Without this step a broken landing island reaches
+      # master unchecked — which is exactly how the first deploy of it failed.
+      - name: Typecheck the landing site
+        run: |
+          cd landing
+          bun install --frozen-lockfile
+          bun run typecheck
+
       - name: Unit tests
         run: bun test
 
