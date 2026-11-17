@@ -4,10 +4,15 @@
 # `react-dom/server.bun.js` throws "Expected CommonJS module to have a function
 # wrapper" once NODE_ENV is production (oven-sh/bun#36866, fixed in 1.3.14). The
 # build is unaffected; the server crashes on boot, which is what the pin avoids.
+#
+# 1.4.4 rather than 1.3.14: on 1.3.14 a CommonJS `require()` of an ESM-only
+# package (`sanitize-html` -> `htmlparser2`) fails nondeterministically with
+# "require() async module ... is unsupported" when the module graph is loaded
+# asynchronously, which made `bun test` fail on some runs and pass on others.
 
 # Build the client and server bundles. Dev dependencies (vite, typescript) are
 # only needed here, which is why the runtime stage is separate.
-FROM oven/bun:1.3.14 AS builder
+FROM oven/bun:1.4.4 AS builder
 WORKDIR /repo
 
 # Copied on their own so a source change re-uses the installed dependencies.
@@ -24,7 +29,7 @@ RUN bun run build
 RUN bun build scripts/set-password.ts --target bun --packages external \
     --outfile dist/set-password.js
 
-FROM oven/bun:1.3.14-slim
+FROM oven/bun:1.4.4-slim
 WORKDIR /app
 
 # NODE_ENV is load-bearing: `oauth.ts` and `session.ts` mark the session and

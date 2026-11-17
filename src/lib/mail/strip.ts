@@ -64,20 +64,38 @@ const NAME_PHRASE =
   "(?![IA]\\b)[\\p{Lu}][\\p{L}'’.-]*(?:\\s+[\\p{Lu}][\\p{L}'’.-]*){0,2}"
 
 /**
- * Build a signature-closer pattern from raw regex fragments.
+ * Build a signature-closer matcher from raw regex fragments.
  *
  * Each closer matches a whole line, with an optional person-name after it on
  * the same line and optional trailing punctuation: `Groetjes`, `Groetjes,`,
  * `Groetjes, Nils` and `Best regards!` are all the same closer.
+ *
+ * The closer and the name cannot live in one pattern. The closer has to be
+ * case-insensitive (`Thanks`, `thanks`), and under the `i` flag `\p{Lu}` also
+ * matches lowercase letters — so `Thanks for the update.` would read as the
+ * closer `thanks` plus the name `for the update`, and the body would lose the
+ * sentence. Matching the closer case-insensitively and the name case-sensitively
+ * on what is left keeps both halves honest.
  */
-function signoff(...fragments: string[]): RegExp {
+function signoff(...fragments: string[]): { test(line: string): boolean } {
   const closer = `(?:${fragments.join('|')})`
-  return new RegExp(
-    // One closing, or several chained with `/` (see `ALL_CLOSINGS`).
-    `^\\s*${closer}(?:\\s*[/|]\\s*${closer})*` +
-      `(?:[\\s,]+${NAME_PHRASE})?[,!]?\\s*$`,
+  // One closing, or several chained with `/` (see `ALL_CLOSINGS`).
+  const separators = `(?:\\s*[/|]\\s*${closer})*`
+  const wholeLine = new RegExp(
+    `^\\s*${closer}${separators}[,!]?\\s*$`,
     'iu',
   )
+  const withName = new RegExp(`^\\s*${closer}${separators}[\\s,]+`, 'iu')
+  // Case-sensitive on purpose: a name starts with a capital.
+  const nameTail = new RegExp(`^${NAME_PHRASE}[,!]?\\s*$`, 'u')
+
+  return {
+    test(line: string) {
+      if (wholeLine.test(line)) return true
+      const head = withName.exec(line)
+      return Boolean(head && nameTail.test(line.slice(head[0].length)))
+    },
+  }
 }
 
 /**
@@ -171,7 +189,7 @@ const ALL_CLOSINGS = [
   ...ROMANCE_CLOSINGS,
 ]
 
-const SIGNATURE_MARKERS: RegExp[] = [
+const SIGNATURE_MARKERS: { test(line: string): boolean }[] = [
   /^\s*--\s*$/, // RFC 3676 sig delimiter: "-- "
   /^\s*__+\s*$/,
   /^\s*sent from my /i, // "Sent from my iPhone"
