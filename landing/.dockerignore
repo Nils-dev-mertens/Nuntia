@@ -1,0 +1,6 @@
+# The build stage installs its own dependencies and writes its own dist; a local
+# copy pasted over them would be platform-specific and stale.
+node_modules
+dist
+.astro
+.env

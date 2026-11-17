@@ -43,11 +43,14 @@ jobs:
       # The landing site is a separate package with its own dependencies, so the
       # root check excludes it. Without this step a broken landing island reaches
       # master unchecked — which is exactly how the first deploy of it failed.
-      - name: Typecheck the landing site
+      # The build is here too: deploy rebuilds the image, and a page that only
+      # fails in `astro build` should not be the reason a deploy goes red.
+      - name: Check the landing site
         run: |
           cd landing
           bun install --frozen-lockfile
           bun run typecheck
+          bun run build
 
       - name: Unit tests
         run: bun test

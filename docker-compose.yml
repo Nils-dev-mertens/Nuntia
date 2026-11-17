@@ -26,5 +26,18 @@ services:
       # (`data/logs`); pointing it elsewhere puts the files back in the volume.
       - ./logs:/app/data/logs
 
+  # The public page, on its own hostname. The app serves / as the inbox, so the
+  # two cannot share a port. PUBLIC_APP_URL is baked into Sign in and Request
+  # access at build time: changing LUMEN_APP_URL in `.env` needs a rebuild of
+  # this service (`docker compose build landing`), not a restart.
+  landing:
+    build:
+      context: ./landing
+      args:
+        PUBLIC_APP_URL: ${LUMEN_APP_URL:-http://localhost:3251}
+    restart: unless-stopped
+    ports:
+      - '3252:80'
+
 volumes:
   lumen-data:

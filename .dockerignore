@@ -10,6 +10,13 @@ dist-ssr
 .cache
 .tanstack
 
+# The landing site is its own package, built in its own image. Its dependencies
+# and output would otherwise be uploaded with the app's build context.
+landing/node_modules
+landing/dist
+landing/.astro
+landing/.env
+
 # The database, its WAL sidecars, logs and backups
 data
 logs

@@ -314,6 +314,63 @@ function RelationTag({ conversation }: { conversation: ConversationSummary }) {
 }
 
 /**
+ * The row checkbox.
+ *
+ * Parked in the gutter the row opens for it, never over the avatar: 16px of
+ * control inside a 24px target, aligned with the row's first line. It only
+ * exists while a selection gesture is possible, so the list stays a clean set
+ * of links the rest of the time.
+ */
+function RowSelector({
+  title,
+  providerThreadId,
+  selected,
+  onSelect,
+  className,
+}: {
+  title: string
+  providerThreadId: string
+  selected: boolean
+  onSelect: (
+    providerThreadId: string,
+    modifiers: { shiftKey: boolean; additive: boolean },
+  ) => void
+  /** Vertical alignment: the two row shapes have different first lines. */
+  className: string
+}) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={selected}
+      aria-label={`Select ${title}`}
+      onClick={(event) =>
+        onSelect(providerThreadId, {
+          shiftKey: event.shiftKey,
+          additive: event.ctrlKey || event.metaKey,
+        })
+      }
+      className={cn(
+        'group absolute left-2 z-10 flex size-6 items-center justify-center rounded-[4px] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none',
+        className,
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className={cn(
+          'flex size-4 items-center justify-center rounded-[3px] border transition-colors',
+          selected
+            ? 'border-primary bg-primary text-primary-foreground'
+            : 'border-border bg-background group-hover:border-foreground/40',
+        )}
+      >
+        {selected ? <Check aria-hidden="true" className="size-3" /> : null}
+      </span>
+    </button>
+  )
+}
+
+/**
  * A machine-generated update: receipts, build results, alerts, invitations.
  *
  * Denser than a chat row and missing everything that implies a conversation —
@@ -350,33 +407,22 @@ function AutomatedRow({
   const sender = participantsOf(conversation)
 
   return (
-    <li className="relative">
+    // The negative margin lives on the row, not on the link, so the checkbox's
+    // position and the text's padding are measured from the same edge.
+    <li className="relative -mx-[18px]">
       {/*
        * The checkbox sits beside the link rather than inside it: a row is one
        * anchor, and an input nested in an anchor is both invalid markup and a
        * control that navigates when it is meant to select.
        */}
       {showSelector ? (
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={selected}
-          aria-label={`Select ${conversation.topic ?? conversation.subject}`}
-          onClick={(event) =>
-            onSelect(conversation.providerThreadId, {
-              shiftKey: event.shiftKey,
-              additive: event.ctrlKey || event.metaKey,
-            })
-          }
-          className={cn(
-            'absolute top-2 left-2 z-10 flex size-4 items-center justify-center rounded border transition-colors',
-            selected
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-border bg-background hover:border-foreground/40',
-          )}
-        >
-          {selected ? <Check aria-hidden="true" className="size-3" /> : null}
-        </button>
+        <RowSelector
+          title={conversation.topic ?? conversation.subject}
+          providerThreadId={conversation.providerThreadId}
+          selected={selected}
+          onSelect={onSelect}
+          className="top-1.5"
+        />
       ) : null}
       <Link
         to="/conversations/$providerThreadId"
@@ -400,7 +446,7 @@ function AutomatedRow({
           })
         }}
         className={cn(
-          '-mx-[18px] block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
+          'block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
           showSelector && 'pl-10',
           active && 'bg-muted/40',
         )}
@@ -469,29 +515,18 @@ function ConversationRow({
   const title = conversation.topic ?? conversation.subject
 
   return (
-    <li className="relative">
+    // Same reason as the automated row: the row carries the negative margin so
+    // the checkbox and the text share one origin.
+    <li className="relative -mx-[18px]">
       {/* Outside the row's link, so selecting never navigates. */}
       {showSelector ? (
-        <button
-          type="button"
-          role="checkbox"
-          aria-checked={selected}
-          aria-label={`Select ${title}`}
-          onClick={(event) =>
-            onSelect(conversation.providerThreadId, {
-              shiftKey: event.shiftKey,
-              additive: event.ctrlKey || event.metaKey,
-            })
-          }
-          className={cn(
-            'absolute top-2 left-2 z-10 flex size-4 items-center justify-center rounded-[4px] border transition-colors',
-            selected
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-border bg-background hover:border-foreground/40',
-          )}
-        >
-          {selected ? <Check aria-hidden="true" className="size-3" /> : null}
-        </button>
+        <RowSelector
+          title={title}
+          providerThreadId={conversation.providerThreadId}
+          selected={selected}
+          onSelect={onSelect}
+          className="top-2.5"
+        />
       ) : null}
       <Link
         to="/conversations/$providerThreadId"
@@ -515,7 +550,7 @@ function ConversationRow({
           })
         }}
         className={cn(
-          '-mx-[18px] block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
+          'block border-b border-border py-[9px] pr-[18px] pl-[18px] transition-colors hover:bg-muted/30',
           showSelector && 'pl-10',
           active && 'bg-muted/40',
         )}
@@ -1355,6 +1390,9 @@ export function Inbox({
   // Multi-select for batch triage. Ids rather than row objects, so a loader
   // refresh — which replaces every summary — does not drop the selection.
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  // Shift is the gesture that reveals the checkboxes; it is a key you hold, not
+  // a mode you switch on, so it is state that follows keydown/keyup.
+  const [shiftHeld, setShiftHeld] = useState(false)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkError, setBulkError] = useState<string | null>(null)
   // Where a Shift range starts from. Selection is not a mode you switch on: a
@@ -1524,6 +1562,47 @@ export function Inbox({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onSetDoneMany, onSetStateMany])
 
+  /**
+   * Show the checkboxes while Shift is held.
+   *
+   * A held Shift is the discoverable half of the selection gesture: the
+   * checkboxes appear in every row, and a modified click picks them. Typing a
+   * capital letter in the search box must not indent the whole list, so keys
+   * pressed inside a field are ignored.
+   */
+  useEffect(() => {
+    if (!onSetDoneMany && !onSetStateMany) return
+
+    const isTyping = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false
+      return (
+        target.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      )
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Shift' || isTyping(event.target)) return
+      setShiftHeld(true)
+    }
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Shift') setShiftHeld(false)
+    }
+    // Switching windows swallows the keyup, which would otherwise leave the
+    // list indented with no gesture behind it.
+    const onBlur = () => setShiftHeld(false)
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [onSetDoneMany, onSetStateMany])
+
   // A search that matches nothing would otherwise leave the chosen section
   // selected for the list that comes back, which then reads as empty with no
   // visible cause. Clearing it as the empty result lands is what puts the
@@ -1658,11 +1737,10 @@ export function Inbox({
   const stateMany = onSetStateMany
   const selectable = Boolean(doneMany || stateMany)
   // The checkboxes are only part of the page while a selection gesture is
-  // possible or under way; otherwise the rows stay a clean list.
-  // Only once something is selected. Merely holding Shift used to add a 40px
-  // checkbox gutter to every row, which pushed the mail right without saying
-  // anything the user had asked for.
-  const showSelectors = selectable && selected.size > 0
+  // under way, or about to be: holding Shift shows them before anything is
+  // picked, and an existing selection keeps them visible after it is released.
+  // Otherwise the rows stay a clean list of links.
+  const showSelectors = selectable && (shiftHeld || selected.size > 0)
 
   /**
    * The rows a menu action applies to.

@@ -118,6 +118,66 @@ body {
   backdrop-filter: blur(16px);
 }
 
+/*
+ * The hero demo starts at 82% and grows to the viewport as the page scrolls.
+ * The same number lives in `HeroVisual` as DEMO_START_SCALE; this rule only sets
+ * the first paint so the card does not flash at full size before hydration.
+ * Without scripting there is no scroll driver, so it stays full size — and the
+ * media query is what keeps that true without inline styles on the element.
+ */
+.hero-demo-frame {
+  transform: scale(1);
+}
+
+@media (scripting: enabled) and (prefers-reduced-motion: no-preference) {
+  .hero-demo-frame {
+    transform: scale(0.82);
+  }
+}
+
+/*
+ * The closing band is the one surface where cadmium and amber carry the whole
+ * block: deep orange under the copy, amber at the far edge. The gradient stays
+ * put so both colours are always on screen; the light in the corner drifts,
+ * which is the part that moves.
+ */
+.cta-gradient {
+  background-image: linear-gradient(
+    100deg,
+    #ff5722 0%,
+    #ff7a2f 46%,
+    #ffa000 100%
+  );
+}
+
+@keyframes drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-28px, 22px, 0) scale(1.1);
+  }
+}
+
+.cta-orb {
+  animation: drift 16s ease-in-out infinite alternate;
+}
+
+/* The glow behind the hero inbox: the amber half of the palette, breathing. */
+@keyframes glow-breathe {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.hero-glow {
+  animation: glow-breathe 9s ease-in-out infinite;
+}
+
 /* The FAQ keeps native <details>; only the answer fades in. */
 details[open] .faq-answer {
   animation: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
@@ -131,6 +191,12 @@ details[open] .faq-answer {
   }
 
   details[open] .faq-answer {
+    animation: none;
+  }
+
+  .cta-gradient,
+  .cta-orb,
+  .hero-glow {
     animation: none;
   }
 }
