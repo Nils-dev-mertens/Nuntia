@@ -31,6 +31,7 @@ import {
   FolderTree,
   Mail,
   MessageSquare,
+  ShieldAlert,
   SlidersHorizontal,
   Sparkles,
   Tag,
@@ -57,6 +58,7 @@ import type { ContextRevisionView } from '#/lib/context/revisions.ts'
 import {
   addUnreplyableSender,
   forgetAccount,
+  refileStoredSpamMatches,
   removeUnreplyableSender,
 } from '#/lib/gmail/service.ts'
 import {
@@ -81,6 +83,9 @@ import {
   REPLY_DRAFT_MIN_IMPORTANCE_MIN,
 } from '#/lib/conversation/draft.ts'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
+import { listSpamRules, saveSpamRules } from '#/lib/spam/index.ts'
+import { SPAM_RULE_FIELDS, SPAM_RULE_LIMITS } from '#/lib/spam/fields.ts'
+import type { SpamRule, SpamRuleField } from '#/lib/spam/fields.ts'
 import {
   listOrganizationLabels,
   listStateLabels,
@@ -104,8 +109,11 @@ import {
 import type { StateLabels } from '#/lib/organization/labels.ts'
 import { proposeStateMeaning } from '#/lib/organization/state-meaning.ts'
 import type { StateMeaningProposal } from '#/lib/organization/state-meaning.ts'
-import { CONVERSATION_STATES } from '#/db/schema.ts'
-import { STATE_META, STATE_ORDER } from '#/lib/conversation-state.ts'
+import {
+  CONVERSATION_STATES,
+  STATE_META,
+  STATE_ORDER,
+} from '#/lib/conversation-state.ts'
 
 /** Provider choices for the topic generator. Labels only — no server code. */
 const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
@@ -124,6 +132,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         signedIn: true
         settings: AiSettingsSummary
         organizationLabels: OrganizationLabel[]
+        /** The user's spam rules, in the order they are listed in settings. */
+        spamRules: SpamRule[]
         /** The four state labels, with the user's wording applied. */
         stateLabels: StateLabels
         /** Recent automatic context writes, newest first, with an Undo each. */
@@ -230,6 +240,7 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       signedIn: true,
       settings: await getAiSettings(session.userId),
       organizationLabels: await listOrganizationLabels(session.userId),
+      spamRules: await listSpamRules(session.userId),
       stateLabels: await listStateLabels(session.userId),
       contextRevisions: await listRecentContextRevisions(session.userId),
       accounts: await Promise.all(
@@ -376,6 +387,68 @@ const saveOrganizationLabelsAction = createServerFn({ method: 'POST' })
       } catch (error) {
         console.error('[settings] saving organization rules failed:', error)
         return { rules: null, error: 'Could not save organization rules.' }
+      }
+    },
+  )
+
+/**
+ * Save the spam rules, then apply them to the mail already stored.
+ *
+ * The sweep is a second step on purpose: a failure to re-file old mail must not
+ * report the rules as unsaved, because they were. The UI shows the warning
+ * instead, and the next sync still applies the rules to new arrivals.
+ */
+const saveSpamRulesAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      rules: SpamRule[] | null
+      error: string | null
+      moved: number
+      warning: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) {
+        return {
+          rules: null,
+          error: 'You are not signed in.',
+          moved: 0,
+          warning: null,
+        }
+      }
+
+      try {
+        const rules = await saveSpamRules(session.userId, data)
+        if (!rules) {
+          return {
+            rules: null,
+            error: 'Spam rules are invalid or exceed the limit.',
+            moved: 0,
+            warning: null,
+          }
+        }
+
+        let moved = 0
+        let warning: string | null = null
+        try {
+          moved = await refileStoredSpamMatches(session.userId)
+        } catch (error) {
+          console.error('[settings] re-filing spam matches failed:', error)
+          warning =
+            'Rules saved, but the mail already in your inbox could not be re-checked.'
+        }
+
+        return { rules, error: null, moved, warning }
+      } catch (error) {
+        console.error('[settings] saving spam rules failed:', error)
+        return {
+          rules: null,
+          error: 'Could not save spam rules.',
+          moved: 0,
+          warning: null,
+        }
       }
     },
   )
@@ -1353,6 +1426,198 @@ function OrganizationRulesEditor({
 }
 
 /**
+ * The rules that send mail to Spam.
+ *
+ * One condition per rule and any one is enough, unlike the custom labels: a
+ * spam rule is a direct "this is junk" statement, so there is no meaning for the
+ * model to interpret and no ordering to get right. The editor is the only place
+ * a rule is written; the sync and the save sweep both read the same stored list.
+ */
+function SpamRulesEditor({ initialRules }: { initialRules: SpamRule[] }) {
+  const router = useRouter()
+  const [rules, setRules] = useState(initialRules)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  function updateRule(id: string, patch: Partial<SpamRule>) {
+    setRules((current) =>
+      current.map((rule) => (rule.id === id ? { ...rule, ...patch } : rule)),
+    )
+    setMessage(null)
+  }
+
+  async function save() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      // A blank row is a rule being written, not a rule that matches nothing:
+      // drop it so the count and the saved list describe actual rules.
+      const payload = rules.filter((rule) => rule.value.trim() !== '')
+      const result = await saveSpamRulesAction({ data: payload })
+      if (result.error || !result.rules) {
+        setError(result.error ?? 'Could not save spam rules.')
+        return
+      }
+
+      setRules(result.rules)
+      setMessage(
+        result.moved > 0
+          ? `Spam rules saved. ${result.moved} matching conversation${
+              result.moved === 1 ? '' : 's'
+            } moved to Spam.`
+          : 'Spam rules saved.',
+      )
+      if (result.warning) setError(result.warning)
+      await router.invalidate()
+    } catch {
+      setError('Could not save spam rules.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const fieldLabels: Record<SpamRuleField, string> = {
+    'sender-email': 'Sender email is',
+    'sender-domain': 'Sender domain is',
+    'subject-contains': 'Subject contains',
+  }
+  const inputClass =
+    'min-w-0 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-foreground'
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <h2 className="text-sm font-semibold text-foreground">Spam rules</h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Any one rule below is enough to file matching mail as Spam, and the next
+        sync keeps doing it for new arrivals. Saving also moves mail that is
+        already in your inbox when it matches — local only, so Gmail itself is
+        untouched. Removing a rule stops it filing new mail but does not pull
+        old mail back out of Spam, because the app cannot tell its own filing
+        from Gmail's; use Move to Inbox on a thread for that. Marking a sender
+        as spam from the Spam view keeps teaching the same lesson without a
+        rule.
+      </p>
+
+      {rules.length > 0 ? (
+        <ol className="mt-3 space-y-2">
+          {rules.map((rule, index) => (
+            <li
+              key={rule.id}
+              className="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]"
+            >
+              <label className="text-[11px] text-muted-foreground">
+                When
+                <select
+                  aria-label={`Spam rule ${index + 1} field`}
+                  value={rule.field}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateRule(rule.id, {
+                      field: event.target.value as SpamRuleField,
+                      value: '',
+                    })
+                  }
+                  className={`${inputClass} mt-1 block w-full`}
+                >
+                  {SPAM_RULE_FIELDS.map((field) => (
+                    <option key={field} value={field}>
+                      {fieldLabels[field]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-[11px] text-muted-foreground">
+                Value
+                <input
+                  aria-label={`Spam rule ${index + 1} value`}
+                  value={rule.value}
+                  maxLength={SPAM_RULE_LIMITS.value}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateRule(rule.id, { value: event.target.value })
+                  }
+                  placeholder={
+                    rule.field === 'sender-domain'
+                      ? 'example.com'
+                      : rule.field === 'sender-email'
+                        ? 'billing@example.com'
+                        : 'Text in the subject'
+                  }
+                  className={`${inputClass} mt-1 block w-full`}
+                />
+              </label>
+              <button
+                type="button"
+                aria-label={`Delete spam rule ${index + 1}`}
+                disabled={busy}
+                onClick={() => {
+                  setRules((current) =>
+                    current.filter((entry) => entry.id !== rule.id),
+                  )
+                  setMessage(null)
+                }}
+                className="rounded border border-destructive/40 px-2 py-1 text-xs text-destructive disabled:opacity-50"
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">
+          No spam rules yet. Add one to file matching mail automatically.
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy || rules.length >= SPAM_RULE_LIMITS.count}
+          onClick={() => {
+            setRules((current) => [
+              ...current,
+              {
+                id: crypto.randomUUID(),
+                field: 'sender-email',
+                value: '',
+              },
+            ])
+            setMessage(null)
+          }}
+          className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
+        >
+          Add rule
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void save()}
+          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+        >
+          {busy ? 'Saving & re-checking…' : 'Save spam rules'}
+        </button>
+        <span className="text-[11px] text-muted-foreground">
+          {rules.length}/{SPAM_RULE_LIMITS.count} rules
+        </span>
+      </div>
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+      {message ? (
+        <p role="status" className="mt-2 text-xs text-muted-foreground">
+          {message}
+        </p>
+      ) : null}
+    </section>
+  )
+}
+
+/**
  * Settings, one component.
  *
  * There used to be a signed-out branch here, split out so flipping the loader's
@@ -1446,6 +1711,13 @@ const SETTINGS_GROUPS: ReadonlyArray<{
         icon: FolderTree,
         description:
           'Your own labels, and the conditions that file mail into them.',
+      },
+      {
+        id: 'spam-rules',
+        label: 'Spam rules',
+        icon: ShieldAlert,
+        description:
+          'Senders, domains and subjects that file mail as Spam — and the mail they move right away.',
       },
       {
         id: 'senders',
@@ -1555,6 +1827,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
   const {
     settings,
     organizationLabels: initialOrganizationLabels,
+    spamRules: initialSpamRules,
     stateLabels: initialStateLabels,
     contextRevisions,
     accounts,
@@ -2231,6 +2504,10 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
               initialLabels={initialOrganizationLabels}
               stateLabels={initialStateLabels}
             />
+          ) : null}
+
+          {activePanel === 'spam-rules' ? (
+            <SpamRulesEditor initialRules={initialSpamRules} />
           ) : null}
         </div>
 

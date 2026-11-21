@@ -34,7 +34,7 @@ import {
   setConversationDone,
   setConversationUnread,
 } from '#/lib/gmail/service.ts'
-import { CONVERSATION_STATES } from '#/db/schema.ts'
+import { CONVERSATION_STATES } from '#/lib/conversation-state.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import type {
   ActionFailure,

@@ -1,7 +1,7 @@
 ---
 import SiteLayout from '../layouts/SiteLayout.astro'
 
-const updated = '17 November 2026'
+const updated = '19 November 2026'
 const contactEmail = 'nilsdevmertens@gmail.com'
 
 const sections = [
@@ -19,7 +19,7 @@ const sections = [
     ],
     bullets: [
       'The mail you connect: message contents, headers, labels and attachments that Nuntia reads through Gmail or Outlook.',
-      'The access it asks for: read mail, send mail and mark mail read. Nuntia does not request permission to delete.',
+      'The access it asks for: read mail, send mail, and change labels (marking read and unread is a label change). Gmail grants those together as one permission, and that permission also allows moving mail to the trash. Nuntia never deletes or trashes mail by itself — it has no delete action; it only records what you already did in Gmail or Outlook.',
       'Your sign-ins: Google or Microsoft OAuth tokens, and an AI provider key if you add one.',
       'What you write: notes about people, tags, importance ratings, sections, and draft text you keep.',
       'The address you used to request an invitation, and the state of that invitation.',
@@ -29,7 +29,7 @@ const sections = [
     title: 'Where the mail lives',
     body: [
       'Google or Microsoft remains the source of truth and keeps the original message. Nuntia keeps a copy in one file on the machine where it runs; that local copy is what makes reading and search fast.',
-      'Sign-ins and AI keys are encrypted at rest with a key held by the operator. If you run Nuntia yourself, that operator is you.',
+      'That copy is encrypted at rest, apart from the addresses and tag names that have to stay searchable (see Security). The key is held by the operator; if you run Nuntia yourself, that operator is you.',
     ],
   },
   {
@@ -60,13 +60,22 @@ const sections = [
     title: 'How long it is kept',
     body: [
       'Mail and notes stay for as long as your beta account is active. Removing Nuntia’s data file removes its copy; it does not remove anything from Gmail or Outlook.',
+      'Mail you delete, trash or report as spam in Gmail or Outlook is removed from Nuntia’s copy on the next sync.',
+      'The app’s own working records age out: the reasons a model gave for a classification, and the log of who was added to or removed from a tag, are deleted after 365 days by default. The operator can choose a different window, and the job runs on a schedule rather than from memory.',
+      'Deleting a row also overwrites the bytes it used in the data file, so a deleted message is not left readable inside the file. A copy made before the delete — a backup — keeps it until that backup expires.',
+      'Database backups are kept for 14 days by default; the operator can change that, and the copies are listed when an account is erased.',
+      'When an account is erased, its mail, notes, tags and keys are deleted and the result is checked for leftovers. Copies outside the data file are not reached: backups taken before the erasure, and anything already copied off the machine. The erasure report lists them so the operator can age them out.',
       'Invitation records are kept while the beta runs. Server logs are kept only as long as the host needs them.',
     ],
   },
   {
     title: 'Security',
     body: [
-      'Sign-ins and AI keys are encrypted at rest. Message HTML is cleaned before it is shown: scripts are removed and the message is isolated from the rest of the page.',
+      'What Nuntia keeps about your mail is encrypted at rest with one key held by the operator: subjects, bodies, attachment file names, the notes, tags, labels and ratings written about people, the summary of a relationship, and the reasons a model gave for a classification. Sign-ins and AI keys use the same key.',
+      'A few values also have to be found again — an address, a domain, a tag, the thing a change was made to. Those are stored in a form that can still be matched against a search, and the message headers keep addresses as the provider sent them. What the app writes about a person is encrypted.',
+      'Encryption protects the data file, not a signed-in account: anyone who can sign in, or who holds the operator’s key, can read what that account can read.',
+      'Losing the key means the encrypted content cannot be read. The mail itself still exists at Google or Microsoft and can be synced again; notes written in Nuntia cannot be recovered.',
+      'Message HTML is cleaned before it is shown: scripts are removed and the message is isolated from the rest of the page.',
       'No service can promise perfect security. If you find a problem, tell us through the address below.',
     ],
   },

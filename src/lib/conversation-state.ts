@@ -1,4 +1,18 @@
-import type { ConversationState } from '#/db/schema'
+/**
+ * The four MVP states from the spec. `low-priority` reuses destructive styling.
+ *
+ * Lives here rather than in `#/db/schema.ts` because the UI needs the values and
+ * the schema is server-only: it holds the encrypted column types, which import
+ * `node:crypto`. Re-exported from the schema for server code.
+ */
+export const CONVERSATION_STATES = [
+  'needs-action',
+  'waiting-for-reply',
+  'informational',
+  'low-priority',
+] as const
+
+export type ConversationState = (typeof CONVERSATION_STATES)[number]
 
 /**
  * Presentation config for the four conversation states.

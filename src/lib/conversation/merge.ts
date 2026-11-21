@@ -10,6 +10,13 @@
  *    which is the same string in every mailbox that received that message, so
  *    clustering on it is exact rather than a subject/participant guess.
  *
+ *    A provider that gives the message no usable Message-ID (Outlook falls back
+ *    to its own id when the header is missing, for example) would otherwise
+ *    leave two copies looking like two threads. For those, a conservative
+ *    fallback matches the *first* message: the normalised subject, its sender
+ *    and time, and the exact set of senders in the thread. Later replies can be
+ *    missing from one copy; the message that started the thread cannot.
+ *
  * 2. **What the thread means depends on how your accounts relate to it.** A
  *    thread you correspond on is not the same as one you merely receive a copy
  *    of. That relation decides which account owns the row, whether a passive copy
@@ -154,11 +161,202 @@ export function relationOf(
   return relationForRoles(rolesFor(messages, accountIndex(accounts)))
 }
 
+/**
+ * Strip the prefixes a provider adds to every reply in a thread.
+ *
+ * Gmail and Graph both keep the original subject on the thread but prefix the
+ * individual messages; the stored thread subject can come from either. Removing
+ * `Re:`, `Fwd:` and their common localised forms is what lets the fallback
+ * compare "Invoice" with "Re: Invoice" without also treating two genuinely
+ * different subjects as equal.
+ */
+const SUBJECT_PREFIX = /^(?:re|fw|fwd|aw|sv)\s*(?:\[\d+\])?\s*:\s*/i
+
+/** Did this subject come from a client's Reply/Forward action? */
+export function hasReplyPrefix(subject: string): boolean {
+  return SUBJECT_PREFIX.test(subject.trim())
+}
+
+export function normaliseThreadSubject(subject: string): string {
+  let value = subject.trim()
+  while (SUBJECT_PREFIX.test(value)) {
+    value = value.replace(SUBJECT_PREFIX, '').trim()
+  }
+  return value.replace(/\s+/g, ' ').toLowerCase()
+}
+
+/**
+ * What "the same conversation" looks like when no Message-ID is shared.
+ *
+ * Most copies are already joined exactly by `internetMessageId`. The fallback is
+ * for the rest: a provider that drops the header, a synthetic provider id, a
+ * thread whose messages were stored before the header was read. It deliberately
+ * looks at the *first* message rather than the newest one — later replies can
+ * arrive in one mailbox and not the other, but the message that started the
+ * thread is the same mail in both.
+ */
+export type ThreadIdentity = {
+  /** Normalised subject, with reply/forward prefixes removed. */
+  subject: string
+  /** True when the stored subject still has a Re:/Fwd: prefix. */
+  subjectIsReply: boolean
+  firstFrom: string
+  /** Everyone the oldest message was addressed to (To and Cc). */
+  firstRecipients: string[]
+  /** Sent time of the oldest message, in milliseconds. */
+  firstAt: number
+  /** RFC `Message-ID` of the oldest message, when the provider gave one. */
+  firstMessageId: string | null
+  /** Every distinct `From` address in the thread, sorted. */
+  senders: string[]
+}
+
+/**
+ * How far apart two copies' first messages may be and still be called the same.
+ *
+ * The Date header is identical in both deliveries, so the real value is usually
+ * exactly equal. The window only absorbs a provider that drops seconds or
+ * round-trips the date through a different format.
+ */
+export const THREAD_IDENTITY_WINDOW_MS = 2 * 60 * 1000
+
+/** The identity facts for one stored conversation, or null when too little is known. */
+export function threadIdentity(
+  conversation: Conversation,
+): ThreadIdentity | null {
+  if (conversation.messages.length === 0) return null
+
+  const first = conversation.messages.reduce((earliest, message) =>
+    message.sentAt < earliest.sentAt ? message : earliest,
+  )
+  const firstAt = first.sentAt.getTime()
+  const rawSubject = conversation.subject.trim() || first.subject
+  const subject = normaliseThreadSubject(rawSubject)
+  const firstFrom = normaliseEmail(first.from.email)
+  const firstRecipients = [
+    ...new Set(
+      [...first.to, ...first.cc]
+        .map((participant) => normaliseEmail(participant.email))
+        .filter((email) => email !== ''),
+    ),
+  ].sort()
+
+  // Without a subject, a sender and a real time there is nothing safe to compare:
+  // every empty-subject notification would look like every other one.
+  if (!subject || !firstFrom || !Number.isFinite(firstAt)) return null
+
+  const senders = [
+    ...new Set(
+      conversation.messages
+        .map((message) => normaliseEmail(message.from.email))
+        .filter((email) => email !== ''),
+    ),
+  ].sort()
+
+  return {
+    subject,
+    subjectIsReply: hasReplyPrefix(rawSubject) || hasReplyPrefix(first.subject),
+    firstFrom,
+    firstRecipients,
+    firstAt,
+    firstMessageId: first.internetMessageId,
+    senders,
+  }
+}
+
+/** Only an RFC 5322 Message-ID is globally shared; provider ids are not. */
+function isRfcMessageId(value: string | null): value is string {
+  return value !== null && /^<[^<>\s]+@[^<>\s]+>$/.test(value)
+}
+
+/** How long after the original a reply may still be the same thread. */
+export const REPLY_LINK_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * Does this reply belong to that conversation, even without a stored header?
+ *
+ * The case this exists for: one mail goes to several people, one replies, and
+ * the provider files the reply under a thread id of its own. `In-Reply-To` is
+ * the exact link and is stored on new mail. This is the same-mailbox fallback for
+ * mail stored before those headers were kept, and for providers that omit them.
+ *
+ * Deliberately narrow: the reply must carry a reply/forward prefix, the parent
+ * must not, the normalized subjects must agree, the reply must follow the parent
+ * within a month, and the reply's sender must be someone the parent was actually
+ * addressed to (or the parent's sender must be someone the reply addressed). A
+ * recipient replying is a much stronger signal than one subject string.
+ */
+export function sameThreadReply(
+  reply: ThreadIdentity,
+  parent: ThreadIdentity,
+): boolean {
+  if (!reply.subjectIsReply || parent.subjectIsReply) return false
+  if (reply.subject !== parent.subject) return false
+  // Five minutes of clock slack covers a provider that stores received time on
+  // one side and the Date header on the other.
+  if (reply.firstAt + 5 * 60_000 < parent.firstAt) return false
+  if (reply.firstAt - parent.firstAt > REPLY_LINK_WINDOW_MS) return false
+
+  return (
+    parent.firstRecipients.includes(reply.firstFrom) ||
+    reply.firstRecipients.includes(parent.firstFrom)
+  )
+}
+
+/**
+ * Could these two rows be copies of one thread in different mailboxes?
+ *
+ * Conservative on purpose. A false positive merges two unrelated letters and —
+ * because a merge carries the owner's folder — can hide one of them in Spam. So
+ * every signal has to agree: the normalized subject, the sender of the first
+ * message, the first message's time, the exact set of senders, and no evidence
+ * that the two first messages are different (two real, different Message-IDs).
+ */
+export function sameThreadIdentity(
+  a: ThreadIdentity | null,
+  b: ThreadIdentity | null,
+): boolean {
+  if (!a || !b) return false
+  if (a.subject !== b.subject) return false
+  if (a.firstFrom !== b.firstFrom) return false
+  if (Math.abs(a.firstAt - b.firstAt) > THREAD_IDENTITY_WINDOW_MS) {
+    return false
+  }
+
+  if (
+    isRfcMessageId(a.firstMessageId) &&
+    isRfcMessageId(b.firstMessageId) &&
+    a.firstMessageId !== b.firstMessageId
+  ) {
+    return false
+  }
+
+  return (
+    a.senders.length === b.senders.length &&
+    a.senders.every((sender, index) => sender === b.senders[index])
+  )
+}
+
 /** Dedupe key for a message, mirroring the parser's own identity for it. */
 function messageKey(accountId: string, message: ConversationMessage): string {
   return (
     message.internetMessageId ?? `${accountId}:${message.providerMessageId}`
   )
+}
+
+/**
+ * The ids a message says it answers, with RFC angle brackets removed.
+ *
+ * `In-Reply-To` is the direct parent and `References` is the whole chain. A
+ * provider can split a reply into a different thread while still carrying these
+ * headers, so they are the only evidence that the new thread is the old one.
+ */
+export function replyReferenceIds(
+  message: Pick<ConversationMessage, 'inReplyTo' | 'references'>,
+): string[] {
+  const ids = message.inReplyTo ? [message.inReplyTo] : []
+  for (const id of message.references ?? []) ids.push(id)
+  return ids.map((id) => id.trim().replace(/^</, '').replace(/>$/, ''))
 }
 
 /**
@@ -229,6 +427,80 @@ export function mergeAccountConversations(
       else union(seen, index)
     }
   })
+
+  // A reply belongs to the thread of the message it answers even when the
+  // provider gave it a thread id of its own. Without this pass a reply from one
+  // of several recipients on a mail we sent could arrive as a separate row: its
+  // Message-ID is new, and only `In-Reply-To` names the sent message.
+  sources.forEach((source, index) => {
+    for (const message of source.conversation.messages) {
+      for (const reference of replyReferenceIds(message)) {
+        const parentIndex = firstSeen.get(reference)
+        if (parentIndex !== undefined) union(parentIndex, index)
+      }
+    }
+  })
+
+  // The exact pass above misses copies from a provider that did not give the
+  // message an RFC Message-ID. Match those by identity instead, but only across
+  // different accounts: two same-account threads with one subject are two
+  // threads, not two copies.
+  const identities = sources.map((source) =>
+    threadIdentity(source.conversation),
+  )
+  const identityBuckets = new Map<string, number[]>()
+  identities.forEach((identity, index) => {
+    if (!identity) return
+    const key = `${identity.subject}\u0000${identity.firstFrom}`
+    const bucket = identityBuckets.get(key)
+    if (bucket) bucket.push(index)
+    else identityBuckets.set(key, [index])
+  })
+
+  for (const indices of identityBuckets.values()) {
+    for (let i = 0; i < indices.length; i += 1) {
+      for (let j = i + 1; j < indices.length; j += 1) {
+        const a = indices[i]
+        const b = indices[j]
+        if (sources[a].accountId === sources[b].accountId) continue
+        if (sameThreadIdentity(identities[a], identities[b])) {
+          union(a, b)
+        }
+      }
+    }
+  }
+
+  // Same-mailbox replies that the provider stored as their own thread. This is
+  // deliberately separate from the cross-account pass: there, identical subjects
+  // are two copies; here, a `Re:` thread following the mail it answers is one
+  // conversation. Requiring exactly one parent keeps an ambiguous subject from
+  // folding unrelated threads together.
+  const replyBuckets = new Map<string, number[]>()
+  identities.forEach((identity, index) => {
+    if (!identity) return
+    const key = `${sources[index].accountId}\u0000${identity.subject}`
+    const bucket = replyBuckets.get(key)
+    if (bucket) bucket.push(index)
+    else replyBuckets.set(key, [index])
+  })
+
+  for (const indices of replyBuckets.values()) {
+    const parents = indices.filter(
+      (index) => identities[index]?.subjectIsReply === false,
+    )
+    if (parents.length === 0) continue
+
+    for (const replyIndex of indices) {
+      const reply = identities[replyIndex]
+      if (!reply?.subjectIsReply) continue
+
+      const matches = parents.filter((parentIndex) => {
+        const parentIdentity = identities[parentIndex]
+        return parentIdentity ? sameThreadReply(reply, parentIdentity) : false
+      })
+      if (matches.length === 1) union(replyIndex, matches[0])
+    }
+  }
 
   const clusters = new Map<number, number[]>()
   sources.forEach((_, index) => {
@@ -540,6 +812,9 @@ function rebuildConversation(
     participants,
     messages,
     attachments,
+    // The owner's copy decides the folder: the thread is the same mail, and the
+    // account that owns it is the one whose labels are authoritative.
+    folder: owner.conversation.folder,
 
     state: ccOnly ? 'low-priority' : (override ?? derived.state),
     awaitingReply: ccOnly ? false : derived.awaitingReply,

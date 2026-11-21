@@ -44,10 +44,12 @@ export {
 } from './parse.ts'
 
 export {
+  applyGreetingName,
   buildMimeMessage,
   composeNewMessage,
   composeReply,
   encodeQuotedPrintable,
+  GREETING_NAME_TOKEN,
 } from './compose.ts'
 
 export type { ComposeInput, MimeAttachment } from './compose.ts'

@@ -267,6 +267,20 @@
       "when": 1794867679934,
       "tag": "0037_clumsy_vargas",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1795048099318,
+      "tag": "0038_chemical_karen_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1795293461584,
+      "tag": "0039_acoustic_skaar",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,8 @@ import {
 } from 'lucide-react'
 
 import type { ConversationState } from '#/db/schema.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
+import { FOLDER_LABELS } from '#/lib/mail-folders.ts'
 import type {
   AccountSyncProgress,
   ConversationSummary,
@@ -1213,9 +1215,12 @@ export function Inbox({
   onSetDoneMany,
   onSetStateMany,
   onSetUnread,
+  onSetFolder,
+  onDeleteForever,
   onSetOrganizationGroup,
   onReorderSections,
   onPreview,
+  folderView = null,
 }: {
   payload: InboxPayload
   /** The newest unanswered form, promoted as a banner. */
@@ -1300,6 +1305,30 @@ export function Inbox({
     providerThreadIds: string[],
     unread: boolean,
   ) => Promise<{ error: string | null }>
+  /**
+   * Move threads between Inbox/Archive/Deleted/Spam. Optional like the rest:
+   * rendered in isolation there is no mailbox to write to.
+   */
+  onSetFolder?: (
+    providerThreadIds: string[],
+    folder: MailFolder,
+  ) => Promise<{ error: string | null }>
+  /**
+   * Delete threads that are already in Deleted permanently.
+   *
+   * Optional like the rest: rendered in isolation there is no provider. The
+   * caller asks for confirmation first; this prop only performs the write.
+   */
+  onDeleteForever?: (
+    providerThreadIds: string[],
+  ) => Promise<{ error: string | null }>
+  /**
+   * Show only one folder, and list it flat rather than by state.
+   *
+   * Archive, Spam and Deleted are destinations rather than triage: their mail
+   * has no "needs action" to sort by, so the state groups would be noise.
+   */
+  folderView?: MailFolder | null
   /**
    * File threads under a custom label, or hand them back to the rules with
    * `null`. Optional like the rest: rendered in isolation there is no server.
@@ -1877,13 +1906,42 @@ export function Inbox({
   // list on every keystroke would make the page flicker between states.
   const searchQuery = searchInput.trim()
   const searchActive = searchQuery.length > 0
-  const visibleConversations = searchResults?.conversations ?? conversations
+  const baseConversations = searchResults?.conversations ?? conversations
+  // The payload carries every folder so the sidebar can count them and the
+  // folder views can render without another round trip. The list itself shows
+  // exactly one folder: the one being viewed, Inbox when no folder is named.
+  // Without this, archiving or deleting a row changed its `folder` but left the
+  // row sitting in the Inbox list, which is what made the move look like it did
+  // nothing.
+  const currentFolder = folderView ?? 'inbox'
+  // Searching from the list itself stays a search of all mail, as its label
+  // says; from a folder view it searches that folder, which is what the view
+  // promises.
+  const visibleConversations =
+    searchActive && folderView === null
+      ? baseConversations
+      : baseConversations.filter(
+          (conversation) => conversation.folder === currentFolder,
+        )
   const stateLabels = payload.stateLabels
   // Which provider each mailbox is: the read toggle is offered only where the
   // provider can express a thread-level flag (Gmail), not on every row.
   const providerByAccount = new Map(
     accounts.map((account) => [account.id, account.provider]),
   )
+  // Permanent deletion is offered only when every target is already in
+  // Deleted. A stale selection that still holds an inbox thread must not turn
+  // "delete forever" into a first delete.
+  const folderByThreadId = new Map(
+    baseConversations.map((conversation) => [
+      conversation.providerThreadId,
+      conversation.folder,
+    ]),
+  )
+  const menuTargetsAreTrash =
+    menu !== null &&
+    menuTargetIds.length > 0 &&
+    menuTargetIds.every((id) => folderByThreadId.get(id) === 'trash')
   // Only enabled labels are places to move a thread *into*; a disabled rule
   // cannot receive mail, so offering it would create a section nobody can see.
   const customLabels = payload.organizationLabels.filter(
@@ -1947,21 +2005,36 @@ export function Inbox({
     return section ? [section] : []
   })
 
-  const sections: InboxSection[] = [
-    ...orderedSections,
-    ...(done.length > 0
-      ? [
-          {
-            key: 'done',
-            title: DONE_GROUP.label,
-            description: DONE_GROUP.description,
-            dotClass: 'bg-muted-foreground',
-            items: done,
-            muted: true,
-          },
-        ]
-      : []),
-  ]
+  const sections: InboxSection[] = folderView
+    ? [
+        {
+          key: `folder:${folderView}`,
+          title: FOLDER_LABELS[folderView],
+          description:
+            folderView === 'spam'
+              ? 'Mail your rules, the provider, or you filed as spam.'
+              : folderView === 'trash'
+                ? 'Deleted mail stays here until it is permanently removed.'
+                : 'Mail you archived out of the inbox.',
+          dotClass: 'bg-muted-foreground',
+          items: [...visibleConversations].sort(byDate),
+        },
+      ]
+    : [
+        ...orderedSections,
+        ...(done.length > 0
+          ? [
+              {
+                key: 'done',
+                title: DONE_GROUP.label,
+                description: DONE_GROUP.description,
+                dotClass: 'bg-muted-foreground',
+                items: done,
+                muted: true,
+              },
+            ]
+          : []),
+      ]
   // A filter can stop existing between renders (a rule was disabled, a search
   // narrowed the sections), and a search can empty the section being viewed
   // while still matching mail elsewhere. Falling back to everything is what
@@ -2114,7 +2187,11 @@ export function Inbox({
                 : 'text-3xl font-bold',
             )}
           >
-            {embedded ? 'Inbox' : 'Nuntia'}
+            {embedded
+              ? folderView
+                ? FOLDER_LABELS[folderView]
+                : 'Inbox'
+              : 'Nuntia'}
           </h1>
           {/*
            * The two marks, in words, once — because the dot and the tag are only
@@ -2342,6 +2419,116 @@ export function Inbox({
                   : 'Mark as unread'}
             </button>
           ) : null}
+          {/*
+           * Folder actions are the mailbox's own filing, like the read flag, so
+           * they are offered only where the provider can express them. Marking
+           * spam is also what teaches the app about the sender; "not spam" is
+           * the correction that takes that back.
+           */}
+          {onSetFolder &&
+          providerByAccount.get(menu.conversation.accountId) === 'google' ? (
+            <>
+              <div className="my-1 h-px bg-border" />
+              <p className="px-2.5 pt-1 pb-1 text-[11px] tracking-wide text-muted-foreground uppercase">
+                Move
+              </p>
+              {menu.conversation.folder !== 'inbox' ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={menuBusy}
+                  onClick={() =>
+                    void runMenuAction(
+                      (ids) => onSetFolder(ids, 'inbox'),
+                      menuTargetIds,
+                    )
+                  }
+                  className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+                >
+                  Move to inbox
+                </button>
+              ) : null}
+              {menu.conversation.folder !== 'archive' ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={menuBusy}
+                  onClick={() =>
+                    void runMenuAction(
+                      (ids) => onSetFolder(ids, 'archive'),
+                      menuTargetIds,
+                    )
+                  }
+                  className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+                >
+                  Archive
+                </button>
+              ) : null}
+              {menu.conversation.folder !== 'trash' ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={menuBusy}
+                  onClick={() =>
+                    void runMenuAction(
+                      (ids) => onSetFolder(ids, 'trash'),
+                      menuTargetIds,
+                    )
+                  }
+                  className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+                >
+                  Delete
+                </button>
+              ) : null}
+              <button
+                type="button"
+                role="menuitem"
+                disabled={menuBusy}
+                onClick={() =>
+                  void runMenuAction(
+                    (ids) =>
+                      onSetFolder(
+                        ids,
+                        menu.conversation.folder === 'spam' ? 'inbox' : 'spam',
+                      ),
+                    menuTargetIds,
+                  )
+                }
+                className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-foreground hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-50"
+              >
+                {menu.conversation.folder === 'spam'
+                  ? 'Not spam'
+                  : 'Mark as spam'}
+              </button>
+              {onDeleteForever && menuTargetsAreTrash ? (
+                <>
+                  <div className="my-1 h-px bg-border" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={menuBusy}
+                    onClick={() => {
+                      const count = menuTargetIds.length
+                      const question =
+                        count === 1
+                          ? 'Delete this conversation forever? This cannot be undone.'
+                          : `Delete ${count} conversations forever? This cannot be undone.`
+                      if (!window.confirm(question)) return
+                      void runMenuAction(
+                        (ids) => onDeleteForever(ids),
+                        menuTargetIds,
+                      )
+                    }}
+                    className="block w-full rounded-[4px] px-2.5 py-1.5 text-left text-xs font-medium text-destructive hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none disabled:opacity-50"
+                  >
+                    {menuTargetIds.length > 1
+                      ? `Delete ${menuTargetIds.length} forever`
+                      : 'Delete forever'}
+                  </button>
+                </>
+              ) : null}
+            </>
+          ) : null}
           {onSetState || stateMany ? (
             <>
               <div className="my-1 h-px bg-border" />
@@ -2495,7 +2682,7 @@ export function Inbox({
               same 18px gutter as the search and rows. */}
           {embedded ? (
             <h1 className="hidden pt-5 font-display text-[28px] leading-none font-medium tracking-[-0.6px] lg:block">
-              Inbox
+              {folderView ? FOLDER_LABELS[folderView] : 'Inbox'}
             </h1>
           ) : null}
 
@@ -2736,7 +2923,11 @@ export function Inbox({
                     <input
                       type="search"
                       aria-label="Search all mail"
-                      placeholder="Search all mail…"
+                      placeholder={
+                        folderView
+                          ? `Search ${FOLDER_LABELS[folderView].toLowerCase()}…`
+                          : 'Search all mail…'
+                      }
                       value={searchInput}
                       onChange={(event) => setSearchInput(event.target.value)}
                       className="h-[38px] w-full rounded-[4px] border border-border bg-background px-3 text-[12.5px] text-foreground outline-none focus:border-foreground/30 @3xl:w-60"

@@ -250,6 +250,44 @@ export function createGmailApiClient(
       )
     },
 
+    async setThreadFolder(threadId, folder) {
+      // One label change for the whole thread. Gmail's own folders are system
+      // labels, so "move to spam" is `add SPAM` and `remove INBOX` — there is no
+      // destination folder to address. Restoring is the reverse, and clears the
+      // other system labels so a thread cannot sit in two places at once.
+      const requestBody =
+        folder === 'inbox'
+          ? { addLabelIds: ['INBOX'], removeLabelIds: ['SPAM', 'TRASH'] }
+          : folder === 'archive'
+            ? { removeLabelIds: ['INBOX'] }
+            : folder === 'trash'
+              ? {
+                  addLabelIds: ['TRASH'],
+                  removeLabelIds: ['INBOX', 'SPAM'],
+                }
+              : {
+                  addLabelIds: ['SPAM'],
+                  removeLabelIds: ['INBOX', 'TRASH'],
+                }
+
+      await req(() =>
+        gmail.users.threads.modify({
+          userId: 'me',
+          id: threadId,
+          requestBody,
+        }),
+      )
+    },
+
+    async deleteThreadPermanently(threadId) {
+      // Gmail's `threads.delete` is the permanent form: the thread does not go
+      // to Trash, it is gone. The caller only reaches this from a thread that
+      // Gmail already reports as trashed.
+      await req(() =>
+        gmail.users.threads.delete({ userId: 'me', id: threadId }),
+      )
+    },
+
     async listHistory({ startHistoryId, pageToken }) {
       const data = await req(() =>
         gmail.users.history.list({

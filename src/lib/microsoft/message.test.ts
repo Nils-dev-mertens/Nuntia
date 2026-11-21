@@ -117,4 +117,23 @@ describe('toProviderMessage', () => {
 
     expect(parsed.messageId).toBe('AAMk-1')
   })
+
+  test('carries the threading headers Graph exposes as a header collection', () => {
+    const parsed = toParsedMessage(
+      toProviderMessage(
+        graphMessage({
+          internetMessageHeaders: [
+            { name: 'In-Reply-To', value: '<sent@example.com>' },
+            {
+              name: 'References',
+              value: '<root@example.com> <sent@example.com>',
+            },
+          ],
+        }),
+      ),
+    )
+
+    expect(parsed.inReplyTo).toBe('sent@example.com')
+    expect(parsed.references).toEqual(['root@example.com', 'sent@example.com'])
+  })
 })

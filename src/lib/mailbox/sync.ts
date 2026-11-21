@@ -13,6 +13,7 @@
 import type { MailboxClient, ProviderMessage, ProviderThread } from './types.ts'
 import {
   isDraft,
+  isSpam,
   isTrashed,
   isUnread,
   toParsedMessage,
@@ -22,6 +23,7 @@ import {
   applyDecision,
   buildConversation,
   decideConversation,
+  deleteConversation,
   getParsingProfileContext,
   getStoredUserFields,
   listConversations,
@@ -49,6 +51,9 @@ import type { ContactDecisionContext } from '#/lib/contacts/context.ts'
 import { loadContactHistory } from '#/lib/contacts/history.ts'
 import type { ContactHistoryThread } from '#/lib/contacts/history.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
+import { judgeMessage, loadSpamFacts } from '#/lib/spam/index.ts'
+import type { SpamFacts } from '#/lib/spam/index.ts'
 import { listContactTags } from '#/lib/contacts/tags.ts'
 import { customStateMeanings } from '#/lib/organization/labels.ts'
 import type { StateDefinitions } from '#/lib/organization/labels.ts'
@@ -197,6 +202,23 @@ const CONCURRENCY = 2
  * down in `client.ts`, which retries a rate-limited request with backoff, so a
  * worker here never has to know the difference.
  */
+/**
+ * Forget a thread the provider no longer has.
+ *
+ * A 404 from `getThread` is not a sync failure: it means the thread was
+ * permanently deleted. Leaving the local row would keep the mail readable
+ * forever, so it is dropped and reported as skipped rather than as an error.
+ */
+async function forgetDeletedThread(
+  accountId: string,
+  threadId: string,
+  onProgress: SyncProgress | undefined,
+): Promise<'skipped'> {
+  await deleteConversation(accountId, threadId)
+  onProgress?.({ type: 'skipped', threadId, reason: 'deleted at the provider' })
+  return 'skipped'
+}
+
 async function mapWithConcurrency<T, TResult>(
   items: T[],
   limit: number,
@@ -219,9 +241,44 @@ async function mapWithConcurrency<T, TResult>(
   return results
 }
 
-/** Messages worth turning into conversation bubbles. */
+/**
+ * Messages worth turning into conversation bubbles.
+ *
+ * Drafts are excluded — they are the user's own unsent text. Trash and spam are
+ * kept: they are now folders the user can open, so dropping them would make an
+ * empty Deleted/Spam view and would lose the very mail the rules are judged on.
+ * A thread that is only drafts becomes empty, which is the signal `syncThread`
+ * uses to drop the local copy.
+ */
 function relevantMessages(messages: ProviderMessage[]): ProviderMessage[] {
-  return messages.filter((m) => !isDraft(m) && !isTrashed(m))
+  return messages.filter((m) => !isDraft(m))
+}
+
+/**
+ * Which folder the provider's labels put a thread in.
+ *
+ * A thread is spam if any message is (Gmail applies the label to the thread),
+ * then trash, then archive when no message carries `INBOX`. Archive is the
+ * fallthrough rather than a label because Gmail models it as the absence of the
+ * inbox label, not as a folder of its own.
+ */
+function providerFolder(messages: ProviderMessage[]): MailFolder {
+  if (messages.some(isSpam)) return 'spam'
+  if (messages.some(isTrashed)) return 'trash'
+
+  // A thread with no inbox label is archived only when somebody other than the
+  // owner wrote in it. A thread made only of the user's own sent messages also
+  // lacks `INBOX`, but it is mail they wrote, not mail they filed away — and
+  // since this app has no Sent folder, treating it as archive would make it
+  // vanish from the list.
+  if (!messages.some((m) => m.labelIds.includes('INBOX'))) {
+    const hasInbound = messages.some(
+      (m) => !m.labelIds.includes('SENT') && !m.labelIds.includes('DRAFT'),
+    )
+    if (hasInbound) return 'archive'
+  }
+
+  return 'inbox'
 }
 
 /**
@@ -238,6 +295,17 @@ function reasonOf(error: unknown): string {
   if (cause instanceof Error && cause.message) return cause.message
   if (error instanceof Error && error.message) return error.message
   return 'unknown error'
+}
+
+/**
+ * True when the provider says the thread no longer exists.
+ *
+ * The adapter names this error (`GmailNotFoundError`); a 404 from
+ * `threads.get` is the provider's way of saying the thread was permanently
+ * deleted, as opposed to a quota or network failure worth retrying.
+ */
+function isDeletedAtProvider(error: unknown): boolean {
+  return error instanceof Error && error.name === 'GmailNotFoundError'
 }
 
 /**
@@ -293,7 +361,14 @@ export async function decideAndSave(
     accountId,
     conversation.providerThreadId,
   )
-  const withCall: Conversation = { ...conversation, ...storedUserFields }
+  // `folder` travels with the stored fields so a rebuild keeps it, but a caller
+  // that has just read the provider's labels knows better — the incoming folder
+  // wins here, and `syncThread` is the caller that computes it.
+  const withCall: Conversation = {
+    ...conversation,
+    ...storedUserFields,
+    folder: conversation.folder,
+  }
 
   const senderFacts =
     opts.senderFacts ?? (await loadSenderFacts(accountId, opts.userId))
@@ -442,7 +517,7 @@ export async function redecideConversationsForSender(
 
   for (const account of accounts) {
     const [conversations, senderFacts] = await Promise.all([
-      listConversations(account.id, { includeArchived: true }),
+      listConversations(account.id, { includeAllFolders: true }),
       loadSenderFacts(account.id, userId),
     ])
     const matching = conversations.filter((conversation) =>
@@ -480,7 +555,7 @@ export async function redecideStoredConversations(
   userId: string,
 ): Promise<number> {
   const conversations = await listConversations(accountId, {
-    includeArchived: true,
+    includeAllFolders: true,
   })
   if (conversations.length === 0) return 0
 
@@ -514,8 +589,10 @@ export async function redecideStoredConversations(
 /**
  * Turn one thread into a conversation and persist it.
  *
- * Drafts and trashed messages are excluded — the inbox should show what people
- * actually sent the user.
+ * Drafts, trashed and spam messages are excluded — the inbox should show what
+ * people actually sent the user. When nothing relevant is left, the stored
+ * conversation is deleted: a thread the user trashed or reported in Gmail must
+ * not stay readable in the local database.
  */
 export async function syncThread(
   accountId: string,
@@ -535,12 +612,17 @@ export async function syncThread(
     stateDefinitions?: StateDefinitions
     /** The user's meaning-matched labels, loaded once by the owning batch. */
     meaningLabels?: MeaningLabel[]
+    /** Spam rules and learned senders, read once by the owning batch. */
+    spamFacts?: SpamFacts
   },
 ): Promise<'synced' | 'skipped' | 'error'> {
   const { onProgress, profileContext, senderFacts } = opts
   const messages = relevantMessages(thread.messages)
 
   if (messages.length === 0) {
+    // Everything left is a draft. The provider still returns the thread, so
+    // without this the local copy would outlive the mail it mirrors.
+    await deleteConversation(accountId, thread.id)
     onProgress?.({
       type: 'skipped',
       threadId: thread.id,
@@ -567,6 +649,30 @@ export async function syncThread(
       ...profileContext,
     })
 
+    // The provider's labels settle archive/trash/spam. Only inbox mail is
+    // judged: re-running the scorer on mail the user can see in Spam would
+    // never bring it back, and the rules' job is to catch new arrivals.
+    let folder = providerFolder(messages)
+    if (folder === 'inbox') {
+      const newestInbound = [...built.messages]
+        .reverse()
+        .find((message) => !message.isFromOwner)
+      if (newestInbound) {
+        const facts =
+          opts.spamFacts ?? (await loadSpamFacts(accountId, opts.userId))
+        const verdict = judgeMessage(
+          {
+            from: newestInbound.from.email,
+            fromName: newestInbound.from.name,
+            subject: built.subject,
+            body: newestInbound.body,
+          },
+          facts,
+        )
+        if (verdict.spam) folder = 'spam'
+      }
+    }
+
     // The decision pipeline runs here, in the sync path, once per changed thread:
     // rules first, then the decision model (Jev) and the topic generator (an LLM)
     // when they are configured in the UI. With no keys this is the rule-based
@@ -576,12 +682,16 @@ export async function syncThread(
     //
     // Bytes are not downloaded here — only metadata is recorded. The attachment
     // cache fetches on demand when something actually needs the file.
-    await decideAndSave(accountId, built, {
-      userId: opts.userId,
-      senderFacts,
-      stateDefinitions: opts.stateDefinitions,
-      meaningLabels: opts.meaningLabels,
-    })
+    await decideAndSave(
+      accountId,
+      { ...built, folder },
+      {
+        userId: opts.userId,
+        senderFacts,
+        stateDefinitions: opts.stateDefinitions,
+        meaningLabels: opts.meaningLabels,
+      },
+    )
 
     onProgress?.({
       type: 'thread',
@@ -651,6 +761,7 @@ export async function backfill(
   const senderFacts = await loadSenderFacts(accountId, opts.userId)
   const stateDefinitions = await loadStateDefinitions(opts.userId)
   const meaningLabels = await loadMeaningLabelsFor(opts.userId)
+  const spamFacts = await loadSpamFacts(accountId, opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 
@@ -669,8 +780,12 @@ export async function backfill(
           senderFacts,
           stateDefinitions,
           meaningLabels,
+          spamFacts,
         })
       } catch (error) {
+        if (isDeletedAtProvider(error)) {
+          return forgetDeletedThread(accountId, threadId, onProgress)
+        }
         onProgress?.({
           type: 'error',
           threadId,
@@ -733,6 +848,7 @@ export async function syncIncremental(
   const senderFacts = await loadSenderFacts(accountId, opts.userId)
   const stateDefinitions = await loadStateDefinitions(opts.userId)
   const meaningLabels = await loadMeaningLabelsFor(opts.userId)
+  const spamFacts = await loadSpamFacts(accountId, opts.userId)
 
   onProgress?.({ type: 'listed', total: targets.length })
 
@@ -749,8 +865,14 @@ export async function syncIncremental(
           senderFacts,
           stateDefinitions,
           meaningLabels,
+          spamFacts,
         })
       } catch (error) {
+        // The thread was permanently deleted at the provider, not a transient
+        // failure: drop the local copy instead of retrying forever.
+        if (isDeletedAtProvider(error)) {
+          return forgetDeletedThread(accountId, threadId, onProgress)
+        }
         onProgress?.({
           type: 'error',
           threadId,

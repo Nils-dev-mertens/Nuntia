@@ -26,6 +26,7 @@ import {
   stripInvisibleCharacters,
 } from '#/lib/mail/index.ts'
 import type { MailPart, ParsedMessage } from '#/lib/mail/index.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
 import type { ConversationState, Intent, Participant } from '#/db/schema.ts'
 
 import { isAutomatedThread } from './automated.ts'
@@ -48,6 +49,15 @@ export type ConversationMessage = {
    * Outlook and Apple Mail.
    */
   internetMessageId: string | null
+  /**
+   * The message this one answers, when the provider gave the header.
+   *
+   * Kept so a reply that the provider split into a different thread can still be
+   * joined to the conversation that contains the message it points at.
+   */
+  inReplyTo?: string | null
+  /** Every ancestor id from the RFC `References` chain, when present. */
+  references?: string[]
   from: Participant
   to: Participant[]
   cc: Participant[]
@@ -289,6 +299,12 @@ export type Conversation = {
   participants: Participant[]
   messages: ConversationMessage[]
   attachments: ConversationAttachment[]
+
+  /**
+   * Which folder the thread is in. Set by the sync from the provider's labels
+   * (or by a spam rule), and put back from the stored row on a rebuild.
+   */
+  folder: MailFolder
 
   state: ConversationState
   /**
@@ -601,6 +617,8 @@ export function cleanMessage(
     providerMessageId:
       message.messageId ?? `synthetic:${message.date?.getTime() ?? 0}`,
     internetMessageId: message.messageId ?? null,
+    inReplyTo: message.inReplyTo ?? null,
+    references: message.references ?? [],
     from: {
       ...toParticipant(message.from),
       name: message.fromName ?? toParticipant(message.from).name,
@@ -787,6 +805,11 @@ export function buildConversation(
     importance: decision.importance,
     urgency: decision.urgency,
     intent: decision.intent,
+
+    // A fresh build knows nothing about the mailbox's filing; the sync that
+    // called it decides the folder from the labels, and a rebuild puts the
+    // stored one back.
+    folder: 'inbox',
 
     isAutomated,
     replyable: !isAutomated,

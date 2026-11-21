@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, between, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
@@ -32,7 +32,17 @@ import type {
   ParsingPreferences,
   StateOverride,
 } from './model.ts'
-import type { AccountConversation } from './merge.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
+
+import {
+  REPLY_LINK_WINDOW_MS,
+  replyReferenceIds,
+  sameThreadIdentity,
+  sameThreadReply,
+  THREAD_IDENTITY_WINDOW_MS,
+  threadIdentity,
+} from './merge.ts'
+import type { AccountConversation, ThreadIdentity } from './merge.ts'
 import type { Decision } from './decision.ts'
 import { cleanMessage, conversationId, otherPartyOf } from './model.ts'
 import { isAutomatedThread } from './automated.ts'
@@ -295,6 +305,7 @@ export async function saveConversation(
           providerThreadId: conversation.providerThreadId,
           subject: conversation.subject,
           participants: conversation.participants,
+          folder: conversation.folder,
           state: conversation.state,
           isAutomated: conversation.isAutomated,
           replyable: conversation.replyable,
@@ -337,6 +348,7 @@ export async function saveConversation(
           set: {
             subject: conversation.subject,
             participants: conversation.participants,
+            folder: conversation.folder,
             state: conversation.state,
             stateOverride: conversation.stateOverride?.state ?? null,
             stateOverrideMessageAt:
@@ -376,6 +388,8 @@ export async function saveConversation(
             conversationId: id,
             providerMessageId: m.providerMessageId,
             internetMessageId: m.internetMessageId,
+            inReplyTo: m.inReplyTo ?? null,
+            referenceIds: m.references ?? [],
             from: m.from,
             to: m.to,
             cc: m.cc,
@@ -901,7 +915,7 @@ export async function recordDecision(
 /** List conversations for an account, newest activity first. */
 export async function listConversations(
   accountId: string,
-  opts: { includeArchived?: boolean } = {},
+  opts: { includeArchived?: boolean; includeAllFolders?: boolean } = {},
 ): Promise<Conversation[]> {
   const rows = await db
     .select()
@@ -909,9 +923,15 @@ export async function listConversations(
     .where(eq(conversations.accountId, accountId))
     .orderBy(desc(conversations.lastMessageAt))
 
-  const filtered = opts.includeArchived
+  // The normal inbox read is inbox-only: archive, spam and deleted mail are
+  // places the user goes on purpose, not rows that belong in the triage list.
+  // `includeAllFolders` is for the callers that must see every stored row — the
+  // folder counts and the re-decide sweep.
+  const filtered = opts.includeAllFolders
     ? rows
-    : rows.filter((r) => !r.isArchived)
+    : opts.includeArchived
+      ? rows.filter((r) => r.folder === 'inbox' || r.folder === 'archive')
+      : rows.filter((r) => r.folder === 'inbox')
 
   return Promise.all(filtered.map(rowToConversation))
 }
@@ -1048,7 +1068,11 @@ export async function getConversationClusterByThreadId(
     frontier = []
 
     const messageRows = await db
-      .selectDistinct({ internetMessageId: messagesTable.internetMessageId })
+      .selectDistinct({
+        internetMessageId: messagesTable.internetMessageId,
+        inReplyTo: messagesTable.inReplyTo,
+        referenceIds: messagesTable.referenceIds,
+      })
       .from(messagesTable)
       .where(inArray(messagesTable.conversationId, ids))
     const messageIds = messageRows
@@ -1056,6 +1080,46 @@ export async function getConversationClusterByThreadId(
       .filter((id): id is string => typeof id === 'string' && id.length > 0)
 
     if (messageIds.length === 0) continue
+
+    // Two directions, because the seed can be either side of the reply:
+    //
+    // - the frontier holds the sent message: find the reply whose `In-Reply-To`
+    //   or `References` names one of these ids;
+    // - the frontier holds the reply: follow its own references back to the
+    //   message it answers.
+    //
+    // Providers do not always put both in the same thread id, and this is the
+    // only link between them when they do not.
+    const parentIds = new Set<string>()
+    for (const row of messageRows) {
+      for (const id of replyReferenceIds({
+        inReplyTo: row.inReplyTo,
+        references: row.referenceIds,
+      })) {
+        if (id.length > 0) parentIds.add(id)
+      }
+    }
+
+    const linkedConditions = [
+      inArray(messagesTable.internetMessageId, messageIds),
+      inArray(messagesTable.inReplyTo, messageIds),
+    ]
+    if (parentIds.size > 0) {
+      linkedConditions.push(
+        inArray(messagesTable.internetMessageId, [...parentIds]),
+      )
+    }
+    // `references` is a JSON array; `In-Reply-To` covers the common direct
+    // reply, while this catches a client that only filled the longer chain.
+    linkedConditions.push(
+      sql`EXISTS (
+        SELECT 1 FROM json_each(${messagesTable.referenceIds})
+        WHERE json_each.value IN (${sql.join(
+          messageIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})
+      )`,
+    )
 
     const neighbours = await db
       .selectDistinct({ conversationId: messagesTable.conversationId })
@@ -1065,10 +1129,7 @@ export async function getConversationClusterByThreadId(
         eq(conversations.id, messagesTable.conversationId),
       )
       .where(
-        and(
-          inArray(messagesTable.internetMessageId, messageIds),
-          inArray(conversations.accountId, owned),
-        ),
+        and(inArray(conversations.accountId, owned), or(...linkedConditions)),
       )
 
     for (const { conversationId: neighbourId } of neighbours) {
@@ -1088,12 +1149,208 @@ export async function getConversationClusterByThreadId(
       ),
     )
 
-  return Promise.all(
+  const exact: AccountConversation[] = await Promise.all(
     rows.map(async (row) => ({
       accountId: row.accountId,
       conversation: await rowToConversation(row),
     })),
   )
+
+  // The walk above only follows a shared Message-ID. A provider that omitted the
+  // header leaves a copy with a synthetic id, so the inbox's identity fallback
+  // would show one conversation while this lookup still returned half of it —
+  // the exact failure the message-level merge exists to prevent. Expand the
+  // cluster with the same conservative test, and only across accounts: two
+  // threads in one mailbox with the same subject are still two threads.
+  const known = new Map<
+    string,
+    { accountId: string; identity: ThreadIdentity }
+  >()
+  for (const entry of exact) {
+    const identity = threadIdentity(entry.conversation)
+    if (identity) {
+      known.set(entry.conversation.id, {
+        accountId: entry.accountId,
+        identity,
+      })
+    }
+  }
+  if (known.size === 0) return exact
+
+  const added: AccountConversation[] = []
+  // A third mailbox's copy can be the bridge to a fourth, so keep walking while
+  // a round finds something new. The `visited` set makes this terminate.
+  let pending = [...known.values()].map((entry) => entry.identity)
+  while (pending.length > 0) {
+    const candidates = new Set<string>()
+    for (const identity of pending) {
+      const rowsAtIdentity = await db
+        .selectDistinct({ id: conversations.id })
+        .from(messagesTable)
+        .innerJoin(
+          conversations,
+          eq(conversations.id, messagesTable.conversationId),
+        )
+        .where(
+          and(
+            inArray(conversations.accountId, owned),
+            // The first message's sender is stored as JSON, and the addresses
+            // are deliberately plain text; only the subject and body are
+            // encrypted. The time window keeps this an index-sized candidate
+            // set, and the identity check below makes the final decision.
+            sql`lower(trim(json_extract(${messagesTable.from}, '$.email'))) = ${identity.firstFrom}`,
+            between(
+              messagesTable.sentAt,
+              new Date(identity.firstAt - THREAD_IDENTITY_WINDOW_MS),
+              new Date(identity.firstAt + THREAD_IDENTITY_WINDOW_MS),
+            ),
+          ),
+        )
+
+      for (const row of rowsAtIdentity) {
+        if (!visited.has(row.id)) candidates.add(row.id)
+      }
+    }
+
+    pending = []
+    if (candidates.size === 0) break
+
+    const candidateRows = await db
+      .select()
+      .from(conversations)
+      .where(
+        and(
+          inArray(conversations.id, [...candidates]),
+          inArray(conversations.accountId, owned),
+        ),
+      )
+
+    for (const row of candidateRows) {
+      visited.add(row.id)
+      const conversation = await rowToConversation(row)
+      const identity = threadIdentity(conversation)
+      if (!identity) continue
+
+      const matches = [...known.values()].some(
+        (knownEntry) =>
+          knownEntry.accountId !== row.accountId &&
+          sameThreadIdentity(knownEntry.identity, identity),
+      )
+      if (!matches) continue
+
+      added.push({ accountId: row.accountId, conversation })
+      known.set(conversation.id, { accountId: row.accountId, identity })
+      pending.push(identity)
+    }
+  }
+
+  // Same-mailbox replies that the provider split into their own thread and whose
+  // reply headers were not stored (mail synced before those columns existed).
+  // The inbox now joins these by subject, recipient and time; the detail view
+  // has to find the same partner or a merged row opens to half the conversation.
+  let sameAccountFrontier = [...known.entries()].map(([id, entry]) => ({
+    id,
+    ...entry,
+  }))
+  while (sameAccountFrontier.length > 0) {
+    const next: typeof sameAccountFrontier = []
+
+    for (const entry of sameAccountFrontier) {
+      const windowStart = entry.identity.subjectIsReply
+        ? entry.identity.firstAt - REPLY_LINK_WINDOW_MS
+        : entry.identity.firstAt - 5 * 60_000
+      const windowEnd = entry.identity.subjectIsReply
+        ? entry.identity.firstAt + 5 * 60_000
+        : entry.identity.firstAt + REPLY_LINK_WINDOW_MS
+
+      // A reply is found by the address it was sent to; a parent is found by the
+      // people it addressed, one of whom is the reply's sender.
+      const addressed = entry.identity.subjectIsReply
+        ? [entry.identity.firstFrom]
+        : entry.identity.firstRecipients
+      if (addressed.length === 0) continue
+
+      const addressMatch = or(
+        ...addressed.flatMap((email) => [
+          sql`lower(trim(json_extract(${messagesTable.from}, '$.email'))) = ${email}`,
+          sql`EXISTS (
+            SELECT 1 FROM json_each(${messagesTable.to})
+            WHERE lower(trim(json_extract(json_each.value, '$.email'))) = ${email}
+          )`,
+          sql`EXISTS (
+            SELECT 1 FROM json_each(${messagesTable.cc})
+            WHERE lower(trim(json_extract(json_each.value, '$.email'))) = ${email}
+          )`,
+        ]),
+      )
+
+      const candidates = await db
+        .selectDistinct({ conversationId: messagesTable.conversationId })
+        .from(messagesTable)
+        .innerJoin(
+          conversations,
+          eq(conversations.id, messagesTable.conversationId),
+        )
+        .where(
+          and(
+            eq(conversations.accountId, entry.accountId),
+            between(
+              messagesTable.sentAt,
+              new Date(windowStart),
+              new Date(windowEnd),
+            ),
+            addressMatch,
+          ),
+        )
+
+      const candidateIds = candidates
+        .map((row) => row.conversationId)
+        .filter((id) => !visited.has(id))
+      if (candidateIds.length === 0) continue
+
+      const candidateRows = await db
+        .select()
+        .from(conversations)
+        .where(
+          and(
+            inArray(conversations.id, candidateIds),
+            eq(conversations.accountId, entry.accountId),
+          ),
+        )
+
+      const matching: Array<{
+        row: (typeof candidateRows)[number]
+        conversation: Conversation
+        identity: ThreadIdentity
+      }> = []
+      for (const row of candidateRows) {
+        const conversation = await rowToConversation(row)
+        const identity = threadIdentity(conversation)
+        if (!identity) continue
+
+        const matches = entry.identity.subjectIsReply
+          ? sameThreadReply(entry.identity, identity)
+          : sameThreadReply(identity, entry.identity)
+        if (matches) matching.push({ row, conversation, identity })
+      }
+
+      // A reply with two possible parents is ambiguous, exactly as it is in the
+      // inbox merge; do not pick one just for the detail view.
+      if (entry.identity.subjectIsReply && matching.length !== 1) continue
+
+      for (const { row, conversation, identity } of matching) {
+        if (visited.has(row.id)) continue
+        visited.add(row.id)
+        added.push({ accountId: row.accountId, conversation })
+        known.set(conversation.id, { accountId: row.accountId, identity })
+        next.push({ id: conversation.id, accountId: row.accountId, identity })
+      }
+    }
+
+    sameAccountFrontier = next
+  }
+
+  return [...exact, ...added]
 }
 
 /** Fetch one conversation with its messages and attachments. */
@@ -1221,6 +1478,8 @@ async function rowToConversation(
   const messages: ConversationMessage[] = msgs.map((m) => ({
     providerMessageId: m.providerMessageId,
     internetMessageId: m.internetMessageId,
+    inReplyTo: m.inReplyTo,
+    references: m.referenceIds,
     from: m.from,
     to: m.to,
     cc: m.cc,
@@ -1280,6 +1539,7 @@ async function rowToConversation(
     participants: row.participants,
     messages,
     attachments: conversationAttachments,
+    folder: row.folder,
     state: row.state,
     isAutomated: row.isAutomated,
     replyable: row.replyable,
@@ -1435,6 +1695,30 @@ export async function setOrganizationGroup(
 }
 
 /**
+ * Move a stored conversation to another folder.
+ *
+ * The provider owns the folder after a sync, so this is only for the immediate
+ * local half of an action the provider has already accepted — the next sync
+ * agrees because the labels changed too.
+ */
+export async function setConversationFolder(
+  accountId: string,
+  providerThreadId: string,
+  folder: MailFolder,
+): Promise<void> {
+  const id = conversationId(accountId, providerThreadId)
+
+  await withWriteLock(async () => {
+    await db
+      .update(conversations)
+      .set({ folder, updatedAt: new Date() })
+      .where(
+        and(eq(conversations.id, id), eq(conversations.accountId, accountId)),
+      )
+  })
+}
+
+/**
  * Store the user's own score for a conversation, or clear it.
  *
  * `importance` is written alongside the override because every reader of the list
@@ -1480,6 +1764,11 @@ export type StoredUserFields = {
   organizationGroupId: string | null
   seenAt: Date | null
   done: DoneMark | null
+  /**
+   * The folder the row was in. Carried back on a rebuild so a sent reply on an
+   * archived or spam thread does not silently drop it into the inbox.
+   */
+  folder: MailFolder
 }
 
 /**
@@ -1500,6 +1789,7 @@ export async function getStoredUserFields(
       importanceOverride: conversations.importanceOverride,
       importanceOverrideMessageAt: conversations.importanceOverrideMessageAt,
       organizationGroupId: conversations.organizationGroupId,
+      folder: conversations.folder,
       seenAt: conversations.seenAt,
       doneAt: conversations.doneAt,
       doneMessageAt: conversations.doneMessageAt,
@@ -1517,6 +1807,7 @@ export async function getStoredUserFields(
       organizationGroupId: null,
       seenAt: null,
       done: null,
+      folder: 'inbox',
     }
 
   return {
@@ -1533,6 +1824,7 @@ export async function getStoredUserFields(
         }
       : null,
     seenAt: found.seenAt,
+    folder: found.folder,
     organizationGroupId: found.organizationGroupId ?? null,
     done: found.doneAt
       ? {

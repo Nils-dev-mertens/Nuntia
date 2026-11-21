@@ -16,7 +16,12 @@ import type {
   ConversationMessage,
 } from '#/lib/conversation/index.ts'
 
-import { buildMimeMessage, composeReply } from '#/lib/mail/index.ts'
+import {
+  applyGreetingName,
+  buildMimeMessage,
+  composeReply,
+  GREETING_NAME_TOKEN,
+} from '#/lib/mail/index.ts'
 import {
   getConversation,
   getConversationClusterByThreadId,
@@ -24,6 +29,7 @@ import {
   mergeAccountConversations,
 } from '#/lib/conversation/index.ts'
 import { listAccounts } from '#/lib/auth/accounts.ts'
+import { contactNamesForEmails } from '#/lib/contacts/index.ts'
 import type { MailboxClient } from '#/lib/gmail/client.ts'
 import { decodeAttachmentUploads } from '#/lib/mailbox/attachment-uploads.ts'
 import type { AttachmentUpload } from '#/lib/mailbox/attachment-uploads.ts'
@@ -95,6 +101,40 @@ function recipientsOf(
   ]
 }
 
+/**
+ * The display names to greet a reply's recipients with.
+ *
+ * The thread's own headers are tried first; the address book fills anyone the
+ * thread only ever carried as a bare address. Order follows the recipients so a
+ * multi-person greeting reads in the order the mail was addressed, and unknown
+ * people are null rather than dropped, because `applyGreetingName` does the
+ * dropping after it can see whether any name is left.
+ */
+async function recipientNamesFor(
+  accountId: string,
+  emails: string[],
+  participants: Conversation['participants'],
+): Promise<Array<string | null>> {
+  const fromThread = new Map<string, string>()
+  for (const participant of participants) {
+    const name = participant.name?.trim()
+    if (name) fromThread.set(participant.email.trim().toLowerCase(), name)
+  }
+
+  const missing = emails.filter(
+    (email) => !fromThread.has(email.trim().toLowerCase()),
+  )
+  const stored =
+    missing.length > 0
+      ? await contactNamesForEmails(accountId, missing)
+      : new Map<string, string>()
+
+  return emails.map((email) => {
+    const key = email.trim().toLowerCase()
+    return fromThread.get(key) ?? stored.get(key) ?? null
+  })
+}
+
 /** Every RFC Message-ID in the thread, oldest first — the `References` chain. */
 function referenceChain(messages: ConversationMessage[]): string[] {
   return messages
@@ -151,9 +191,15 @@ export async function sendReply(
   const attachments = decodeAttachmentUploads(opts.attachments ?? [], 'reply')
   const mine = lastMessageFromOwner(messages, accountId)
   const incoming = messages.filter((message) => !message.isFromOwner).at(-1)
-  const replyGreeting = opts.replyStyle
+  const rawGreeting = opts.replyStyle
     ? opts.replyStyle.greeting
     : (incoming?.replyGreeting ?? mine?.greeting ?? null)
+  // A stored greeting can carry `{name}` or `{fullname}`; every recipient of the
+  // reply fills them, not just the person whose message is being answered.
+  const greetingNames = GREETING_NAME_TOKEN.test(rawGreeting ?? '')
+    ? await recipientNamesFor(accountId, recipients, conversation.participants)
+    : []
+  const replyGreeting = applyGreetingName(rawGreeting, greetingNames)
   const replySignature = opts.replyStyle
     ? opts.replyStyle.signature
     : (incoming?.replySignature ?? mine?.signature ?? null)

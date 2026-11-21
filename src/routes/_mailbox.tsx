@@ -43,9 +43,11 @@ import {
 } from '#/lib/forms/repository.ts'
 import {
   applyUserStateOverride,
+  deleteConversationPermanently,
   loadConversation,
   loadInbox,
   setConversationDone,
+  setConversationFolder,
   setConversationOrganizationGroup,
   setConversationUnread,
 } from '#/lib/gmail/service.ts'
@@ -53,8 +55,10 @@ import type { ConversationSummary } from '#/lib/gmail/service.ts'
 import { resolveInboxOrder } from '#/lib/organization/inbox-order.ts'
 import { listOrganizationLabels } from '#/lib/organization/store.ts'
 import { savePreferences } from '#/lib/settings/preferences.ts'
-import { CONVERSATION_STATES } from '#/db/schema.ts'
+import { CONVERSATION_STATES } from '#/lib/conversation-state.ts'
 import type { ConversationState } from '#/db/schema.ts'
+import { MAIL_FOLDERS } from '#/lib/mail-folders.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
 import { cn } from '#/lib/utils'
 
 /**
@@ -344,6 +348,101 @@ const setUnreadAction = createServerFn({ method: 'POST' })
         failed === ids.length
           ? (reason ?? 'None of the selected conversations could be updated.')
           : `${failed} of ${ids.length} conversations could not be updated.`,
+    }
+  })
+
+/**
+ * Move threads between the mailbox's folders.
+ *
+ * The provider is written by the service, one thread at a time, so a batch is
+ * not atomic: each row is counted separately and the first refusal is reported
+ * without abandoning the rest. Spam is also the input the self-learning uses,
+ * which is why it goes through the same action as archive and delete.
+ */
+const setFolderAction = createServerFn({ method: 'POST' })
+  .validator(
+    (data: { providerThreadIds: string[]; folder: MailFolder }) => data,
+  )
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    if (!MAIL_FOLDERS.includes(data.folder)) {
+      return { error: 'That is not a mail folder.' }
+    }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    let reason: string | null = null
+    for (const providerThreadId of ids) {
+      try {
+        await setConversationFolder(
+          session.userId,
+          providerThreadId,
+          data.folder,
+        )
+      } catch (error) {
+        failed += 1
+        reason = error instanceof Error ? error.message : null
+        console.error('[folder] move failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? (reason ?? 'None of the selected conversations could be moved.')
+          : `${failed} of ${ids.length} conversations could not be moved.`,
+    }
+  })
+
+/**
+ * Delete threads that are already in Deleted, for good.
+ *
+ * The service re-checks the folder, so a stale browser that sends an inbox id
+ * cannot turn one click into a permanent loss. Like the other batch actions it
+ * is per-thread rather than atomic, and reports how many were refused.
+ */
+const deleteForeverAction = createServerFn({ method: 'POST' })
+  .validator((data: { providerThreadIds: string[] }) => data)
+  .handler(async ({ data }): Promise<{ error: string | null }> => {
+    const session = await getSession()
+    if (!session) return { error: 'You are not signed in.' }
+
+    const ids = cleanThreadIds(data.providerThreadIds)
+    if (ids.length === 0) return { error: 'No conversations were selected.' }
+    if (ids.length > MAX_BATCH_THREADS) {
+      return {
+        error: `Select up to ${MAX_BATCH_THREADS} conversations at once.`,
+      }
+    }
+
+    let failed = 0
+    let reason: string | null = null
+    for (const providerThreadId of ids) {
+      try {
+        await deleteConversationPermanently(session.userId, providerThreadId)
+      } catch (error) {
+        failed += 1
+        reason = error instanceof Error ? error.message : null
+        console.error('[delete-forever] failed:', error)
+      }
+    }
+
+    if (failed === 0) return { error: null }
+    return {
+      error:
+        failed === ids.length
+          ? (reason ?? 'None of the selected conversations could be deleted.')
+          : `${failed} of ${ids.length} conversations could not be deleted.`,
     }
   })
 
@@ -650,6 +749,11 @@ function Home() {
   const syncing = payload.syncing.length > 0
 
   const [section, setSection] = useState('all')
+  // Archive/Spam/Deleted are destinations the sidebar names; the list needs to
+  // know it is in one so it can filter and flatten its rows.
+  const folderView = section.startsWith('folder:')
+    ? (section.slice('folder:'.length) as MailFolder)
+    : null
   const [composeOpen, setComposeOpen] = useState(false)
   // Questions open in the app rather than on `/ask`: the list they were
   // noticed in stays behind the window.
@@ -693,6 +797,7 @@ function Home() {
         count: payload.conversations.filter(
           (conversation) =>
             !conversation.done &&
+            conversation.folder === 'inbox' &&
             conversation.organizationGroup?.id === label.id,
         ).length,
         custom: true,
@@ -755,6 +860,7 @@ function Home() {
     <AppShell
       sections={sections}
       doneCount={payload.doneCount}
+      folderCounts={payload.folderCounts}
       activeSection={section}
       onSelectSection={setSection}
       accounts={payload.accounts}
@@ -776,6 +882,7 @@ function Home() {
             payload={payload}
             embedded
             section={section}
+            folderView={folderView}
             onSectionChange={setSection}
             onCompose={() => setComposeOpen(true)}
             hidePreview={threadOpen}
@@ -832,6 +939,20 @@ function Home() {
             onSetUnread={async (providerThreadIds, unread) => {
               const result = await setUnreadAction({
                 data: { providerThreadIds, unread },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onSetFolder={async (providerThreadIds, folder) => {
+              const result = await setFolderAction({
+                data: { providerThreadIds, folder },
+              })
+              if (!result.error) await router.invalidate()
+              return result
+            }}
+            onDeleteForever={async (providerThreadIds) => {
+              const result = await deleteForeverAction({
+                data: { providerThreadIds },
               })
               if (!result.error) await router.invalidate()
               return result

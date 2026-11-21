@@ -42,6 +42,68 @@ export type ComposedReply = {
   html: string | null
 }
 
+/**
+ * Whether a greeting contains a name token.
+ *
+ * Exported so a caller can skip the contact lookup when the greeting is fixed
+ * text, which is the common case.
+ */
+export const GREETING_NAME_TOKEN = /\{(?:name|fullname)\}/i
+
+/**
+ * Put the recipients' names into a greeting stored with `{name}` or
+ * `{fullname}`.
+ *
+ * `{name}` uses the first word of each stored name, because that is how a
+ * greeting addresses someone ("Hi Sarah,"); `{fullname}` keeps the whole name
+ * ("Hello Sarah de Vries,"). Several recipients are listed in the order they
+ * were addressed and joined with commas: language-neutral, because a greeting
+ * should not have to choose English "and" over Dutch "en".
+ *
+ * Unknown recipients are skipped. When none of them has a name the token and the
+ * space before it are dropped, so "Hi {name}," becomes "Hi," rather than an
+ * empty slot. A greeting without a token is returned untouched.
+ */
+export function applyGreetingName(
+  greeting: string | null | undefined,
+  names: string | Array<string | null | undefined> | null | undefined,
+): string | null {
+  if (!greeting) return greeting ?? null
+  if (!GREETING_NAME_TOKEN.test(greeting)) return greeting
+
+  const full = [names ?? []]
+    .flat()
+    .map((name) => name?.trim() ?? '')
+    .filter(
+      (name, index, all) => name.length > 0 && all.indexOf(name) === index,
+    )
+  const first = full
+    .map((name) => name.split(/\s+/)[0] ?? '')
+    .filter((name) => name.length > 0)
+
+  let dropped = false
+  const replaced = greeting.replace(
+    /\{(name|fullname)\}/gi,
+    (_, token: string) => {
+      const list = token.toLowerCase() === 'fullname' ? full : first
+      if (list.length === 0) {
+        dropped = true
+        return ''
+      }
+      return list.join(', ')
+    },
+  )
+
+  if (!dropped) return replaced
+
+  return (
+    replaced
+      .replace(/[ \t]+([,.;:!?])/g, '$1')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim() || null
+  )
+}
+
 /** Binary file included in an outgoing message. */
 export type MimeAttachment = {
   filename: string
@@ -279,8 +341,17 @@ export function buildMimeMessage(args: {
   // Subjects carry emoji and accents ("Re: 🖤 LAATSTE KANS"), so they have to be
   // RFC 2047 encoded — a raw UTF-8 header is not legal and clients mangle it.
   headers.push(`Subject: ${encodeHeaderValue(subject)}`)
-  if (inReplyTo) headers.push(`In-Reply-To: ${inReplyTo}`)
-  if (references?.length) headers.push(`References: ${references.join(' ')}`)
+  // Threading headers are built from the stored message ids, which are kept
+  // without their angle brackets so they can be compared across mailboxes.
+  // RFC 5322 requires the brackets in the header itself; Gmail treats an
+  // unbracketed id as unusable and starts a new conversation instead of
+  // threading the reply, which is exactly what recipients were seeing.
+  if (inReplyTo) {
+    headers.push(`In-Reply-To: ${formatMessageIds([inReplyTo]).join(' ')}`)
+  }
+  if (references?.length) {
+    headers.push(`References: ${formatMessageIds(references).join(' ')}`)
+  }
   headers.push('MIME-Version: 1.0')
 
   const raw =
@@ -291,6 +362,21 @@ export function buildMimeMessage(args: {
         : singlePart(headers, body)
 
   return { raw, threadId }
+}
+
+/**
+ * Put the angle brackets back around stored message ids.
+ *
+ * Parsing strips `<` and `>` (see `stripAngleBrackets` in
+ * `src/lib/mailbox/message.ts`) because that is the form the rest of the app
+ * compares and stores. The wire format is the one place they are required, so
+ * they are restored here rather than being carried around in two shapes.
+ */
+function formatMessageIds(ids: string[]): string[] {
+  return ids
+    .flatMap((id) => id.trim().split(/\s+/))
+    .filter(Boolean)
+    .map((id) => `<${id.replace(/^</, '').replace(/>$/, '')}>`)
 }
 
 /** `text/plain` body with a quoted-printable body part. */

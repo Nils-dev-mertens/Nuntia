@@ -1540,9 +1540,9 @@ describe('the user’s own call on a thread', () => {
     await applyUserStateOverride(USER, 'ask-thread', null)
     const after = await db.select().from(contextRevisions)
     expect(after).toHaveLength(2)
-    expect(after.map((row) => [row.previousValue, row.nextValue])).toContainEqual(
-      ['low-priority', null],
-    )
+    expect(
+      after.map((row) => [row.previousValue, row.nextValue]),
+    ).toContainEqual(['low-priority', null])
   })
 
   test('a new message re-opens a thread the user filed away', async () => {
@@ -1871,7 +1871,7 @@ describe('backfill', () => {
     expect(conversation.state).toBe('needs-action')
   })
 
-  test('excludes drafts and trashed messages', async () => {
+  test('excludes drafts but keeps trashed and spam messages in their folders', async () => {
     const client = new FakeMailboxClient({
       threads: [
         {
@@ -1904,16 +1904,45 @@ describe('backfill', () => {
               body: 'Trashed thing.',
               labels: ['TRASHED'],
             }),
+            // Gmail's actual system label is `TRASH`; the older `TRASHED`
+            // spelling above used to be the only one filtered, which meant real
+            // trashed mail synced as normal.
+            message({
+              id: 'm4',
+              threadId: 't1',
+              from: 's@e.com',
+              subject: 'Also deleted',
+              date: 'Mon, 15 Jan 2024 13:00:00 +0000',
+              body: 'Trashed thing, real label.',
+              labels: ['TRASH'],
+            }),
+            message({
+              id: 'm5',
+              threadId: 't1',
+              from: 's@e.com',
+              subject: 'Spam',
+              date: 'Mon, 15 Jan 2024 14:00:00 +0000',
+              body: 'Buy something.',
+              labels: ['SPAM'],
+            }),
           ],
         },
       ],
     })
 
     await backfill(client, ACCOUNT, { userId: USER })
-    const [conversation] = await listConversations(ACCOUNT)
+    const [conversation] = await listConversations(ACCOUNT, {
+      includeAllFolders: true,
+    })
 
-    expect(conversation.messageCount).toBe(1)
-    expect(conversation.messages[0].body).toBe('Actual message.')
+    // The draft is gone; the trashed and spam messages are kept so the Deleted
+    // and Spam views can show them.
+    expect(conversation.messageCount).toBe(4)
+    expect(conversation.messages.some((m) => m.body === 'Unsent draft.')).toBe(
+      false,
+    )
+    // Spam outranks trash when a thread carries both labels.
+    expect(conversation.folder).toBe('spam')
   })
 
   test('skips a thread with no relevant messages', async () => {
@@ -1940,6 +1969,134 @@ describe('backfill', () => {
     const result = await backfill(client, ACCOUNT, { userId: USER })
     expect(result.synced).toBe(0)
     expect(result.skipped).toBe(1)
+  })
+
+  test('deletes the stored conversation when the thread is trashed', async () => {
+    const thread = (labels: string[]) => ({
+      id: 't1',
+      cursor: '900',
+      messages: [
+        message({
+          id: 'm1',
+          threadId: 't1',
+          from: 's@e.com',
+          subject: 'Launch',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body: 'Tuesday works.',
+          labels,
+        }),
+      ],
+    })
+
+    await backfill(
+      new FakeMailboxClient({ threads: [thread(['INBOX'])] }),
+      ACCOUNT,
+      { userId: USER },
+    )
+    expect(await getConversation(ACCOUNT, 't1')).not.toBeNull()
+
+    // The user trashes the thread. Gmail keeps it readable for 30 days and
+    // reports the label change through history, so this is the moment the local
+    // copy has to go.
+    const trashed = new FakeMailboxClient({
+      threads: [thread(['TRASH'])],
+      history: {
+        '1000': {
+          history: [{ id: 'h1', messages: [{ id: 'm1', threadId: 't1' }] }],
+          cursor: '1100',
+        },
+      },
+    })
+
+    await syncIncremental(trashed, ACCOUNT, '1000', { userId: USER })
+
+    // The row is kept, but filed in Deleted rather than disappearing: the user
+    // can still read it and restore it.
+    const stored = await getConversation(ACCOUNT, 't1')
+    expect(stored?.folder).toBe('trash')
+  })
+
+  test('deletes the stored conversation when the thread is spam', async () => {
+    const thread = (labels: string[]) => ({
+      id: 't2',
+      cursor: '900',
+      messages: [
+        message({
+          id: 'm2',
+          threadId: 't2',
+          from: 'deals@e.com',
+          subject: 'Once in a lifetime',
+          date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+          body: 'Act now.',
+          labels,
+        }),
+      ],
+    })
+
+    await backfill(
+      new FakeMailboxClient({ threads: [thread(['INBOX'])] }),
+      ACCOUNT,
+      { userId: USER },
+    )
+    expect(await getConversation(ACCOUNT, 't2')).not.toBeNull()
+
+    const spam = new FakeMailboxClient({
+      threads: [thread(['SPAM'])],
+      history: {
+        '1000': {
+          history: [{ id: 'h1', messages: [{ id: 'm2', threadId: 't2' }] }],
+          cursor: '1100',
+        },
+      },
+    })
+
+    await syncIncremental(spam, ACCOUNT, '1000', { userId: USER })
+
+    const stored = await getConversation(ACCOUNT, 't2')
+    expect(stored?.folder).toBe('spam')
+  })
+
+  test('deletes the stored conversation when Gmail no longer has the thread', async () => {
+    const client = new FakeMailboxClient({
+      threads: [
+        {
+          id: 't3',
+          cursor: '900',
+          messages: [
+            message({
+              id: 'm3',
+              threadId: 't3',
+              from: 's@e.com',
+              subject: 'Gone',
+              date: 'Mon, 15 Jan 2024 10:00:00 +0000',
+              body: 'This thread will be deleted.',
+            }),
+          ],
+        },
+      ],
+    })
+
+    await backfill(client, ACCOUNT, { userId: USER })
+    expect(await getConversation(ACCOUNT, 't3')).not.toBeNull()
+
+    // The thread was permanently deleted, so `getThread` answers 404. That is a
+    // deletion to propagate, not a sync failure to retry forever.
+    const gone = new FakeMailboxClient({
+      threads: [],
+      history: {
+        '1000': {
+          history: [{ id: 'h1', messages: [{ id: 'm3', threadId: 't3' }] }],
+          cursor: '1100',
+        },
+      },
+    })
+
+    const result = await syncIncremental(gone, ACCOUNT, '1000', {
+      userId: USER,
+    })
+
+    expect(result.skipped).toBe(1)
+    expect(await getConversation(ACCOUNT, 't3')).toBeNull()
   })
 
   test('paginates through thread listings', async () => {

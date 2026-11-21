@@ -42,6 +42,7 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     ],
     messages,
     attachments: [],
+    folder: 'inbox',
     state: 'needs-action',
     isAutomated: false,
     replyable: true,
@@ -241,6 +242,30 @@ describe('sendReply', () => {
         message({ internetMessageId: '<first@mail.example.com>' }),
         message({
           internetMessageId: '<second@mail.example.com>',
+          sentAt: new Date('2026-10-01T12:00:00Z'),
+        }),
+      ],
+    })
+
+    await sendReply(client, OWNER, conv, 'Confirming.')
+
+    const headers = headersOf(client.sent[0]?.raw ?? '')
+    expect(headers).toContain('In-Reply-To: <second@mail.example.com>')
+    expect(headers).toContain(
+      'References: <first@mail.example.com> <second@mail.example.com>',
+    )
+  })
+
+  test('adds the angle brackets the stored ids lack', async () => {
+    // Gmail parsing stores Message-ID without its brackets, and that is what the
+    // reply path is handed. An unbracketed id is not a valid msg-id, so Gmail
+    // and the recipient's client cannot use it to thread the reply.
+    const client = new FakeMailboxClient()
+    const conv = conversation({
+      messages: [
+        message({ internetMessageId: 'first@mail.example.com' }),
+        message({
+          internetMessageId: 'second@mail.example.com',
           sentAt: new Date('2026-10-01T12:00:00Z'),
         }),
       ],

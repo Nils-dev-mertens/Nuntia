@@ -114,6 +114,7 @@ export {
   setAttachmentLocalPath,
   setConversationDetails,
   setConversationDone,
+  setConversationFolder,
   setConversationUnread,
   setOrganizationGroup,
   setGoal,
@@ -139,14 +140,19 @@ export type { ParsingPreferences } from './model.ts'
 
 export {
   mergeAccountConversations,
+  normaliseThreadSubject,
   partitionByState,
   relationForRoles,
   relationOf,
   replyAccountsFor,
+  sameThreadIdentity,
+  THREAD_IDENTITY_WINDOW_MS,
+  threadIdentity,
 } from './merge.ts'
 export type {
   AccountConversation,
   ConnectedAccount,
   MergedConversation,
   MergeRelation,
+  ThreadIdentity,
 } from './merge.ts'

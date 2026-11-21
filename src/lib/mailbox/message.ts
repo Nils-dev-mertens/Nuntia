@@ -380,9 +380,29 @@ export function isDraft(message: ProviderMessage): boolean {
   return message.labelIds.includes('DRAFT')
 }
 
-/** True when a message lives in the trash. */
+/**
+ * True when a message lives in the trash.
+ *
+ * Gmail's system label is `TRASH` (singular). `TRASHED` is accepted as well
+ * because that is the spelling the fixtures and an earlier version of this
+ * check used, and a wrong label here is not a cosmetic bug: an unfiltered trash
+ * message keeps a thread alive in the local database after the user deleted it.
+ */
+const TRASH_LABELS = ['TRASH', 'TRASHED']
+
 export function isTrashed(message: ProviderMessage): boolean {
-  return message.labelIds.includes('TRASHED')
+  return message.labelIds.some((label) => TRASH_LABELS.includes(label))
+}
+
+/**
+ * True when the mailbox has filed this message as spam.
+ *
+ * Spam is not shown in the app, and a thread whose remaining messages are all
+ * spam is dropped from the local database — the user did not ask to keep it, and
+ * the sync is the only place that knows the provider's mind changed.
+ */
+export function isSpam(message: ProviderMessage): boolean {
+  return message.labelIds.includes('SPAM')
 }
 
 /**

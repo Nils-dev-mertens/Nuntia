@@ -25,6 +25,12 @@ process.env.DATABASE_URL = `file:${join(dir, 'test.db')}`
 // database. See the guard there.
 process.env.LUMEN_TEST = '1'
 
+// Mail content is encrypted at rest with this key (`src/db/encrypted-column.ts`).
+// Tests need one for the same reason production does; a fixed value keeps rows
+// written by one test readable by the next, and keeps the value out of the way
+// of any real install's key.
+process.env.TOKEN_ENCRYPTION_KEY ??= 'ab'.repeat(32)
+
 // The app defaults to the invite beta, which closes password registration. Most
 // suites exercise the password flow, so they get login mode explicitly; the
 // suites that test the gate set `LUMEN_ACCESS_MODE=invite` themselves. Pinning

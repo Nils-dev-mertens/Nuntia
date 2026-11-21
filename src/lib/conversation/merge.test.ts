@@ -5,6 +5,7 @@ import type { Participant } from '#/db/schema.ts'
 import type { Conversation, ConversationMessage } from './model.ts'
 import {
   mergeAccountConversations,
+  normaliseThreadSubject,
   partitionByState,
   relationOf,
   replyAccountsFor,
@@ -46,6 +47,7 @@ function conversation(
     subject: 'Subject',
     participants: [],
     attachments: [],
+    folder: 'inbox',
     state: 'informational',
     isAutomated: false,
     replyable: true,
@@ -708,6 +710,229 @@ describe('mergeAccountConversations', () => {
  * to remove. The state is still on the row — the tag shows it, faintly — so this
  * is a presentation rule, and it lives in one place rather than in the view.
  */
+describe('matching threads without a shared Message-ID', () => {
+  const BOB: Participant = { name: 'Bob', email: 'bob@example.com' }
+  const firstAt = new Date('2026-03-01T09:00:00Z')
+
+  /** One mailbox's copy of the first message, with no usable Message-ID. */
+  function copy(
+    accountId: string,
+    threadId: string,
+    overrides: {
+      subject?: string
+      from?: Participant
+      sentAt?: Date
+      internetMessageId?: string | null
+    } = {},
+  ) {
+    return source(
+      accountId,
+      conversation({
+        id: `${accountId}:${threadId}`,
+        providerThreadId: threadId,
+        subject: overrides.subject ?? 'Invoice',
+        messages: [
+          message({
+            providerMessageId: `${accountId}-${threadId}-1`,
+            internetMessageId: overrides.internetMessageId ?? null,
+            from: overrides.from ?? ALICE,
+            to: [A, B],
+            sentAt: overrides.sentAt ?? firstAt,
+            subject: overrides.subject ?? 'Invoice',
+          }),
+        ],
+      }),
+    )
+  }
+
+  test('joins copies in two mailboxes when the first message agrees', () => {
+    const merged = mergeAccountConversations(
+      [copy(A.id, 't1'), copy(B.id, 't2')],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].sourceAccountIds).toEqual([A.id, B.id])
+  })
+
+  test('joins through reply and forward prefixes', () => {
+    const merged = mergeAccountConversations(
+      [
+        copy(A.id, 't1', { subject: 'Invoice' }),
+        copy(B.id, 't2', { subject: 'Re: Fwd: Invoice' }),
+      ],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(normaliseThreadSubject('RE[2]: Status')).toBe('status')
+  })
+
+  test('leaves a different subject as a separate thread', () => {
+    const merged = mergeAccountConversations(
+      [copy(A.id, 't1'), copy(B.id, 't2', { subject: 'Dinner' })],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(2)
+  })
+
+  test('leaves a different first sender as a separate thread', () => {
+    const merged = mergeAccountConversations(
+      [copy(A.id, 't1'), copy(B.id, 't2', { from: BOB })],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(2)
+  })
+
+  test('leaves first messages minutes apart as separate threads', () => {
+    const merged = mergeAccountConversations(
+      [
+        copy(A.id, 't1'),
+        copy(B.id, 't2', { sentAt: new Date('2026-03-01T09:10:00Z') }),
+      ],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(2)
+  })
+
+  test('refuses two real, different Message-IDs even when the rest agrees', () => {
+    // Two different messages cannot be copies of one another. This is the guard
+    // that keeps a recurring "Invoice" from folding unrelated letters together.
+    const merged = mergeAccountConversations(
+      [
+        copy(A.id, 't1', { internetMessageId: '<one@example.com>' }),
+        copy(B.id, 't2', { internetMessageId: '<two@example.com>' }),
+      ],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(2)
+  })
+
+  test('never merges two conversations inside one mailbox', () => {
+    const merged = mergeAccountConversations(
+      [copy(A.id, 't1'), copy(A.id, 't2')],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(2)
+  })
+})
+
+describe('a reply split into its own provider thread', () => {
+  const sentAt = new Date('2026-04-01T09:00:00Z')
+
+  function sent(): AccountConversation {
+    return source(
+      A.id,
+      conversation({
+        id: `${A.id}:t1`,
+        providerThreadId: 't1',
+        subject: 'Quarterly plan',
+        messages: [
+          message({
+            providerMessageId: 'sent-1',
+            internetMessageId: 'sent@example.com',
+            from: A,
+            to: [ALICE],
+            subject: 'Quarterly plan',
+            sentAt,
+          }),
+        ],
+      }),
+    )
+  }
+
+  function reply(
+    overrides: Partial<ConversationMessage> = {},
+  ): AccountConversation {
+    return source(
+      A.id,
+      conversation({
+        id: `${A.id}:t2`,
+        providerThreadId: 't2',
+        subject: 'Re: Quarterly plan',
+        messages: [
+          message({
+            providerMessageId: 'reply-1',
+            internetMessageId: 'reply@example.com',
+            inReplyTo: 'sent@example.com',
+            from: ALICE,
+            to: [A],
+            subject: 'Re: Quarterly plan',
+            sentAt: new Date('2026-04-01T11:00:00Z'),
+            ...overrides,
+          }),
+        ],
+      }),
+    )
+  }
+
+  test('joins the reply to the mail it answers', () => {
+    // This is the two-recipient case: we send one mail, one person replies, and
+    // the provider gives the reply a thread id of its own. Only In-Reply-To
+    // connects them, so a shared-Message-ID-only merge showed two rows.
+    const merged = mergeAccountConversations([sent(), reply()], ACCOUNTS)
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].conversation.messageCount).toBe(2)
+  })
+
+  test('follows a References chain when In-Reply-To is absent', () => {
+    const merged = mergeAccountConversations(
+      [sent(), reply({ inReplyTo: null, references: ['sent@example.com'] })],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].conversation.messageCount).toBe(2)
+  })
+
+  test('joins an older stored reply that has no headers at all', () => {
+    // Mail synced before the headers were retained still has the shape: the
+    // original went to Alice, and Alice's later message says `Re:` with the same
+    // subject. This is the same-mailbox fallback for that data.
+    const merged = mergeAccountConversations(
+      [sent(), reply({ inReplyTo: null, references: [] })],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].conversation.messageCount).toBe(2)
+  })
+
+  test('does not guess when two parents share the subject', () => {
+    const other = source(
+      A.id,
+      conversation({
+        id: `${A.id}:t0`,
+        providerThreadId: 't0',
+        subject: 'Quarterly plan',
+        messages: [
+          message({
+            providerMessageId: 'sent-0',
+            internetMessageId: 'sent-0@example.com',
+            from: A,
+            to: [ALICE],
+            subject: 'Quarterly plan',
+            sentAt: new Date('2026-04-01T08:00:00Z'),
+          }),
+        ],
+      }),
+    )
+
+    const merged = mergeAccountConversations(
+      [sent(), other, reply({ inReplyTo: null, references: [] })],
+      ACCOUNTS,
+    )
+
+    expect(merged).toHaveLength(3)
+  })
+})
+
 describe('partitionByState', () => {
   const mark = {
     doneAt: new Date('2026-01-01T12:00:00Z'),

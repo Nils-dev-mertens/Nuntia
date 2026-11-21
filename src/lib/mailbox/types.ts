@@ -13,6 +13,8 @@
  * perfectly neutral wire type nobody else would use.
  */
 
+import type { MailFolder } from '#/lib/mail-folders.ts'
+
 /** A connected mailbox's provider. */
 export type Provider = 'google' | 'microsoft'
 
@@ -205,6 +207,26 @@ export interface MailboxClient {
    * express it says so by not implementing it rather than pretending.
    */
   setThreadUnread?: (threadId: string, unread: boolean) => Promise<void>
+
+  /**
+   * File a whole thread in one of the mailbox's own folders.
+   *
+   * Optional for the same reason as the read flag: Gmail addresses a thread and
+   * moves every message in it with one label change, while Graph has no thread
+   * object and would need a move per message. A provider without it reports
+   * that rather than pretending the mail moved.
+   */
+  setThreadFolder?: (threadId: string, folder: MailFolder) => Promise<void>
+
+  /**
+   * Delete a whole thread permanently, skipping the provider's trash.
+   *
+   * Optional like the folder move: only a provider that has a thread object and
+   * a permanent delete for it can offer this. It is only ever called for mail
+   * already in the trash folder, so "permanently" is the second step the user
+   * explicitly asked for and never the first.
+   */
+  deleteThreadPermanently?: (threadId: string) => Promise<void>
 
   /**
    * Send a raw RFC 5322 message.

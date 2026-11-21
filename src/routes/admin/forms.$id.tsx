@@ -33,7 +33,7 @@ import type { AdminForm, FormResultsView } from '#/lib/forms/repository.ts'
 import { FORM_LIMITS, FORM_SCALE_VALUES } from '#/lib/forms/validation.ts'
 import type { FormQuestionView } from '#/lib/forms/validation.ts'
 import { FormFields } from '#/components/form-fields.tsx'
-import { FORM_QUESTION_TYPES } from '#/db/schema.ts'
+import { FORM_QUESTION_TYPES } from '#/lib/forms/types.ts'
 import type { FormQuestionType } from '#/db/schema.ts'
 
 const QUESTION_TYPE_LABELS: Record<FormQuestionType, string> = {

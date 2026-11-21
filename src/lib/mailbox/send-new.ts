@@ -18,14 +18,21 @@
  */
 
 import { assertOwnedAccount } from '#/lib/auth/accounts.ts'
-import { recordContactedAddresses } from '#/lib/contacts/index.ts'
+import {
+  contactNamesForEmails,
+  recordContactedAddresses,
+} from '#/lib/contacts/index.ts'
 import {
   getLastOwnMessageStyle,
   getParsingProfileContext,
   resolveReplyStyle,
 } from '#/lib/conversation/index.ts'
 import type { ReplyStyle } from '#/lib/conversation/index.ts'
-import { composeNewMessage } from '#/lib/mail/index.ts'
+import {
+  applyGreetingName,
+  composeNewMessage,
+  GREETING_NAME_TOKEN,
+} from '#/lib/mail/index.ts'
 
 import { decodeAttachmentUploads } from './attachment-uploads.ts'
 import type { AttachmentUpload } from './attachment-uploads.ts'
@@ -107,30 +114,46 @@ function parseAddresses(
 }
 
 /**
- * The greeting and signature a message to this recipient goes out with.
+ * The greeting and signature a message to these recipients goes out with.
  *
  * Same three sources, same order, same function as the reply path — a sender
  * with a style switched on wins, then the account default, then the user's own
- * last sent mail in this mailbox. Exported because the composer shows exactly
- * what will be added, and a preview computed differently from the send is a
- * preview that lies.
+ * last sent mail in this mailbox. The first recipient picks the sender-specific
+ * style, because that is who the message is addressed to. Exported because the
+ * composer shows exactly what will be added, and a preview computed differently
+ * from the send is a preview that lies.
  */
 export async function resolveNewMessageStyle(
   accountId: string,
-  recipient: string | null,
+  recipients: string[],
 ): Promise<ReplyStyle> {
-  const key = recipient?.trim().toLowerCase() ?? ''
+  const key = recipients[0]?.trim().toLowerCase() ?? ''
 
   const [context, lastOwnerMessage] = await Promise.all([
     getParsingProfileContext(accountId),
     getLastOwnMessageStyle(accountId),
   ])
 
-  return resolveReplyStyle({
+  const style = resolveReplyStyle({
     account: context.replyStyles.account,
     sender: key ? context.replyStyles.senders[key] : null,
     lastOwnerMessage,
   })
+
+  // `{name}` and `{fullname}` are filled for every recipient from the mailbox's
+  // contact records, so the preview and the send resolve them from the same rows.
+  const names =
+    recipients.length > 0 && GREETING_NAME_TOKEN.test(style.greeting ?? '')
+      ? await contactNamesForEmails(accountId, recipients)
+      : new Map<string, string>()
+
+  return {
+    ...style,
+    greeting: applyGreetingName(
+      style.greeting,
+      recipients.map((email) => names.get(email.trim().toLowerCase())),
+    ),
+  }
 }
 
 /**
@@ -195,8 +218,9 @@ export async function sendNewMessage(
   }
 
   // The first To recipient decides the style, which is what "who is this going
-  // to" means when there is more than one: the person the mail is addressed to.
-  const style = await resolveNewMessageStyle(accountId, to[0] ?? null)
+  // to" means when there is more than one; every To recipient fills the names in
+  // the greeting.
+  const style = await resolveNewMessageStyle(accountId, to)
   const composed = composeNewMessage({
     body,
     greeting: style.greeting,

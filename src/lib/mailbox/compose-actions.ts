@@ -56,14 +56,14 @@ export const loadComposeState = createServerFn({ method: 'GET' }).handler(
 )
 
 /**
- * The greeting and signature this recipient would get.
+ * The greeting and signature these recipients would get.
  *
  * The same function the send uses, called from the same inputs, so the panel the
  * composer shows cannot disagree with the message that goes out. Scoped to the
  * user's own mailboxes: the account id arrives from the browser.
  */
 export const loadStylePreview = createServerFn({ method: 'GET' })
-  .validator((data: { accountId: string; recipient: string | null }) => data)
+  .validator((data: { accountId: string; recipients: string[] }) => data)
   .handler(
     async ({
       data,
@@ -79,9 +79,12 @@ export const loadStylePreview = createServerFn({ method: 'GET' })
 
         return await resolveNewMessageStyle(
           accountId,
-          typeof data.recipient === 'string' && data.recipient.trim()
-            ? data.recipient.trim()
-            : null,
+          Array.isArray(data.recipients)
+            ? data.recipients.filter(
+                (recipient): recipient is string =>
+                  typeof recipient === 'string' && recipient.trim().length > 0,
+              )
+            : [],
         )
       } catch (error) {
         // A preview is a nicety; failing to build one must not break the page.

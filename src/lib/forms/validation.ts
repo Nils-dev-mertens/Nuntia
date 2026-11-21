@@ -8,7 +8,7 @@
  * that cannot be compared across weeks.
  */
 
-import { FORM_QUESTION_TYPES } from '#/db/schema.ts'
+import { FORM_QUESTION_TYPES } from '#/lib/forms/types.ts'
 import type { FormAudience, FormQuestionType } from '#/db/schema.ts'
 
 export const FORM_LIMITS = {

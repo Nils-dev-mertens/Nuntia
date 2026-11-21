@@ -303,7 +303,7 @@ export function createGraphClient(opts: GraphClientOptions): MailboxClient {
     async getThread(threadId) {
       const params = new URLSearchParams({
         $select:
-          'id,conversationId,internetMessageId,subject,body,bodyPreview,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,isDraft,hasAttachments',
+          'id,conversationId,internetMessageId,internetMessageHeaders,subject,body,bodyPreview,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,isDraft,hasAttachments',
         $filter: `conversationId eq ${odataString(threadId)}`,
         $orderby: 'receivedDateTime asc',
         $top: '50',

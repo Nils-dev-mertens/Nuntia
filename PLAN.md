@@ -7,18 +7,18 @@ source of truth; Nuntia is a presentation + composition layer.
 
 ## Stack
 
-| Layer             | Choice                                                                                            | Rationale                                                                                                                   |
-| ----------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Framework         | TanStack Start 1.x (`1.168.60`, v1 stable)                                                        | Server Functions keep OAuth tokens + Gmail calls off the client. Requires Node >= 22.12.                                    |
-| UI                | React 19                                                                                          | Hard requirement from ReUI.                                                                                                 |
-| Styling           | Tailwind CSS v4                                                                                   | Hard requirement from ReUI.                                                                                                 |
-| Components        | **ReUI registry over shadcn/ui**                                                                  | See "ReUI notes" below. Radix UI as the primitive layer (ReUI ships both Radix and Base UI variants; Radix is more mature). |
-| DB                | SQLite via **`@libsql/client`** + Drizzle ORM                                                     | Single-user, local-first. **Changed from the original `better-sqlite3`** — see below.                                       |
-| Auth              | Google OAuth 2.0, refresh token AES-encrypted at rest                                             | Gmail is the only provider in MVP.                                                                                          |
-| Mail              | `googleapis` for Gmail; plain `fetch` for Microsoft Graph — both behind the `MailboxClient` seam | Two providers, one sync/conversation pipeline. Push watch is not implemented for either.                                    |
+| Layer             | Choice                                                                                                                                        | Rationale                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Framework         | TanStack Start 1.x (`1.168.60`, v1 stable)                                                                                                    | Server Functions keep OAuth tokens + Gmail calls off the client. Requires Node >= 22.12.                                    |
+| UI                | React 19                                                                                                                                      | Hard requirement from ReUI.                                                                                                 |
+| Styling           | Tailwind CSS v4                                                                                                                               | Hard requirement from ReUI.                                                                                                 |
+| Components        | **ReUI registry over shadcn/ui**                                                                                                              | See "ReUI notes" below. Radix UI as the primitive layer (ReUI ships both Radix and Base UI variants; Radix is more mature). |
+| DB                | SQLite via **`@libsql/client`** + Drizzle ORM                                                                                                 | Single-user, local-first. **Changed from the original `better-sqlite3`** — see below.                                       |
+| Auth              | Google OAuth 2.0, refresh token AES-encrypted at rest                                                                                         | Gmail is the only provider in MVP.                                                                                          |
+| Mail              | `googleapis` for Gmail; plain `fetch` for Microsoft Graph — both behind the `MailboxClient` seam                                              | Two providers, one sync/conversation pipeline. Push watch is not implemented for either.                                    |
 | AI decisions      | Deterministic rules first, then **Jev** for importance / urgency / state-when-unset / replyability (a sender the user has marked outranks it) | See "Deviations".                                                                                                           |
-| AI generation     | **LLM** (Gemini, OpenAI or Anthropic, BYO key): topic now, suggested replies / drafts in Phase 2                                                                   | Phase 2. Draft-only, never auto-send.                                                                                       |
-| Runtime / tooling | bun 1.3.10, TypeScript 6.x (`^6.0.2`)                                                             | Matches the `forma` project conventions.                                                                                    |
+| AI generation     | **LLM** (Gemini, OpenAI or Anthropic, BYO key): topic now, suggested replies / drafts in Phase 2                                              | Phase 2. Draft-only, never auto-send.                                                                                       |
+| Runtime / tooling | bun 1.3.10, TypeScript 6.x (`^6.0.2`)                                                                                                         | Matches the `forma` project conventions.                                                                                    |
 
 ### Why libSQL instead of better-sqlite3
 
@@ -93,7 +93,7 @@ to end: `.bg-success { background-color: var(--success) }` with
 ## Deviations from chatmail.md
 
 **1. Jev and the LLM are two different services, not one.**
-Jev (TypeSafe's System One) returns typed *decisions* — "a decision instead of a paragraph"
+Jev (TypeSafe's System One) returns typed _decisions_ — "a decision instead of a paragraph"
 — and skips token-by-token generation entirely. A general LLM's job here is **prose**: the
 topic label today, and Phase 2's suggested replies and drafts. Treating Jev as a drop-in
 swap for a structured-output LLM, as this plan originally did, conflates the two. The split:
@@ -222,36 +222,36 @@ Useful checks: `bun run typecheck`, `bun run lint`, `bun run build`.
 - [x] **Multiple accounts in one merged inbox** — mailboxes scoped per user, `loadInbox` fanning out across the signed-in user's mailboxes and merging by shared `Message-ID`, relation-aware ownership, per-account reconnect, reply sender shown and pickable (see "Multiple accounts, one inbox")
 - [x] **A second mailbox service** — Outlook / Microsoft 365 through Graph, behind the same `MailboxClient` seam; `accounts.provider`, the `provider_*` rename and `sync_cursors(account, kind, value)` land together (see "Outlook is the second service")
 - [x] **People, not one owner** — email/password sign-in (argon2id), revocable per-device
-  sessions, and mailboxes, settings and contact context scoped by the signed-in user
+      sessions, and mailboxes, settings and contact context scoped by the signed-in user
 - [x] **Editable contact context** — role/company, relationship, topics, current work and a 1–10
-  importance per address, authored in the thread sidebar and scoped to the signed-in user
+      importance per address, authored in the thread sidebar and scoped to the signed-in user
 - [x] **User-defined inbox sections** — rules on sender, domain, subject, topic or state, ordered
-  in Settings and rendered above the state groups (`src/lib/organization/`)
+      in Settings and rendered above the state groups (`src/lib/organization/`)
 - [ ] **Client mail and a person's kind** — an inbound webhook that registers clients (and, in a
-  later phase, accepts the mail itself), plus a `kind` per contact and a `work_kind` per user that
-  drive a built-in Clients section and the decision prompt (see "Client mail, and what kind of
-  person you're writing to")
+      later phase, accepts the mail itself), plus a `kind` per contact and a `work_kind` per user that
+      drive a built-in Clients section and the decision prompt (see "Client mail, and what kind of
+      person you're writing to")
 - [x] **Request-only beta** — sign-in disabled for now, a request form and
-  an emailed invite, a six-step funnel, first-party feedback and a `/admin` view (see "Access is
-  request-only, and the beta is measured")
+      an emailed invite, a six-step funnel, first-party feedback and a `/admin` view (see "Access is
+      request-only, and the beta is measured")
 - [x] **Operator-authored forms** — `/admin/forms` builds and publishes a form from six question
-  types, the inbox banner and `/ask` deliver it, answers are stored once per person with a
-  shown/dismissed denominator and CSV export (see "The questions are the operator's, not the
-  code's")
+      types, the inbox banner and `/ask` deliver it, answers are stored once per person with a
+      shown/dismissed denominator and CSV export (see "The questions are the operator's, not the
+      code's")
 - [ ] **Auto-updating context** — the contact profile, the thread's topic and its goal refresh
-  after a thread settles, each change stored as a revision with a diff and an Undo (see "Context
-  keeps itself current")
+      after a thread settles, each change stored as a revision with a diff and an Undo (see "Context
+      keeps itself current")
 - [ ] **Organizations** — a workspace where members keep their own mailboxes but share one client
-  list and can assign a conversation to a colleague; solo stays the default (see "Organizations
-  are a second account type")
+      list and can assign a conversation to a colleague; solo stays the default (see "Organizations
+      are a second account type")
 - [x] **Editable label names and meanings** — the four states keep their fixed values, but a user
-  can rename each one and write what it means, stored per user (`state_labels`) and shown in the
-  inbox headings, the line under each heading, the badge and the thread's picker; a custom section
-  carries a name and a meaning of its own (`organization_rules.description`)
+      can rename each one and write what it means, stored per user (`state_labels`) and shown in the
+      inbox headings, the line under each heading, the badge and the thread's picker; a custom section
+      carries a name and a meaning of its own (`organization_rules.description`)
 - [x] **A compact inbox you can search** — a section picker that shows one section alone, a
-  ten-thread cap per section in the all-sections view with "Show all N", and a search over every
-  stored message (subject, topic, participants and body, archived mail included) that runs
-  server-side, is debounced, ignores stale responses and never triggers a sync
+      ten-thread cap per section in the all-sections view with "Show all N", and a search over every
+      stored message (subject, topic, participants and body, archived mail included) that runs
+      server-side, is debounced, ignores stale responses and never triggers a sync
 
 ## Remaining work and requested features
 
@@ -260,31 +260,31 @@ existing per-message attachment chips and mail-learned contact names are useful 
 but do not count as the consolidated media overview or the client registry below.
 
 - [ ] **Right-side thread media overview** — add a sidebar to the conversation view that
-  collects media and attachments from every message in the thread, rather than making the
-  user find each message's attachment chip. Show useful file details (name, type, size, and
-  the message/date it came from), with previews or open/download actions where supported.
-  Deduplicate copies introduced when mailbox threads are merged. Keep the panel usable on
-  narrow screens (for example, as a collapsible drawer).
+      collects media and attachments from every message in the thread, rather than making the
+      user find each message's attachment chip. Show useful file details (name, type, size, and
+      the message/date it came from), with previews or open/download actions where supported.
+      Deduplicate copies introduced when mailbox threads are merged. Keep the panel usable on
+      narrow screens (for example, as a collapsible drawer).
 - [ ] **Client mail, and what kind of person you're writing to** — a `kind` on the contact
-  profile and a `work_kind` on the user's own profile, driving a built-in Clients section and the
-  decision prompt, plus a manual import and an inbound webhook that registers clients by address
-  (phase 1) and later accepts the client mail itself (phase 2). For a corporation that import is
-  one call and one company-wide list, which is the organizations decision below (see "Client mail,
-  and what kind of person you're writing to").
+      profile and a `work_kind` on the user's own profile, driving a built-in Clients section and the
+      decision prompt, plus a manual import and an inbound webhook that registers clients by address
+      (phase 1) and later accepts the client mail itself (phase 2). For a corporation that import is
+      one call and one company-wide list, which is the organizations decision below (see "Client mail,
+      and what kind of person you're writing to").
 - [ ] **Organizations** — members with their own mailboxes, a shared client list, conversations
-  assignable to a colleague, and organisation-wide sections and rules; this is also what makes a
-  corporation's client import apply to every member rather than one (see "Organizations are a
-  second account type"). Design the model before building it: the open questions there change
-  ownership, not copy.
+      assignable to a colleague, and organisation-wide sections and rules; this is also what makes a
+      corporation's client import apply to every member rather than one (see "Organizations are a
+      second account type"). Design the model before building it: the open questions there change
+      ownership, not copy.
 - [ ] **Context that keeps itself current** — after a thread settles, refresh the contact profile,
-  the thread's topic and its goal, store every change as a revision with a diff and an Undo, and
-  keep the whole thing behind one setting (see "Context keeps itself current").
+      the thread's topic and its goal, store every change as a revision with a diff and an Undo, and
+      keep the whole thing behind one setting (see "Context keeps itself current").
 - [ ] **Real-time mailbox updates** — Gmail push is in place (`users.watch` → Pub/Sub →
-  `/webhooks/gmail`, renewed from the inbox load), with polling as the fallback; Outlook still
-  relies on the poll, and Graph change notifications need their own subscription lifetime, client
-  state and renewal.
+      `/webhooks/gmail`, renewed from the inbox load), with polling as the fallback; Outlook still
+      relies on the poll, and Graph change notifications need their own subscription lifetime, client
+      state and renewal.
 - [ ] **IMAP/SMTP provider** — add a provider that reconstructs threads from email headers
-  and supports sending through SMTP; unlike Gmail and Graph, IMAP does not supply a thread id.
+      and supports sending through SMTP; unlike Gmail and Graph, IMAP does not supply a thread id.
 
 ## Mail parser
 
@@ -456,14 +456,14 @@ The original `DecisionLayer` had one method returning `state`, `importance`, `ur
 `requiresReply`, `intent` and `currentTopic` together — the wrong shape, because the fields
 have different owners:
 
-| Field        | Owner                                                                                    |
-| ------------ | ---------------------------------------------------------------------------------------- |
-| `state`      | the **user** when they have called it; otherwise **rules** when determinable (you sent last ⇒ waiting for reply), otherwise **Jev** |
-| `importance` | **Jev**                                                                                  |
-| `urgency`    | **Jev**                                                                                  |
+| Field        | Owner                                                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `state`      | the **user** when they have called it; otherwise **rules** when determinable (you sent last ⇒ waiting for reply), otherwise **Jev**                    |
+| `importance` | **Jev**                                                                                                                                                |
+| `urgency`    | **Jev**                                                                                                                                                |
 | replyability | the **user** when they have marked the sender (their per-sender list); otherwise deterministic machine-mail marker **first**, Jev over everything else |
-| `topic`      | **LLM**                                                                                  |
-| `intent`     | the **user** — never AI-written                                                          |
+| `topic`      | **LLM**                                                                                                                                                |
+| `intent`     | the **user** — never AI-written                                                                                                                        |
 
 Replyability is settled in that order of authority, and the user is at the top of it. Machine-mail
 detection is **step 1**: an address that marks itself no-reply is settled, and Jev skips it rather
@@ -509,21 +509,21 @@ local-first and single-user — the credentials belong with the data.
   the server while a client is being built.
 - **Server-only, verified — with one caveat worth knowing.** `grep` over `dist/client/assets`
   finds no `TOKEN_ENCRYPTION_KEY`, no `api.typesafe.ai` and no request body, so no key, no prompt
-  and no call can reach the browser. What it *does* find is the schema module's own metadata:
+  and no call can reach the browser. What it _does_ find is the schema module's own metadata:
   `app_settings` and its column names are in `settings-*.js`, because a route imports
   `CONVERSATION_STATES` / the settings accessors and `db/schema.ts` is one module, so every table
   definition travels with it. That is column names, not credentials or queries — but the claim
   "no `app_settings` in the client bundle" is not what a grep shows. `googleapis` matches only
   `styles-*.css`, which is the `fonts.googleapis.com` import, not a leak.
 
-| Module        | Role                                                                                         |
-| ------------- | -------------------------------------------------------------------------------------------- |
-| `http.ts`     | shared JSON POST: exponential backoff + jitter, honours `Retry-After`, retries 429/5xx/529    |
-| `jev.ts`      | `JevDecisionModel` — the `DecisionModel` seam                                                |
-| `llm.ts`      | `LlmTopicGenerator` — the `TopicGenerator` seam — plus `completeLlm`, the shared transport    |
-| `draft.ts`    | `LlmReplyDrafter` — the `ReplyDrafter` seam, on demand and never part of a sync              |
-| `settings.ts` | persistence for `app_settings`, encryption at the boundary                                    |
-| `index.ts`    | `pipelineFromConfig` / `loadDecisionPipeline` and `loadReplyDrafter` (both never throw)       |
+| Module        | Role                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| `http.ts`     | shared JSON POST: exponential backoff + jitter, honours `Retry-After`, retries 429/5xx/529 |
+| `jev.ts`      | `JevDecisionModel` — the `DecisionModel` seam                                              |
+| `llm.ts`      | `LlmTopicGenerator` — the `TopicGenerator` seam — plus `completeLlm`, the shared transport |
+| `draft.ts`    | `LlmReplyDrafter` — the `ReplyDrafter` seam, on demand and never part of a sync            |
+| `settings.ts` | persistence for `app_settings`, encryption at the boundary                                 |
+| `index.ts`    | `pipelineFromConfig` / `loadDecisionPipeline` and `loadReplyDrafter` (both never throw)    |
 
 **Jev's wire shape** (docs.typesafe.ai/api): `POST https://api.typesafe.ai/v1/systemone`
 with `{ state, model, questions }`, where each question is a typed `noul` (yes/no),
@@ -533,13 +533,13 @@ Two consequences shaped the client:
 - The two scores use a **ten-level rubric** so the probability-weighted value maps cleanly
   onto `importance`/`urgency` 1–10 (`round(score) + 1`).
 - The **state question is only asked when the rule classifier abstained** (`facts.state ===
-  null`). Asking it always would waste a call and invite the model to contradict a rule that
+null`). Asking it always would waste a call and invite the model to contradict a rule that
   is already certain.
 
 **The LLM providers differ only in transport.** Anthropic (`x-api-key`), OpenAI (bearer), and
 Gemini (`x-goog-api-key`, model in the path) each have one `complete` function, behind
 `completeLlm` so the reply drafter reuses it rather than reimplementing three request shapes;
-the prompt and the sanitiser are shared, and the *budget* stays with the caller — a label and a
+the prompt and the sanitiser are shared, and the _budget_ stays with the caller — a label and a
 reply want very different ones, and on OpenAI it has to cover hidden reasoning too. The sanitiser
 matters more than it sounds: models wrap a short label
 in quotes, a markdown fence, or a trailing period, and a chatty one adds a whole sentence —
@@ -555,8 +555,8 @@ Three properties shape the whole design:
 
 - **The gate is one function, on both sides.** `replyDraftEligibility` in
   `conversation/draft.ts` is pure and answers one question with one sentence explaining itself.
-  `loadConversation` uses it to decide whether to render the control — and, when a model *is*
-  configured, to show *why not* — and `draftReply` re-runs it from the stored row before any API
+  `loadConversation` uses it to decide whether to render the control — and, when a model _is_
+  configured, to show _why not_ — and `draftReply` re-runs it from the stored row before any API
   call. A button from a page rendered before the mail arrived cannot spend a call on a thread that
   no longer qualifies. The spec's four conditions are there (a reply is required, importance
   clears a threshold, the thread is actionable, a draft would help); so are the two the spec does
@@ -591,7 +591,7 @@ write.
 ### The sanitiser reuses the parser
 
 `sanitizeDraft` unwraps fences, quotes and a `Draft:` label, and strips a greeting or signature
-the model wrote anyway — using `stripGreeting` / `stripSignature`, the *same* functions that clean
+the model wrote anyway — using `stripGreeting` / `stripSignature`, the _same_ functions that clean
 incoming mail. That is deliberately conditional, not unconditional: `composeReply` adds the
 user's own pair, so a model-written one would be the second of each in the delivered mail, but
 when the send path will add neither, a draft with no salutation is worse than one that repeats
@@ -613,7 +613,7 @@ A control in the composer, and a panel once a draft exists. `Draft a reply` gene
 refocuses; `Discard` closes the panel. **Neither action sends** — the composer's Send is still
 the only thing that sends, and the draft is in the box to be reviewed before it is.
 
-The instruction field appears *after* the first draft on purpose: asking for one should be a
+The instruction field appears _after_ the first draft on purpose: asking for one should be a
 single click, and "make it shorter" is something you only know once you have read what it wrote.
 On an install with no LLM key the control is absent entirely; with a model configured but a
 thread that does not qualify, the one-line reason is shown instead, which is what stops a missing
@@ -627,7 +627,7 @@ pipeline imports the AI log, so a component that imported it pulled `node:fs/pro
 browser graph — Vite externalises that module and the first `appendFile` access throws. Server
 functions are unaffected: the plugin strips their bodies and the imports only they use, which is
 why every server-only module can still be imported at the top of a route file. Development does
-not tree-shake, though, so anything a *component* names is loaded as written. The rule that
+not tree-shake, though, so anything a _component_ names is loaded as written. The rule that
 follows: if the JSX uses it, it must come from a pure module (`draft.ts`, `model.ts`,
 `conversation-state.ts`); everything else belongs inside a handler.
 
@@ -638,7 +638,7 @@ ineligible thread returns the gate's wording, and a call would have failed at th
 different message — so the message is the proof no API call was made. The seam has 15 tests
 (gating order, prompt contents, sanitiser edge cases), the drafter 8 against a fake fetch (each
 provider's request shape, and the budget each model gets), and `resolveReplyStyle` 4.
-What is *not* covered: the panel itself has no DOM harness, so its behaviour rests on typecheck
+What is _not_ covered: the panel itself has no DOM harness, so its behaviour rests on typecheck
 and on the server functions it calls.
 
 ## Access is request-only, and the beta is measured
@@ -694,7 +694,7 @@ Rules:
 Approval has a side effect that is allowed to fail:
 
 1. Create the invite bound to the request's address (`max_uses = 1`, `expires_at = now + 14
-   days`).
+days`).
 2. Point the request at it, set `status = 'approved'` and `decided_at`.
 3. Send the email. **On failure keep the approval**, record the error, and show a "Resend"
    button beside the row. Rolling back a decision because the mail provider had a bad minute
@@ -743,7 +743,7 @@ decision rather than an architecture one.
 | Value    | Entry                                                | For                |
 | -------- | ---------------------------------------------------- | ------------------ |
 | `invite` | `/join/…` — invite code, or `/request-access` to ask | the beta           |
-| `login`  | `/sign-in` + `/sign-up` — the existing password flow  | opening the app up |
+| `login`  | `/sign-in` + `/sign-up` — the existing password flow | opening the app up |
 
 In `invite` mode:
 
@@ -773,18 +773,18 @@ rather than a code change.
 
 `invites`:
 
-| Column         | Meaning                                                                     |
-| ------------ | --------------------------------------------------------------------------- || `code_hash`  | SHA-256 of the code — what redemption looks it up by.                      |
-| `code_encrypted` | AES-GCM ciphertext of the code, so `/admin` can copy the link again.   |
-| `label`        | Who it is for, free text — "Ada, from the design meetup".                   |
-| `email`        | Set for every approved request. When set, only that address may redeem it.  |
-| `max_uses`     | Default 1. A redemption by a _different_ address consumes one.              |
-| `use_count`    | Redemptions so far, kept as a counter rather than recomputed.               |
-| `expires_at`   | Default +14 days. Null means no expiry.                                     |
-| `revoked_at`   | Set from `/admin`; a revoked invite is refused exactly like an unknown one. |
-| `notified_at`  | When a mailbox accepted the approval email. Null means nothing was sent.    |
-| `notify_error` | The last send failure, cleared by a successful Resend.                      |
-| `created_at`   | Also the "issued" end of the funnel.                                        |
+| Column | Meaning |
+| ------------ | --------------------------------------------------------------------------- || `code_hash` | SHA-256 of the code — what redemption looks it up by. |
+| `code_encrypted` | AES-GCM ciphertext of the code, so `/admin` can copy the link again. |
+| `label` | Who it is for, free text — "Ada, from the design meetup". |
+| `email` | Set for every approved request. When set, only that address may redeem it. |
+| `max_uses` | Default 1. A redemption by a _different_ address consumes one. |
+| `use_count` | Redemptions so far, kept as a counter rather than recomputed. |
+| `expires_at` | Default +14 days. Null means no expiry. |
+| `revoked_at` | Set from `/admin`; a revoked invite is refused exactly like an unknown one. |
+| `notified_at` | When a mailbox accepted the approval email. Null means nothing was sent. |
+| `notify_error` | The last send failure, cleared by a successful Resend. |
+| `created_at` | Also the "issued" end of the funnel. |
 
 `invite_redemptions` records every successful redemption: `invite_id`, `user_id`, `user_agent`,
 `redeemed_at`. It is what makes "which invite produced which person" answerable later; the code
@@ -809,8 +809,8 @@ Rules worth writing down before the code exists:
   or from `LUMEN_BOOTSTRAP_INVITE` while the install is empty. There is no public endpoint that
   creates an invite; `/request-access` creates a _request_, never a code.
 - **Redemption is one statement.** `UPDATE invites SET use_count = use_count + 1 WHERE code_hash
-  = ? AND use_count < max_uses AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at >
-  now)` then check that a row changed. Read-then-write would let two clicks on the same link
+= ? AND use_count < max_uses AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at >
+now)` then check that a row changed. Read-then-write would let two clicks on the same link
   exceed `max_uses`.
 
 ### Six steps, not one number
@@ -1064,13 +1064,13 @@ sit alongside an email/password sign-in (`users.ts`, argon2id) and revocable ser
 sessions (`session.ts`). For the beta the password flow is switched off — see "Access is
 request-only" above.
 
-| Module        | Role                                                     |
-| ------------- | -------------------------------------------------------- |
-| `crypto.ts`   | AES-256-GCM token encryption at rest                     |
-| `users.ts`    | people, argon2id hashes, bootstrap, sign-up rules        |
-| `session.ts`  | one revocable row per device; cookie is `<id>.<token>`    |
-| `google.ts`   | OAuth2 + PKCE, token exchange, Gmail client              |
-| `accounts.ts` | persistence — the only place tokens are decrypted        |
+| Module        | Role                                                   |
+| ------------- | ------------------------------------------------------ |
+| `crypto.ts`   | AES-256-GCM token encryption at rest                   |
+| `users.ts`    | people, argon2id hashes, bootstrap, sign-up rules      |
+| `session.ts`  | one revocable row per device; cookie is `<id>.<token>` |
+| `google.ts`   | OAuth2 + PKCE, token exchange, Gmail client            |
+| `accounts.ts` | persistence — the only place tokens are decrypted      |
 
 Routes: `GET /sign-in`, `GET /sign-up`, `GET /auth/google`, `GET /auth/google/callback`,
 `GET /auth/microsoft`, `GET /auth/microsoft/callback`, `GET /auth/logout`. In `invite` mode
@@ -1251,12 +1251,12 @@ Everything above this point was a library with no entry point. `sync.ts` takes a
 injected `GmailClient`, and nothing knew how to build one from a stored account. `service.ts`
 is that missing seam: account id in, list of conversations out.
 
-| Module                 | Role                                                                                            |
-| ---------------------- | ----------------------------------------------------------------------------------------------- |
-| `service.ts`           | `loadInbox()` — builds the client, applies the freshness policy, returns a serializable payload |
-| `freshness.ts`         | `isCursorStale()` — the policy, dependency-free so it can be tested on its own                  |
+| Module                 | Role                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------ |
+| `service.ts`           | `loadInbox()` — builds the client, applies the freshness policy, returns a serializable payload  |
+| `freshness.ts`         | `isCursorStale()` — the policy, dependency-free so it can be tested on its own                   |
 | `routes/index.tsx`     | `createServerFn` loader + the revalidation timer (two minutes idle, three seconds while syncing) |
-| `components/inbox.tsx` | The list, grouped by state, and the sync-progress banner                                        |
+| `components/inbox.tsx` | The list, grouped by state, and the sync-progress banner                                         |
 
 ### Sync is not an action
 
@@ -1333,11 +1333,31 @@ Accounts are **owned by a user**, not by a browser session: every mailbox a sign
 connects appears in one merged list, and no query reaches another person's row. There is no
 account switcher — the mailbox set is the set. Two decisions shape the rest.
 
-**1. Merge by shared `Message-ID`, always.** When both of your addresses are on a thread,
-Gmail stores it as two threads with different ids and overlapping messages.
-`messages.internet_message_id` is the RFC 5322 `Message-ID` — the _same string in every
-mailbox that received that message_ — so "these two conversations are the same thread" is
-exact rather than a subject/participant guess.
+**1. Merge by shared `Message-ID`, with a first-message fallback.** When both of your
+addresses are on a thread, Gmail stores it as two threads with different ids and
+overlapping messages. `messages.internet_message_id` is the RFC 5322 `Message-ID` — the
+_same string in every mailbox that received that message_ — so "these two conversations
+are the same thread" is exact rather than a subject/participant guess.
+
+Some providers do not give every message a usable `Message-ID` (Outlook substitutes its
+own id when the header is missing). For those, a conservative fallback treats two
+conversations in **different accounts** as the same thread only when the first message
+agrees: normalised subject (reply/forward prefixes removed), first sender, first sent time
+within two minutes, and the exact set of sender addresses across the thread. Two real but
+different `Message-ID`s on the first messages veto the match. The fallback runs on every
+load, so copies added by a later sync merge without a migration or a manual step. It stays
+a message-level operation: the union is rebuilt exactly like a Message-ID cluster.
+
+**A reply is linked by what it answers, not only by its own id.** Gmail and Graph can put a
+reply in a thread id of its own — the reported case was one mail to several recipients,
+one reply, and two rows in the inbox. `messages.in_reply_to` and
+`messages.reference_ids` now retain the RFC headers, and the merge follows them to the
+conversation holding the parent message. That also covers a reply from one of the user's
+own addresses. For mail stored before those columns existed, the same-mailbox fallback
+joins a `Re:`/`Fwd:` conversation to the one it answers when the normalized subject,
+recipient relationship and time agree and there is exactly one parent candidate; it never
+guesses between two. The detail view expands the cluster by the same rule, so a merged row
+opens to both halves.
 
 **2. What the thread _means_ depends on how your accounts relate to it.** Classified from
 the stored `from` / `to` / `cc` of the cluster's messages:
@@ -1399,8 +1419,12 @@ behind it — and they are two halves of one event: the clear, then the re-rende
 rules are testable on their own.
 
 1. **Cluster** the loaded conversations with union-find, joined by any shared
-   `internetMessageId`. A message with no `Message-ID` (a synthetic one) stays in its own
-   cluster, since only a real one can be shared across mailboxes.
+   `internetMessageId` or by a message's `In-Reply-To`/`References` naming another stored
+   message. A message with no `Message-ID` (a synthetic one) stays in its own cluster,
+   since only a real one can be shared across mailboxes. Then join cross-account copies by
+   the first-message identity above; same-account threads are never joined by that
+   fallback. A same-mailbox reply with no stored headers is joined only to a unique parent
+   whose subject and recipient relationship it agrees with.
 2. **Classify** the cluster from the stored `from`/`to`/`cc` — see the table above. A direct
    sighting anywhere outranks a CC one anywhere.
 3. **Choose the owner**: the newest message's addressee if that address is one of yours,
@@ -1459,7 +1483,7 @@ go through `assertOwnedAccount`. Two consequences worth keeping: an address can 
 to only one account on the install (`upsertAccount` refuses it rather than moving the row and
 its synced history), and deleting the user removes their mailboxes and conversations with it.
 
-### A merged thread is a *cluster*, not a thread id — the detail view has to re-merge
+### A merged thread is a _cluster_, not a thread id — the detail view has to re-merge
 
 Learned from the real mailbox: a thread _between two of the user's own accounts_ looked
 broken, and the specific symptom was that opening a merged row showed one mailbox's mail
@@ -1474,11 +1498,15 @@ the same messages as **seven separate single-message threads**. The merge picked
 owner as the account the newest message was addressed to, so the row's thread id pointed
 at a one-message fragment. The inbox said "9 messages"; opening it showed 1.
 
-`getConversationClusterByThreadId` now resolves the **Message-ID-connected component**
-(BFS over message ids, transitively — the fragments only link through the ids they carry),
-and both `loadConversation` and `requireConversationByThreadId` fold it back with the same
-`mergeAccountConversations` the inbox uses. Verified against the real data: both the
-fragment id and the complete id resolve to the same 8-source cluster of 9 messages.
+`getConversationClusterByThreadId` now resolves the **Message-ID/reply-connected
+component** (BFS over shared ids and `In-Reply-To`/`References`, transitively — the
+fragments only link through the ids they carry), then adds the cross-account copies the
+first-message identity fallback finds and the same-account reply the headerless fallback
+finds, and both
+`loadConversation` and `requireConversationByThreadId` fold it back with the same
+`mergeAccountConversations` the inbox uses. Without that second step, an identity-merged
+row would open to one mailbox's half. Verified against the real data: both the fragment id
+and the complete id resolve to the same 8-source cluster of 9 messages.
 
 **The canonical row is the owner's most complete copy**, not the first one found. Cluster
 order is not stable — the inbox and the detail view can feed the same cluster in different
@@ -1603,8 +1631,8 @@ composer to a `noreply@` address.
 Five deliberate choices:
 
 - **One list, with two ways in.** The list is still the thing the user curates, and still the
-  only place the mark is *managed* — each entry has **Allow replies** to take it back. What it
-  is no longer is the only place one can be *added*. Marking a sender used to mean recognising
+  only place the mark is _managed_ — each entry has **Allow replies** to take it back. What it
+  is no longer is the only place one can be _added_. Marking a sender used to mean recognising
   them in a thread and then finding the address again somewhere else to type it, so there are
   now two shortcuts and one exit: a **Can't reply** button on the thread, which resolves the
   mailbox and the address from the mail on screen, and a one-click list of the addresses the
@@ -1627,8 +1655,8 @@ Five deliberate choices:
 - **Only the composer is hidden.** The state is left exactly where the decision layer put it.
   The user is saying they cannot answer this sender, not that the mail does not matter, so the
   thread stays listed where they found it — unlike machine mail, which also ranks low.
-- **A merge carries the verdict.** `isAutomated` on the row is what tells a *decision* (the
-  user's mark, or Jev's reading) apart from the *marker*: a decision is reused rather than
+- **A merge carries the verdict.** `isAutomated` on the row is what tells a _decision_ (the
+  user's mark, or Jev's reading) apart from the _marker_: a decision is reused rather than
   re-derived, while machine mail is recomputed from the union so a thread a human finally
   answers becomes replyable again.
 
@@ -1638,7 +1666,7 @@ Known limits, on purpose: the mark is per **address**, so a company mailing from
 reads the message body, so a
 signature saying "this address is not monitored" is not detected — a strict phrase list would
 have to reach bodies into `isAutomatedThread`, which risks false positives on quoted text.
-Replyability is also not persisted as a *state*, so a marked thread still counts in
+Replyability is also not persisted as a _state_, so a marked thread still counts in
 `needs-action` when the decision layer put it there.
 
 ### Adding a derived column needs a version bump
@@ -1666,7 +1694,7 @@ parser changes.** Otherwise the same silent-staleness bug returns.
 User-owned columns are the exception: `seen_at`, `done_at` and the can't-reply mark are not
 recomputed by the backfill at all — it writes only `is_automated` and `replyable` — so there is
 nothing to recompute and nothing to bump. What they need instead is the opposite guarantee:
-every path that rebuilds a thread must *carry* them (`getStoredUserFields`), or a sync silently
+every path that rebuilds a thread must _carry_ them (`getStoredUserFields`), or a sync silently
 resets an answer the user gave.
 
 ## The conversation view
@@ -1850,9 +1878,9 @@ Open threads and finished threads used to look alike, and the difference that ma
 "have I looked at this" but "have I dealt with this". They are now two separate stored answers,
 and keeping them separate is the whole point:
 
-| Mark | Column | Set by | Shows as |
-|---|---|---|---|
-| Read | `conversations.seen_at` | opening the thread | unread dot in the inbox, "New messages" divider in the thread |
+| Mark | Column                                      | Set by                                     | Shows as                                                                                                                                              |
+| ---- | ------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read | `conversations.seen_at`                     | opening the thread                         | unread dot in the inbox, "New messages" divider in the thread                                                                                         |
 | Done | `conversations.done_at` + `done_message_at` | the **Mark done** button, and nothing else | a Done tag, a line on the thread saying what it means, and a move to the **Done** section at the bottom of the inbox, with **Reopen** to take it back |
 
 - **Viewing never marks a thread done.** That is the failure the mark exists to prevent: a
@@ -1863,7 +1891,7 @@ and keeping them separate is the whole point:
   that thread and the user's reading would silently come undone. The mark is also forward-only:
   the view reports the instant it had on screen, so mail that synced in after the page rendered
   is not marked read by it.
-- **Done changes where a thread is *listed*, not what it *is*.** The state column is never
+- **Done changes where a thread is _listed_, not what it _is_.** The state column is never
   rewritten — "handled" is not a claim about what the mail needs — but `partitionByState` counts
   a done thread outside the state groups, so it stops appearing under "Needs action" and sits in
   its own section. That split is the point: the headings above it are what still wants
@@ -1881,7 +1909,7 @@ and keeping them separate is the whole point:
   `refreshThread` read them back with `getStoredUserFields` before saving — one read for all
   three user-owned fields (`state_override`, `seen_at`, `done_at`), because reading one and
   dropping another is exactly the bug that shape invites. A merge carries Done (voided against
-  the union's newest message) and *unions* Read, since reading a thread in either mailbox means
+  the union's newest message) and _unions_ Read, since reading a thread in either mailbox means
   the user has read the mail.
 
 ## Client mail, and what kind of person you're writing to
@@ -1918,8 +1946,18 @@ just does not know which senders are clients.
 no OAuth, no mailbox:
 
 ```json
-{ "clients": [ { "email": "ana@acme.com", "name": "Ana Ruiz", "company": "Acme",
-                 "externalId": "crm-4711", "kind": "client" } ], "replace": false }
+{
+  "clients": [
+    {
+      "email": "ana@acme.com",
+      "name": "Ana Ruiz",
+      "company": "Acme",
+      "externalId": "crm-4711",
+      "kind": "client"
+    }
+  ],
+  "replace": false
+}
 ```
 
 `replace: true` is the "sync my CRM" mode: a client missing from the payload loses `kind` (never
@@ -1945,11 +1983,20 @@ A website form, a helpdesk, or a shared support box produces client mail the use
 sees. The same endpoint can take it:
 
 ```json
-{ "source": "support-form", "threadKey": "ticket-9182",
-  "message": { "externalId": "form-5512", "from": "ana@acme.com", "to": "help@acme.com",
-               "subject": "Refund for order 88", "text": "…", "html": "…",
-               "receivedAt": "2026-10-22T09:14:00Z" },
-  "replyUrl": "https://crm.example.com/hooks/nuntia/reply" }
+{
+  "source": "support-form",
+  "threadKey": "ticket-9182",
+  "message": {
+    "externalId": "form-5512",
+    "from": "ana@acme.com",
+    "to": "help@acme.com",
+    "subject": "Refund for order 88",
+    "text": "…",
+    "html": "…",
+    "receivedAt": "2026-10-22T09:14:00Z"
+  },
+  "replyUrl": "https://crm.example.com/hooks/nuntia/reply"
+}
 ```
 
 This is structural, and the reason it is second: `conversations.accountId` and
@@ -1983,10 +2030,10 @@ Rules either way:
 
 ### Two kinds, and what they are allowed to change
 
-| Field | Whose | Values | Drives |
-| --- | --- | --- | --- |
-| `contact_contexts.kind` | the other person | client, prospect, vendor, partner, colleague, investor, personal, other | the Clients (later Prospects) section, priority, Jev's facts, a reply-tone hint |
-| `users.work_kind` | the signed-in person | support, sales, founder, freelancer, operations, other (+ one line of free text) | which sections start enabled, the Jev prompt's framing, first-run copy |
+| Field                   | Whose                | Values                                                                           | Drives                                                                          |
+| ----------------------- | -------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `contact_contexts.kind` | the other person     | client, prospect, vendor, partner, colleague, investor, personal, other          | the Clients (later Prospects) section, priority, Jev's facts, a reply-tone hint |
+| `users.work_kind`       | the signed-in person | support, sales, founder, freelancer, operations, other (+ one line of free text) | which sections start enabled, the Jev prompt's framing, first-run copy          |
 
 `work_kind` is asked once on the first-run screen ("What do you mostly use Nuntia for?"),
 skippable, and editable in Settings. It **seeds defaults and nothing else**: a support user starts
@@ -1996,8 +2043,8 @@ not a mode. It never hides mail, and it is not sent to the LLM as a label about 
 employer.
 
 The contact kind stays user-authored and is the one field AI never writes. Incoming mail and
-suggestions may *propose* it (the sidebar already has a suggest path), but a classification of a
-relationship is the user's answer rather than a fact to infer. The *text* fields beside it —
+suggestions may _propose_ it (the sidebar already has a suggest path), but a classification of a
+relationship is the user's answer rather than a fact to infer. The _text_ fields beside it —
 role/company, relationship, topics, current work — now refresh automatically with a revision and
 an Undo; see "Context keeps itself current".
 
@@ -2081,7 +2128,7 @@ cheap.
 
 A profile that describes the mail from three months ago is worse than an empty one: Jev is handed
 a stale "topics: launch" long after the launch shipped, the Clients section inherits old wording,
-and the user learns not to trust the sidebar. Today the AI can only *suggest* the contact fields,
+and the user learns not to trust the sidebar. Today the AI can only _suggest_ the contact fields,
 from a button, and `applyDecision` fills a topic only while it is null. Both are conservative for
 the wrong reason: the facts that go stale are exactly the ones a model can refresh from the thread
 it has just read.
@@ -2198,7 +2245,7 @@ once at module load.** The guard is the backstop, not the mechanism.
   section for why `busy_timeout` alone does not save you.
 - **A new `app_settings` column needs its migration applied before the dev server restarts.**
   The settings row is read with `findFirst`, which selects every declared column, so the app does
-  not fail on a *missing* table — it fails on a column that exists in the schema and not in the
+  not fail on a _missing_ table — it fails on a column that exists in the schema and not in the
   file. `bun run db:generate && bun run db:migrate` is the whole fix.
 - Bump `DERIVED_VERSION` when adding a derived column to `conversations` or changing the
   parser. Incremental sync will not revisit unchanged threads, so without it the new column

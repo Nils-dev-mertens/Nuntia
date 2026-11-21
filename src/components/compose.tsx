@@ -10,7 +10,7 @@
  * a thread.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 
 import { RecipientField } from '#/components/recipient-field.tsx'
@@ -67,10 +67,10 @@ export function Compose({
     error: string | null
     threadId: string | null
   }>
-  /** The greeting and signature the server would add for this recipient. */
+  /** The greeting and signature the server would add for these recipients. */
   loadStyle: (input: {
     accountId: string
-    recipient: string | null
+    recipients: string[]
   }) => Promise<ComposeStyle>
   /** Inside the inbox window: no page frame, no second "New message" title. */
   embedded?: boolean
@@ -100,7 +100,7 @@ export function Compose({
   const loadStyleRef = useRef(loadStyle)
   loadStyleRef.current = loadStyle
 
-  const recipient = addressesOf(to)[0] ?? null
+  const recipients = useMemo(() => addressesOf(to), [to])
 
   useEffect(() => {
     if (!accountId) return
@@ -108,7 +108,7 @@ export function Compose({
     let cancelled = false
     const timer = setTimeout(() => {
       void loadStyleRef
-        .current({ accountId, recipient })
+        .current({ accountId, recipients })
         .then((result) => {
           if (!cancelled) setStyle(result)
         })
@@ -119,7 +119,7 @@ export function Compose({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [accountId, recipient])
+  }, [accountId, recipients])
 
   const inputClass =
     'w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground'

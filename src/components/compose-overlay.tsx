@@ -29,7 +29,7 @@ export function ComposeOverlay({
   suggestions: RecipientSuggestion[]
   loadStyle: (input: {
     accountId: string
-    recipient: string | null
+    recipients: string[]
   }) => Promise<ComposeStyle>
   submit: (input: ComposeInput) => Promise<{
     error: string | null

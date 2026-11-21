@@ -33,6 +33,11 @@ export type GraphMessage = {
   id: string
   conversationId?: string | null
   internetMessageId?: string | null
+  /** Only returned when `$select` asks for it. Contains In-Reply-To/References. */
+  internetMessageHeaders?: Array<{
+    name?: string | null
+    value?: string | null
+  }> | null
   subject?: string | null
   body?: { contentType?: string | null; content?: string | null } | null
   bodyPreview?: string | null
@@ -126,10 +131,23 @@ export function toProviderMessage(
     })
   }
 
+  // Graph exposes the RFC threading headers only through the header collection,
+  // not as first-class properties. Without them a reply that Graph put in a new
+  // conversation could not be joined back to the message it answers.
+  const internetHeaders = new Map<string, string>()
+  for (const header of message.internetMessageHeaders ?? []) {
+    const name = header.name?.trim().toLowerCase()
+    if (name && header.value) internetHeaders.set(name, header.value)
+  }
+
   const headers: Record<string, string> = {
     subject: message.subject ?? '',
     from: formatRecipient(message.from),
     'message-id': message.internetMessageId ?? message.id,
+  }
+  for (const name of ['in-reply-to', 'references']) {
+    const value = internetHeaders.get(name)
+    if (value) headers[name] = value
   }
 
   const to = formatRecipients(message.toRecipients)

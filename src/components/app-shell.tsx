@@ -12,7 +12,17 @@
 
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Check, Inbox, PenLine, Plus, Settings, Users } from 'lucide-react'
+import {
+  Archive,
+  Check,
+  Inbox,
+  PenLine,
+  Plus,
+  Settings,
+  ShieldAlert,
+  Trash2,
+  Users,
+} from 'lucide-react'
 
 import { cn } from '#/lib/utils'
 
@@ -41,6 +51,7 @@ export function AppShell({
   onSelectSection,
   accounts,
   doneCount = 0,
+  folderCounts,
   onCompose,
   nav,
   profileEmail,
@@ -53,6 +64,8 @@ export function AppShell({
   accounts: Array<{ id: string; email: string }>
   /** Handled mail, whose only home in the shell is the Done row in the nav. */
   doneCount?: number
+  /** Archive/Spam/Deleted rows, so those destinations show how much is in them. */
+  folderCounts?: { archive: number; spam: number; trash: number }
   /** Opens the compose overlay; the design puts it beside the list. */
   onCompose?: () => void
   /**
@@ -115,6 +128,27 @@ export function AppShell({
                   icon={<Check aria-hidden="true" className="size-4" />}
                   label="Done"
                   count={doneCount}
+                />
+                <NavRow
+                  active={activeSection === 'folder:archive'}
+                  onClick={() => onSelectSection?.('folder:archive')}
+                  icon={<Archive aria-hidden="true" className="size-4" />}
+                  label="Archive"
+                  count={folderCounts?.archive}
+                />
+                <NavRow
+                  active={activeSection === 'folder:spam'}
+                  onClick={() => onSelectSection?.('folder:spam')}
+                  icon={<ShieldAlert aria-hidden="true" className="size-4" />}
+                  label="Spam"
+                  count={folderCounts?.spam}
+                />
+                <NavRow
+                  active={activeSection === 'folder:trash'}
+                  onClick={() => onSelectSection?.('folder:trash')}
+                  icon={<Trash2 aria-hidden="true" className="size-4" />}
+                  label="Deleted"
+                  count={folderCounts?.trash}
                 />
                 <Link
                   to="/contacts"

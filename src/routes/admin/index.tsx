@@ -33,7 +33,7 @@ import {
 } from '#/lib/invites/repository.ts'
 import { inviteLink, notifyInvite } from '#/lib/invites/notify.ts'
 import { approveRequest, declineRequest } from '#/lib/invites/requests.ts'
-import { FEEDBACK_STATUSES } from '#/db/schema.ts'
+import { FEEDBACK_STATUSES } from '#/lib/feedback/status.ts'
 import type { FeedbackStatus } from '#/db/schema.ts'
 import type { LogRecord } from '#/lib/log.ts'
 

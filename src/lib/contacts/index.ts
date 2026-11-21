@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { asc, desc, inArray } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { contacts } from '#/db/schema.ts'
@@ -93,6 +93,36 @@ export async function contactNamesFor(
     .select()
     .from(contacts)
     .where(inArray(contacts.accountId, accountIds))
+    .orderBy(asc(contacts.updatedAt))
+
+  for (const row of rows) {
+    if (row.name?.trim()) names.set(row.email, row.name.trim())
+  }
+
+  return names
+}
+
+/**
+ * The names stored for a set of addresses in one mailbox.
+ *
+ * One query for a whole message rather than one per recipient. The result is
+ * keyed by normalised address; callers keep their own recipient order when
+ * building a greeting, and an address with no stored name is simply absent.
+ */
+export async function contactNamesForEmails(
+  accountId: string,
+  emails: string[],
+): Promise<Map<string, string>> {
+  const names = new Map<string, string>()
+  const keys = [...new Set(emails.map(normaliseContactEmail).filter(Boolean))]
+  if (keys.length === 0) return names
+
+  const rows = await db
+    .select()
+    .from(contacts)
+    .where(
+      and(eq(contacts.accountId, accountId), inArray(contacts.email, keys)),
+    )
     .orderBy(asc(contacts.updatedAt))
 
   for (const row of rows) {

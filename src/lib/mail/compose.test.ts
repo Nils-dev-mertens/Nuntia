@@ -7,7 +7,11 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { composeNewMessage, composeReply } from './compose.ts'
+import {
+  applyGreetingName,
+  composeNewMessage,
+  composeReply,
+} from './compose.ts'
 
 describe('composeNewMessage', () => {
   test('puts the greeting above the body and the signature below it', () => {
@@ -67,6 +71,55 @@ describe('composeNewMessage', () => {
     })
 
     expect(composed.html).toContain('5 &lt; 6 &amp; 7 &gt; 6')
+  })
+})
+
+describe('applyGreetingName', () => {
+  test('puts the first name into the greeting', () => {
+    expect(applyGreetingName('Hi {name},', 'Sarah de Vries')).toBe('Hi Sarah,')
+  })
+
+  test('uses the whole stored name for {fullname}', () => {
+    expect(applyGreetingName('Hello {fullname},', 'Sarah de Vries')).toBe(
+      'Hello Sarah de Vries,',
+    )
+  })
+
+  test('lists every recipient, in the order addressed', () => {
+    expect(
+      applyGreetingName('Hi {name},', ['Alice Smith', 'Bob', 'Carol']),
+    ).toBe('Hi Alice, Bob, Carol,')
+    expect(
+      applyGreetingName('Beste {fullname},', ['Alice Smith', 'Bob Jones']),
+    ).toBe('Beste Alice Smith, Bob Jones,')
+  })
+
+  test('skips recipients with no known name', () => {
+    expect(applyGreetingName('Hi {name},', ['Alice', null, '', 'Bob'])).toBe(
+      'Hi Alice, Bob,',
+    )
+  })
+
+  test('replaces every token, case-insensitively', () => {
+    expect(applyGreetingName('{NAME}, hallo {name}!', 'Nils')).toBe(
+      'Nils, hallo Nils!',
+    )
+    expect(applyGreetingName('{name} / {FullName}', 'Sarah de Vries')).toBe(
+      'Sarah / Sarah de Vries',
+    )
+  })
+
+  test('drops the token cleanly when no name is known', () => {
+    expect(applyGreetingName('Hi {name},', null)).toBe('Hi,')
+    expect(applyGreetingName('Hallo {name}, hoe gaat het?', '')).toBe(
+      'Hallo, hoe gaat het?',
+    )
+    expect(applyGreetingName('Hello {fullname},', ['', null])).toBe('Hello,')
+  })
+
+  test('leaves a greeting without the token alone', () => {
+    expect(applyGreetingName('Hi Sarah,', 'Nils')).toBe('Hi Sarah,')
+    expect(applyGreetingName(null, 'Nils')).toBeNull()
   })
 })
 

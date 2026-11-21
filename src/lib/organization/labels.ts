@@ -8,7 +8,7 @@
  * organization rules; this module only resolves the built-in four.
  */
 
-import { CONVERSATION_STATES } from '#/db/schema.ts'
+import { CONVERSATION_STATES } from '#/lib/conversation-state.ts'
 import type { ConversationState } from '#/db/schema.ts'
 import { STATE_META } from '#/lib/conversation-state.ts'
 

@@ -8,20 +8,22 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core'
 
+import type { ConversationState } from '#/lib/conversation-state.ts'
+import type { FeedbackStatus } from '#/lib/feedback/status.ts'
+import type { FormQuestionType } from '#/lib/forms/types.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
 import type { Provider } from '#/lib/mailbox/types.ts'
+import type { SpamRuleField } from '#/lib/spam/fields.ts'
+
+import { encryptedMatchText, encryptedText } from './encrypted-column.ts'
 
 /**
- * Conversation state. The four MVP states from the spec.
- * `low-priority` reuses destructive styling, per PLAN.md.
+ * Conversation state, re-exported for server code that already imports it from
+ * here. The value itself lives in `#/lib/conversation-state.ts` because the UI
+ * needs it and this module is server-only (see `./encrypted-column.ts`).
  */
-export const CONVERSATION_STATES = [
-  'needs-action',
-  'waiting-for-reply',
-  'informational',
-  'low-priority',
-] as const
-
-export type ConversationState = (typeof CONVERSATION_STATES)[number]
+export { CONVERSATION_STATES } from '#/lib/conversation-state.ts'
+export type { ConversationState } from '#/lib/conversation-state.ts'
 
 export const INTENTS = [
   'request',
@@ -80,7 +82,8 @@ export const users = sqliteTable(
   {
     id: text('id').primaryKey(),
     email: text('email').notNull(),
-    name: text('name'),
+    /** Encrypted: a display name is personal data with no lookup on it. */
+    name: encryptedText('name'),
     /** argon2id hash. Never the password, and never logged. */
     passwordHash: text('password_hash').notNull(),
     /** `admin` may open `/admin`. An invited user starts as `member`. */
@@ -139,6 +142,15 @@ export const accounts = sqliteTable(
      * Null only for rows written before user accounts existed, or by tests that
      * do not need one. Production always resolves accounts through a session, so
      * a null owner is unreachable rather than shared.
+     *
+     * The cascade below is real, but not because this declaration says so. The
+     * column was added to the existing table by `ALTER TABLE` in migration 0013,
+     * and SQLite cannot attach a cascading foreign key that way: databases made
+     * by the migrations carry it as `NO ACTION`. `src/db/rebuild-user-cascades.ts`
+     * rebuilds the table on startup when it finds that state, so a user delete
+     * reaches the mailbox and, through it, the stored mail. `app_settings.user_id`
+     * came in the same way and is rebuilt by the same module. Keep the
+     * declarations and the rebuild in step.
      */
     userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
     /**
@@ -155,9 +167,12 @@ export const accounts = sqliteTable(
       mode: 'timestamp_ms',
     }),
     scopes: text('scopes'),
-    /** Account-wide reply-style defaults; sender profiles may override them. */
-    defaultReplyGreeting: text('default_reply_greeting'),
-    defaultReplySignature: text('default_reply_signature'),
+    /**
+     * Account-wide reply-style defaults; sender profiles may override them.
+     * Encrypted: both are the user's own words, read only to prefill a draft.
+     */
+    defaultReplyGreeting: encryptedText('default_reply_greeting'),
+    defaultReplySignature: encryptedText('default_reply_signature'),
     defaultStripQuotedHistory: integer('default_strip_quoted_history', {
       mode: 'boolean',
     })
@@ -221,8 +236,18 @@ export const conversations = sqliteTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     providerThreadId: text('provider_thread_id').notNull(),
-    subject: text('subject').notNull(),
-    /** Normalized participants, JSON array of {name, email}. */
+    /** Encrypted at rest; the subject line is mail content. */
+    subject: encryptedText('subject').notNull(),
+    /**
+     * Normalized participants, JSON array of {name, email}.
+     *
+     * Deliberately not encrypted. `listContactThreads` finds an address with SQL
+     * `json_each` over this column, which cannot parse an envelope; matching in
+     * JavaScript instead would mean loading every thread of every mailbox. The
+     * only thing it holds is addresses, which already sit in the clear on each
+     * message (`from`/`to`/`cc`), so an envelope here would not hide anything
+     * the message rows do not.
+     */
     participants: text('participants', { mode: 'json' })
       .$type<Participant[]>()
       .notNull()
@@ -237,10 +262,13 @@ export const conversations = sqliteTable(
       .notNull()
       .default(false),
 
-    /** Short human-readable description of what the conversation is about now. */
-    topic: text('topic'),
+    /**
+     * Short human-readable description of what the conversation is about now.
+     * Written by a model from the mail, so it is content and is encrypted.
+     */
+    topic: encryptedText('topic'),
     /** User-defined description of what they want to accomplish. User-owned. */
-    goal: text('goal'),
+    goal: encryptedText('goal'),
 
     importance: integer('importance').notNull().default(5),
     urgency: integer('urgency').notNull().default(5),
@@ -266,6 +294,16 @@ export const conversations = sqliteTable(
     isAutomated: integer('is_automated', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * Which folder the thread is filed in: inbox, archive, trash or spam.
+     *
+     * Rewritten from the provider's labels on every sync, so trashing or
+     * reporting mail in Gmail itself reaches here too. A matching spam rule or
+     * a sender the user has marked is the one *local* input: it can file inbox
+     * mail as spam before the provider has an opinion.
+     */
+    folder: text('folder').$type<MailFolder>().notNull().default('inbox'),
+
     /**
      * The user's own filing: the custom label they moved this thread into, or
      * null when the rules still decide.
@@ -395,6 +433,7 @@ export const conversations = sqliteTable(
       table.providerThreadId,
     ),
     index('conversations_state_idx').on(table.accountId, table.state),
+    index('conversations_folder_idx').on(table.accountId, table.folder),
     index('conversations_last_message_idx').on(table.lastMessageAt),
   ],
 )
@@ -413,6 +452,19 @@ export const messages = sqliteTable(
       .references(() => conversations.id, { onDelete: 'cascade' }),
     providerMessageId: text('provider_message_id').notNull(),
     internetMessageId: text('internet_message_id'),
+    /**
+     * The RFC `In-Reply-To` and `References` ids, brackets stripped.
+     *
+     * They are what link a reply to the message it answers when the provider did
+     * not put both in the same thread. The inbox merge unions on these ids too,
+     * otherwise a reply Gmail/Graph split into its own thread looked like a new
+     * conversation even though it pointed straight at the sent message.
+     */
+    inReplyTo: text('in_reply_to'),
+    referenceIds: text('reference_ids', { mode: 'json' })
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'`),
     from: text('from', { mode: 'json' }).$type<Participant>().notNull(),
     to: text('to', { mode: 'json' }).$type<Participant[]>().notNull(),
     cc: text('cc', { mode: 'json' })
@@ -420,25 +472,31 @@ export const messages = sqliteTable(
       .notNull()
       .default(sql`'[]'`),
 
-    subject: text('subject').notNull(),
-    snippet: text('snippet'),
+    /**
+     * The message's content columns are encrypted at rest with the same
+     * AES-256-GCM envelope as the OAuth tokens — see `./encrypted-column.ts`.
+     * The SQL type stays `text`, so these are readable to the app and not to
+     * whoever copies the database file.
+     */
+    subject: encryptedText('subject').notNull(),
+    snippet: encryptedText('snippet'),
     /** Original provider body parts, retained locally for lossless re-parsing. */
-    rawBodyText: text('raw_body_text'),
-    rawBodyHtml: text('raw_body_html'),
-    bodyText: text('body_text'),
-    bodyHtml: text('body_html'),
+    rawBodyText: encryptedText('raw_body_text'),
+    rawBodyHtml: encryptedText('raw_body_html'),
+    bodyText: encryptedText('body_text'),
+    bodyHtml: encryptedText('body_html'),
     /** Plaintext signature block detected on this message, re-added on reply. */
-    signatureText: text('signature_text'),
+    signatureText: encryptedText('signature_text'),
     /**
      * Greeting detected on this message, e.g. "Hi Sarah,".
      *
      * Stored for the same reason as the signature: it is hidden on display but
      * restored when replying, so a reply does not silently lose it.
      */
-    greetingText: text('greeting_text'),
-    detectedGreetingText: text('detected_greeting_text'),
-    detectedSignatureText: text('detected_signature_text'),
-    strippedQuote: text('stripped_quote'),
+    greetingText: encryptedText('greeting_text'),
+    detectedGreetingText: encryptedText('detected_greeting_text'),
+    detectedSignatureText: encryptedText('detected_signature_text'),
+    strippedQuote: encryptedText('stripped_quote'),
 
     sentAt: integer('sent_at', { mode: 'timestamp_ms' }).notNull(),
     isFromAccountOwner: integer('is_from_account_owner', { mode: 'boolean' })
@@ -473,7 +531,8 @@ export const attachments = sqliteTable(
       .notNull()
       .references(() => messages.id, { onDelete: 'cascade' }),
     providerAttachmentId: text('provider_attachment_id').notNull(),
-    filename: text('filename').notNull(),
+    /** Encrypted: a file name says what the mail was about. */
+    filename: encryptedText('filename').notNull(),
     mimeType: text('mime_type').notNull(),
     /** Byte size as reported by Gmail. */
     sizeBytes: integer('size_bytes').notNull().default(0),
@@ -517,9 +576,13 @@ export const decisions = sqliteTable(
     urgency: integer('urgency').notNull(),
     requiresReply: integer('requires_reply', { mode: 'boolean' }).notNull(),
     intent: text('intent').$type<Intent>().notNull(),
-    topic: text('topic'),
-    /** Reasoning trace, for debugging classification quality. */
-    reasoning: text('reasoning'),
+    topic: encryptedText('topic'),
+    /**
+     * Reasoning trace, for debugging classification quality. Encrypted: a trace
+     * can quote the mail it read, so it is content with a short useful life (see
+     * `scripts/prune-data.ts`).
+     */
+    reasoning: encryptedText('reasoning'),
     decidedAt: integer('decided_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -557,7 +620,8 @@ export const senderSignals = sqliteTable(
     accountId: text('account_id')
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    senderEmail: text('sender_email').notNull(),
+    /** Looked up by address, so it uses the deterministic envelope. */
+    senderEmail: encryptedMatchText('sender_email').notNull(),
     /** Last time the user filed a thread from this sender away. */
     ignoredAt: integer('ignored_at', { mode: 'timestamp_ms' }),
     /** Last time the user brought one back and told the app to stop assuming. */
@@ -574,6 +638,78 @@ export const senderSignals = sqliteTable(
   ],
 )
 
+export { SPAM_RULE_FIELDS } from '#/lib/spam/fields.ts'
+export type { SpamRuleField } from '#/lib/spam/fields.ts'
+
+/**
+ * A user-authored rule that files matching mail in Spam.
+ *
+ * Deliberately small and separate from `organization_rules`: a custom label is
+ * where mail *belongs*, while this says it should not be read at all. The two
+ * also act at different times — labels are applied by the decision layer, spam
+ * rules by the sync before the thread is ever shown.
+ *
+ * Rules are alternatives, like a label's: any enabled rule that matches files
+ * the thread. A rule is global to the user rather than per mailbox, because a
+ * sender is the same sender whichever address they write to.
+ */
+export const spamRules = sqliteTable(
+  'spam_rules',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    field: text('field').$type<SpamRuleField>().notNull(),
+    /** Encrypted: an address, a domain or a subject fragment is mail content. */
+    value: encryptedText('value').notNull(),
+    position: integer('position').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    index('spam_rules_user_position_idx').on(table.userId, table.position),
+  ],
+)
+
+/**
+ * What the user has taught the app about one sender's mail.
+ *
+ * The self-updating half of spam handling: marking a thread as spam writes the
+ * sender here, and every later thread from them is filed as spam without being
+ * asked about again. `notSpamAt` is the correction — it is more recent than
+ * `spamAt` exactly when the user brought a sender back, so a single swift
+ * "not spam" undoes the learning instead of needing a second list to prune.
+ *
+ * Two timestamps rather than a counter, for the same reason `sender_signals`
+ * uses them: a restore that happened last is what the user currently means.
+ */
+export const spamSenderSignals = sqliteTable(
+  'spam_sender_signals',
+  {
+    id: text('id').primaryKey(),
+    accountId: text('account_id')
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    /** Normalized address; looked up directly, so the deterministic envelope. */
+    senderEmail: encryptedMatchText('sender_email').notNull(),
+    /** Last time the user filed this sender's mail as spam. */
+    spamAt: integer('spam_at', { mode: 'timestamp_ms' }),
+    /** Last time the user said a thread from them was not spam. */
+    notSpamAt: integer('not_spam_at', { mode: 'timestamp_ms' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [
+    uniqueIndex('spam_sender_signals_account_email_idx').on(
+      table.accountId,
+      table.senderEmail,
+    ),
+  ],
+)
+
 /** Per-sender parsing and reply-style preferences owned by an account. */
 export const senderProfiles = sqliteTable(
   'sender_profiles',
@@ -582,7 +718,8 @@ export const senderProfiles = sqliteTable(
     accountId: text('account_id')
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    senderEmail: text('sender_email').notNull(),
+    /** Looked up by address, so it uses the deterministic envelope. */
+    senderEmail: encryptedMatchText('sender_email').notNull(),
     stripQuotedHistory: integer('strip_quoted_history', { mode: 'boolean' })
       .notNull()
       .default(true),
@@ -601,8 +738,9 @@ export const senderProfiles = sqliteTable(
     replyStyleEnabled: integer('reply_style_enabled', { mode: 'boolean' })
       .notNull()
       .default(false),
-    replyGreeting: text('reply_greeting'),
-    replySignature: text('reply_signature'),
+    /** Encrypted: the user's own greeting and sign-off, quoted from their mail. */
+    replyGreeting: encryptedText('reply_greeting'),
+    replySignature: encryptedText('reply_signature'),
 
     /**
      * Whether a reply can reach this sender at all — the user's own answer.
@@ -676,12 +814,16 @@ export const contactContexts = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    /** Normalized email address; shared across this user's connected mailboxes. */
-    email: text('email').notNull(),
-    roleCompany: text('role_company'),
-    relationship: text('relationship'),
-    topics: text('topics'),
-    currentWork: text('current_work'),
+    /**
+     * Normalized email address; shared across this user's connected mailboxes.
+     * Half of the key, so it uses the deterministic envelope.
+     */
+    email: encryptedMatchText('email').notNull(),
+    /** The working notes and the summary below are encrypted: all content. */
+    roleCompany: encryptedText('role_company'),
+    relationship: encryptedText('relationship'),
+    topics: encryptedText('topics'),
+    currentWork: encryptedText('current_work'),
     /**
      * One or two plain-language sentences describing the relationship.
      *
@@ -689,7 +831,7 @@ export const contactContexts = sqliteTable(
      * working notes for classification, while the summary is the short version
      * of what the app understands about the person.
      */
-    summary: text('summary'),
+    summary: encryptedText('summary'),
     /**
      * Provenance per field. `auto` is provisional and may be revised by a later
      * mail; `user` is the user's own words and is never overwritten by a
@@ -733,9 +875,21 @@ export const contactTags = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    /** Normalized address; shared across this user's connected mailboxes. */
-    email: text('email').notNull(),
-    /** The tag as the user typed it, trimmed. */
+    /**
+     * Normalized address; shared across this user's connected mailboxes.
+     * Part of the key, so it uses the deterministic envelope.
+     */
+    email: encryptedMatchText('email').notNull(),
+    /**
+     * The tag as the user typed it, trimmed.
+     *
+     * Left as text while the address beside it is encrypted, because the tag is
+     * the half of the key that is *searched by case-folded text*:
+     * `lower(tag) = lower(?)` in `#/lib/contacts/tags.ts` and
+     * `#/lib/contacts/tag-refresh.ts`. SQLite's `lower()` cannot operate on a
+     * ciphertext, and a tag is a word the user chose ("client", "acme") rather
+     * than mail content.
+     */
     tag: text('tag').notNull(),
     /**
      * Who wrote this tag, and therefore who may change it.
@@ -780,7 +934,7 @@ export const contactTagDescriptions = sqliteTable(
     /** Lowercased tag text, so the key matches however the tag was typed. */
     tag: text('tag').notNull(),
     /** What the tag is for, one line, as the user or the app wrote it. */
-    description: text('description').notNull(),
+    description: encryptedText('description').notNull(),
     /**
      * Who wrote the sentence, and therefore who may rewrite it.
      *
@@ -826,13 +980,16 @@ export const contactOrganizations = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    /** Registrable domain, the same grouping key the directory derives. */
-    domain: text('domain').notNull(),
+    /**
+     * Registrable domain, the same grouping key the directory derives. Part of
+     * the key, so it uses the deterministic envelope.
+     */
+    domain: encryptedMatchText('domain').notNull(),
     /** What the company does, in the user's or the accepted mail's words. */
-    focus: text('focus'),
+    focus: encryptedText('focus'),
     focusSource: text('focus_source').$type<OrganizationFocusSource>(),
     /** A mail-stated line the user has not accepted or dismissed yet. */
-    suggestedFocus: text('suggested_focus'),
+    suggestedFocus: encryptedText('suggested_focus'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -870,8 +1027,8 @@ export const contactTagEvents = sqliteTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     /** Lowercased tag text. */
     tag: text('tag').notNull(),
-    /** The contact whose membership changed. */
-    email: text('email').notNull(),
+    /** The contact whose membership changed. Read, never searched, so a random IV. */
+    email: encryptedText('email').notNull(),
     action: text('action').$type<ContactTagEventAction>().notNull(),
     /** Whether the user made the change or an automatic refresh did. */
     source: text('source').$type<ContactTagSource>().notNull(),
@@ -911,14 +1068,14 @@ export const organizationLabels = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    /** User-facing name of the custom inbox section. */
-    name: text('name').notNull(),
+    /** User-facing name of the custom inbox section. Encrypted: user's words. */
+    name: encryptedText('name').notNull(),
     /**
      * What this label means, in the user's words — shown under the inbox heading
      * so a section explains itself rather than only naming itself, and read by
      * the decision model when the label has no rules.
      */
-    description: text('description').notNull().default(''),
+    description: encryptedText('description').notNull().default(''),
     enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
     /** Lower number wins; array order is preserved by the settings UI. */
     position: integer('position').notNull(),
@@ -954,7 +1111,8 @@ export const organizationRules = sqliteTable(
       .notNull()
       .references(() => organizationLabels.id, { onDelete: 'cascade' }),
     field: text('field').$type<OrganizationRuleField>().notNull(),
-    value: text('value').notNull(),
+    /** Encrypted: a rule value is a sender domain, a subject fragment or a topic. */
+    value: encryptedText('value').notNull(),
     /** Lower number wins within the label; order decides which match names it. */
     position: integer('position').notNull(),
   },
@@ -984,9 +1142,9 @@ export const stateLabels = sqliteTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     state: text('state').$type<ConversationState>().notNull(),
     /** The label's name, as the user wants it in headings and badges. */
-    name: text('name').notNull(),
+    name: encryptedText('name').notNull(),
     /** What the label means and is for. */
-    description: text('description').notNull().default(''),
+    description: encryptedText('description').notNull().default(''),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -1028,14 +1186,19 @@ export const contextRevisions = sqliteTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     /** `contact` targets an address, `conversation` targets a conversation id. */
     scope: text('scope').$type<ContextRevisionScope>().notNull(),
-    /** Lowercased address for a contact, `conversations.id` for a conversation. */
-    target: text('target').notNull(),
+    /**
+     * Lowercased address for a contact, `conversations.id` for a conversation.
+     * Indexed and searched, so it uses the deterministic envelope — which also
+     * keeps the `contact_contexts.email = context_revisions.target` comparison
+     * working, since both sides are then ciphertexts of the same address.
+     */
+    target: encryptedMatchText('target').notNull(),
     /** Which field changed: `state`, `topic`, `goal`, `roleCompany`, … */
     field: text('field').notNull(),
-    /** The value before the write; null when there was none. */
-    previousValue: text('previous_value'),
+    /** The value before the write; null when there was none. Encrypted: content. */
+    previousValue: encryptedText('previous_value'),
     /** The value written; null when the write cleared it. */
-    nextValue: text('next_value'),
+    nextValue: encryptedText('next_value'),
     source: text('source').$type<ContextRevisionSource>().notNull(),
     /** The thread the change was read from, when there is one. */
     threadId: text('thread_id'),
@@ -1060,9 +1223,12 @@ export const contacts = sqliteTable(
     accountId: text('account_id')
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    /** Lowercased address. */
-    email: text('email').notNull(),
-    name: text('name'),
+    /**
+     * Lowercased address. Part of the key (and an upsert target), so it uses
+     * the deterministic envelope.
+     */
+    email: encryptedMatchText('email').notNull(),
+    name: encryptedText('name'),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -1122,6 +1288,11 @@ export const appSettings = sqliteTable(
      * Per user, not per install: two people on one deployment must not share a
      * paid API key or a reply threshold. Null on the row written before accounts
      * existed, until the bootstrap user adopts it.
+     *
+     * Added by `ALTER TABLE` in migration 0013 like `accounts.user_id`, but
+     * migration 0031 later rebuilt this table for other columns and baked the
+     * cascade in. `src/db/rebuild-user-cascades.ts` checks it on startup anyway,
+     * so the key is verified rather than taken on trust.
      */
     userId: text('user_id').references(() => users.id, {
       onDelete: 'cascade',
@@ -1353,15 +1524,8 @@ export const inviteRedemptions = sqliteTable(
   ],
 )
 
-export const FEEDBACK_STATUSES = [
-  'new',
-  'read',
-  'planned',
-  'fixed',
-  'declined',
-] as const
-
-export type FeedbackStatus = (typeof FEEDBACK_STATUSES)[number]
+export { FEEDBACK_STATUSES } from '#/lib/feedback/status.ts'
+export type { FeedbackStatus } from '#/lib/feedback/status.ts'
 
 /**
  * What a beta user said got in the way.
@@ -1377,14 +1541,14 @@ export const feedback = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    email: text('email'),
+    email: encryptedText('email'),
     /** 1–5, or null when they only wrote something. */
     rating: integer('rating'),
-    message: text('message').notNull(),
+    message: encryptedText('message').notNull(),
     /** Route, plus a conversation id when the form was opened from one. */
     context: text('context'),
     status: text('status').notNull().default('new').$type<FeedbackStatus>(),
-    resolutionNote: text('resolution_note'),
+    resolutionNote: encryptedText('resolution_note'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' })
       .notNull()
       .default(sql`(unixepoch() * 1000)`),
@@ -1450,16 +1614,8 @@ export const FORM_AUDIENCES = ['all', 'selected'] as const
 
 export type FormAudience = (typeof FORM_AUDIENCES)[number]
 
-export const FORM_QUESTION_TYPES = [
-  'short-text',
-  'long-text',
-  'choice',
-  'multi-choice',
-  'scale',
-  'yes-no',
-] as const
-
-export type FormQuestionType = (typeof FORM_QUESTION_TYPES)[number]
+export { FORM_QUESTION_TYPES } from '#/lib/forms/types.ts'
+export type { FormQuestionType } from '#/lib/forms/types.ts'
 
 export const forms = sqliteTable(
   'forms',
@@ -1583,9 +1739,9 @@ export const formAnswers = sqliteTable(
     questionId: text('question_id')
       .notNull()
       .references(() => formQuestions.id, { onDelete: 'cascade' }),
-    valueText: text('value_text'),
+    valueText: encryptedText('value_text'),
     valueNumber: integer('value_number'),
-    valueChoices: text('value_choices_json'),
+    valueChoices: encryptedText('value_choices_json'),
   },
   (table) => [
     uniqueIndex('form_answers_response_question_idx').on(

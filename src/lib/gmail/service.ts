@@ -39,6 +39,7 @@ import {
   activeImportanceOverride,
   activeStateOverride,
   backfillDerivedFields,
+  deleteConversation,
   DERIVED_VERSION,
   getConversationClusterByThreadId,
   getParsingProfileContext,
@@ -49,6 +50,7 @@ import {
   replyDraftEligibility,
   resolveReplyStyle,
   setConversationDone as applyDoneMark,
+  setConversationFolder as applyFolder,
   setConversationUnread as applyUnreadMark,
   setGoalIfUnset,
   setOrganizationGroup as applyOrganizationGroup,
@@ -66,6 +68,8 @@ import {
   setStateOverride,
   mergeAccountConversations,
   reparseStoredMessages,
+  sameThreadIdentity,
+  threadIdentity,
 } from '#/lib/conversation/index.ts'
 import type { MailboxClient, Provider } from '#/lib/mailbox/types.ts'
 import type {
@@ -106,8 +110,16 @@ import {
 } from '#/lib/gmail/attachments.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
 import { log } from '#/lib/log.ts'
+import { MAIL_FOLDERS } from '#/lib/mail-folders.ts'
+import type { MailFolder } from '#/lib/mail-folders.ts'
+import {
+  loadSpamFacts,
+  matchingSpamRules,
+  normaliseSenderAddress,
+  recordSpamSender,
+} from '#/lib/spam/index.ts'
 
-import { GmailAuthError } from '#/lib/gmail/client.ts'
+import { GmailAuthError, GmailNotFoundError } from '#/lib/gmail/client.ts'
 import { cursorKindFor } from '#/lib/mailbox/types.ts'
 import { createMailboxClientFor } from '#/lib/mailbox/provider.ts'
 import { MicrosoftAuthError } from '#/lib/microsoft/index.ts'
@@ -195,6 +207,8 @@ export type ConversationSummary = {
    * into when they made a move, otherwise the first matching rule.
    */
   organizationGroup: { id: string; name: string } | null
+  /** Which folder the row belongs in. The inbox shows only `inbox`. */
+  folder: MailFolder
 }
 
 export type InboxPayload =
@@ -226,6 +240,8 @@ export type InboxPayload =
       stateLabels: StateLabels
       /** Threads the user has marked done — listed apart from the groups. */
       doneCount: number
+      /** How many stored threads sit in each folder, for the sidebar. */
+      folderCounts: Record<MailFolder, number>
       /** ISO string of the most recent completed sync, or null if never. */
       lastSyncedAt: string | null
       /** True when this call actually talked to any mailbox. */
@@ -910,6 +926,231 @@ export async function setConversationUnread(
   }
 
   await applyUnreadMark(accountId, conversation.providerThreadId, unread)
+}
+
+/**
+ * Move a thread between the mailbox's folders, and learn from the move.
+ *
+ * The provider is written first, like the read flag: if Gmail refuses, nothing
+ * local changes and the view keeps showing the truth. Marking spam also records
+ * the sender, which is what makes the next thread from them arrive in Spam
+ * without being asked about — the self-updating half of the feature. Taking a
+ * thread *out* of spam reverses that, so one correction is enough.
+ */
+export async function setConversationFolder(
+  userId: string,
+  providerThreadId: string,
+  folder: MailFolder,
+): Promise<void> {
+  if (!MAIL_FOLDERS.includes(folder)) {
+    throw new Error('That is not a mail folder.')
+  }
+
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+  const previous = conversation.folder
+  if (previous === folder) return
+
+  const client = await createMailboxClientFor(accountId)
+  if (!client?.setThreadFolder) {
+    throw new Error(
+      'This mailbox does not support moving mail between folders.',
+    )
+  }
+
+  try {
+    await client.setThreadFolder(conversation.providerThreadId, folder)
+  } catch (error) {
+    log('error', 'folder-move-failed', {
+      account: accountId,
+      threadId: conversation.providerThreadId,
+      folder,
+      authRequired: needsReconnect(error),
+      message: describeError(error),
+    })
+    throw error
+  }
+
+  await applyFolder(accountId, conversation.providerThreadId, folder)
+
+  // Learn only when the *sender* is the thing being judged, not when the user is
+  // just archiving or deleting: those say nothing about who wrote the mail. A
+  // thread between the user's own addresses has no other party, so there is
+  // nothing to learn — but its copies are still the same conversation, which is
+  // why the identity sweep runs without a sender too.
+  const sender = otherPartyOf(conversation)
+  if (folder === 'spam' || previous === 'spam') {
+    const spam = folder === 'spam'
+    const accounts = await listAccounts(userId)
+
+    // One mark is about the sender, not the thread or the mailbox: writing the
+    // signal for every account is what makes the next delivery to any of them
+    // arrive already filed.
+    if (sender) {
+      await Promise.all(
+        accounts.map((account) => recordSpamSender(account.id, sender, spam)),
+      )
+    }
+
+    // Apply the same answer to old mail already stored. Only in the spam
+    // direction: "not spam" is a correction about this message, and quietly
+    // pulling a sender's whole archive back into the inbox would be a larger
+    // change than the user asked for. Their future mail is unmarked either way.
+    if (spam) {
+      await refileSenderThreads(
+        accounts.map((account) => account.id),
+        sender,
+        conversation,
+        'spam',
+      )
+    }
+  }
+}
+
+/**
+ * Delete a thread permanently, then drop the local copy.
+ *
+ * Only mail already in Deleted can take this path: the trash is the place a
+ * message waits after the first delete, and this is the second, deliberate one.
+ * The provider goes first, as with every other write — if Gmail refuses, the
+ * local row remains and the user still has their mail.
+ */
+export async function deleteConversationPermanently(
+  userId: string,
+  providerThreadId: string,
+): Promise<void> {
+  const { accountId, conversation } = await ownerRowForThread(
+    userId,
+    providerThreadId,
+  )
+
+  if (conversation.folder !== 'trash') {
+    throw new Error('Only mail in Deleted can be deleted permanently.')
+  }
+
+  const client = await createMailboxClientFor(accountId)
+  if (!client?.deleteThreadPermanently) {
+    throw new Error('This mailbox does not support permanent deletion.')
+  }
+
+  try {
+    await client.deleteThreadPermanently(conversation.providerThreadId)
+  } catch (error) {
+    // Already gone is the outcome the user asked for, so a 404 is a success
+    // here rather than the sync path's "forget it" signal.
+    if (!(error instanceof GmailNotFoundError)) {
+      log('error', 'permanent-delete-failed', {
+        account: accountId,
+        threadId: conversation.providerThreadId,
+        authRequired: needsReconnect(error),
+        message: describeError(error),
+      })
+      throw error
+    }
+  }
+
+  await deleteConversation(accountId, conversation.providerThreadId)
+}
+
+/**
+ * Move stored threads from one sender, and copies of the same conversation, to
+ * Spam.
+ *
+ * Local only, deliberately: a user marking one message as spam should not fire
+ * one provider request per old thread. The next sync of each thread agrees with
+ * the provider's own labels, and the thread in hand has already been written
+ * there by `setConversationFolder`.
+ *
+ * The sender sweep covers older mail from the same person. The identity match
+ * covers the multi-account case the sender alone misses: one thread stored in
+ * two mailboxes — Gmail and Outlook, or two addresses whose providers gave the
+ * copies different ids — must not stay in one inbox after the user called it
+ * spam in the other. That is what makes the mark reach every copy, not just the
+ * mailbox it was issued from.
+ */
+async function refileSenderThreads(
+  accountIds: string[],
+  senderEmail: string,
+  source: Conversation,
+  target: 'spam',
+): Promise<void> {
+  const sourceIdentity = threadIdentity(source)
+
+  for (const accountId of accountIds) {
+    const conversations = await listConversations(accountId, {
+      includeAllFolders: true,
+    })
+    for (const conversation of conversations) {
+      if (conversation.folder !== 'inbox') continue
+
+      // A thread between the user's own addresses has no other party. Without
+      // this guard every such thread in every mailbox would compare equal to the
+      // empty string and be filed too, which is far more than the user asked.
+      const sameSender =
+        senderEmail !== '' && otherPartyOf(conversation) === senderEmail
+      const sameThread =
+        sourceIdentity !== null &&
+        sameThreadIdentity(sourceIdentity, threadIdentity(conversation))
+
+      if (!sameSender && !sameThread) continue
+      await applyFolder(accountId, conversation.providerThreadId, target)
+    }
+  }
+}
+
+/**
+ * Apply the current spam rules to mail already stored in the inbox.
+ *
+ * Saving a rule is a statement about the future, but leaving yesterday's
+ * matching mail in the inbox makes the rule look broken. The sweep is local
+ * only and one-way: a thread that a rule or a learned sender matches moves to
+ * Spam, and nothing is ever pulled back out. Some Spam mail was filed by Gmail
+ * and this app cannot tell those rows from its own, so un-filing on a rule
+ * removal would quietly undo the provider's decision. "Move to Inbox" on the
+ * thread is the deliberate correction.
+ *
+ * The heuristic is not re-run here. It already judged each thread when it was
+ * synced; the point of this pass is to make the user's rules take effect now.
+ */
+export async function refileStoredSpamMatches(userId: string): Promise<number> {
+  const accounts = await listAccounts(userId)
+  let moved = 0
+
+  for (const account of accounts) {
+    const facts = await loadSpamFacts(account.id, userId)
+    if (facts.rules.length === 0 && facts.learnedSenders.size === 0) continue
+
+    const conversations = await listConversations(account.id, {
+      includeAllFolders: true,
+    })
+
+    for (const conversation of conversations) {
+      if (conversation.folder !== 'inbox') continue
+
+      // The newest inbound message is what the sync judges, so the sweep judges
+      // the same one — otherwise a rule could move old mail the sync would keep.
+      const newestInbound = [...conversation.messages]
+        .reverse()
+        .find((message) => !message.isFromOwner)
+      if (!newestInbound) continue
+
+      const from = normaliseSenderAddress(newestInbound.from.email)
+      const matched = matchingSpamRules(facts.rules, {
+        from,
+        subject: conversation.subject,
+      })
+      if (matched.length === 0 && !(from && facts.learnedSenders.has(from))) {
+        continue
+      }
+
+      await applyFolder(account.id, conversation.providerThreadId, 'spam')
+      moved += 1
+    }
+  }
+
+  return moved
 }
 
 /**
@@ -1852,6 +2093,7 @@ function toSummary(
     organizationGroup: matchedRule
       ? { id: matchedRule.id, name: matchedRule.name }
       : null,
+    folder: conversation.folder,
   }
 }
 
@@ -2057,10 +2299,10 @@ export async function loadInbox(
   const perAccount = await Promise.all(
     accounts.map(async (account) => ({
       accountId: account.id,
-      // Archived threads stay in the database and out of the normal list; a
-      // search is the way back to one, so it reads them too.
+      // Every folder is read here: the sidebar counts them, the folder views
+      // render them, and the list itself filters to the one being viewed.
       conversations: await listConversations(account.id, {
-        includeArchived: Boolean(search),
+        includeAllFolders: true,
       }),
     })),
   )
@@ -2077,12 +2319,27 @@ export async function loadInbox(
     ? merged.filter((row) => conversationMatchesQuery(row.conversation, search))
     : merged
 
+  // Only inbox mail counts towards the sections and Done: archive, spam and
+  // deleted threads are separate destinations, and counting them here would
+  // make the Inbox badge describe mail the list is not showing.
+  const inboxMatched = matched.filter(
+    (row) => row.conversation.folder === 'inbox',
+  )
+
+  const folderCounts: Record<MailFolder, number> = {
+    inbox: inboxMatched.length,
+    archive: matched.filter((row) => row.conversation.folder === 'archive')
+      .length,
+    spam: matched.filter((row) => row.conversation.folder === 'spam').length,
+    trash: matched.filter((row) => row.conversation.folder === 'trash').length,
+  }
+
   // Done threads are counted apart from the state groups, not inside them: the
   // groups are what is still open, and a handled thread sitting under "Needs
   // action" was the thing the user could not tell from work that was actually
   // waiting on them. The rule itself is a pure function (`partitionByState`), so
   // the split is testable without a database.
-  const { counts, doneCount } = partitionByState(matched)
+  const { counts, doneCount } = partitionByState(inboxMatched)
   const [organizationLabels, contactImportance, stateLabels, contactTags] =
     await Promise.all([
       listOrganizationLabels(userId),
@@ -2129,6 +2386,7 @@ export async function loadInbox(
     ),
     counts,
     doneCount,
+    folderCounts,
     lastSyncedAt: latestSyncedAt ? latestSyncedAt.toISOString() : null,
     syncedNow,
     // Read after the sync loop, so a run started above is included with whatever

@@ -2,6 +2,8 @@ import { createClient } from '@libsql/client'
 import { drizzle } from 'drizzle-orm/libsql'
 import { migrate } from 'drizzle-orm/libsql/migrator'
 
+import { backfillMatchColumns } from './backfill-match-columns.ts'
+import { rebuildUserCascades } from './rebuild-user-cascades.ts'
 import * as schema from './schema.ts'
 
 const url = process.env.DATABASE_URL ?? 'file:./data/lumen.db'
@@ -74,11 +76,20 @@ async function prepareDatabase(): Promise<void> {
       await client.execute('PRAGMA busy_timeout = 5000')
       // Enforce foreign keys so cascading deletes actually fire.
       await client.execute('PRAGMA foreign_keys = ON')
+      // Overwrite deleted content in free pages.
+      //
+      // SQLite's default leaves the old row bytes in the file, so a deleted
+      // message is still readable with `strings` until something reuses the
+      // page. That makes "remove my data" only half true on a host the operator
+      // does not control exclusively. The cost is writes, which is the right
+      // trade for a mailbox whose selling point is that it holds your mail
+      // locally.
+      await client.execute('PRAGMA secure_delete = ON')
       // Logged rather than assumed: nothing else in the app can report whether
       // these settings took effect, and their absence is silent until a sync drops
       // mail.
       console.log(
-        '[db] SQLite prepared: WAL, busy_timeout=5000, foreign_keys=ON',
+        '[db] SQLite prepared: WAL, busy_timeout=5000, foreign_keys=ON, secure_delete=ON',
       )
     } catch (error) {
       // A read-only database or an already-locked file should not crash startup;
@@ -94,4 +105,23 @@ async function prepareDatabase(): Promise<void> {
   // broken inbox requests.
   await migrate(db, { migrationsFolder: './drizzle' })
   console.log('[db] migrations applied')
+
+  // `accounts.user_id` was added by `ALTER TABLE` (migration 0013), and SQLite
+  // cannot attach a cascading key that way, so old databases have it as NO
+  // ACTION. `app_settings.user_id` arrived the same way but was rebuilt by
+  // migration 0031; both are checked here so the guarantee does not depend on
+  // which migrations a database has been through. The rebuild needs `PRAGMA
+  // foreign_keys = OFF` outside a transaction, which the migration runner cannot
+  // do — see the module for the full reason. It only touches local files: a
+  // remote libSQL connection ignores the pragma, and dropping a table there
+  // would delete its rows with it.
+  if (url.startsWith('file:')) {
+    await rebuildUserCascades(client)
+  }
+
+  // Columns that are also lookup keys use the deterministic envelope, and a
+  // lookup only matches a row that was written after the change. Rewriting the
+  // plaintext rows here keeps the address book findable on the first boot after
+  // the upgrade; see the module for why this is not left to the operator.
+  await backfillMatchColumns(client)
 }

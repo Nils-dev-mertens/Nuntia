@@ -15,7 +15,7 @@
  * not an audit trail of everything the app has ever thought.
  */
 
-import { and, desc, eq, notInArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, notInArray } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import {
@@ -357,10 +357,16 @@ export type ContextRevisionView = {
 /**
  * The newest context changes across every target, for one page to show.
  *
- * The left join is what gives a conversation-scoped row something a human can
+ * The subject is what gives a conversation-scoped row something a human can
  * read: the revision names a conversation id, which means nothing on screen. A
  * contact row's target is an address and simply does not match, which is why the
- * subject is nullable rather than a second query.
+ * subject is nullable.
+ *
+ * The lookup is a second query rather than a join. `context_revisions.target` is
+ * encrypted (`v1d:`) so the address halves stay private, while `conversations.id`
+ * is not: joining the two columns would compare ciphertext with plain text and
+ * match nothing. Selecting the revisions first decrypts the targets, and those
+ * values can then be passed as plain parameters against the id column.
  */
 export async function listRecentContextRevisions(
   userId: string,
@@ -370,24 +376,39 @@ export async function listRecentContextRevisions(
   if (!owner) return []
 
   const rows = await db
-    .select({
-      revision: contextRevisions,
-      subject: conversations.subject,
-    })
+    .select()
     .from(contextRevisions)
-    .leftJoin(conversations, eq(conversations.id, contextRevisions.target))
     .where(eq(contextRevisions.userId, owner))
     .orderBy(desc(contextRevisions.createdAt))
     .limit(Math.min(limit, CONTEXT_REVISION_LIMIT))
 
-  return rows.map(({ revision, subject }) => ({
+  const conversationIds = [
+    ...new Set(
+      rows
+        .filter((revision) => revision.scope === 'conversation')
+        .map((revision) => revision.target),
+    ),
+  ]
+
+  const subjects = conversationIds.length
+    ? await db
+        .select({ id: conversations.id, subject: conversations.subject })
+        .from(conversations)
+        .where(inArray(conversations.id, conversationIds))
+    : []
+  const subjectById = new Map(subjects.map((row) => [row.id, row.subject]))
+
+  return rows.map((revision) => ({
     id: revision.id,
     scope: revision.scope,
     field: revision.field,
     previousValue: revision.previousValue,
     nextValue: revision.nextValue,
     source: revision.source,
-    subject,
+    subject:
+      revision.scope === 'conversation'
+        ? (subjectById.get(revision.target) ?? null)
+        : null,
     createdAt: revision.createdAt.toISOString(),
     undone: revision.undoneAt !== null,
   }))

@@ -256,3 +256,26 @@ describe('createGmailApiClient payload conversion', () => {
     expect(refs[0].sizeBytes).toBe(0)
   })
 })
+
+describe('permanent delete', () => {
+  test("calls Gmail's thread delete, not the trash label", async () => {
+    const calls: Array<{ userId: string; id: string }> = []
+    const client = createGmailApiClient(
+      {
+        users: {
+          threads: {
+            delete: async (params: { userId: string; id: string }) => {
+              calls.push(params)
+              return { data: {} }
+            },
+          },
+        },
+      } as unknown as Parameters<typeof createGmailApiClient>[0],
+      'me@example.com',
+    )
+
+    await client.deleteThreadPermanently?.('t1')
+
+    expect(calls).toEqual([{ userId: 'me', id: 't1' }])
+  })
+})
