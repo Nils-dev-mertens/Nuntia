@@ -64,7 +64,10 @@ whole mailbox, and this endpoint has no separate rate limiting.
 
 The examples below use port `3333`, which is what `bun run mcp` listens on. The
 Compose stack publishes MCP on `3253` instead, so substitute that port when the
-service is running in Docker.
+service is running in Docker. The Settings page reads the endpoint it generates
+from `MCP_PUBLIC_URL`, which defaults to `http://127.0.0.1:3333/mcp`; Compose
+sets it to `http://127.0.0.1:3253/mcp`. Point it at whatever address the agent
+can actually reach.
 
 Claude Code (the Settings page generates this with the real token filled in):
 

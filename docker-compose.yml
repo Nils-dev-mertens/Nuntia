@@ -16,6 +16,10 @@ services:
       # Relative to the container's /app, and therefore inside the volume below.
       # Set DATABASE_URL in `.env` to point at a remote libSQL database instead.
       - DATABASE_URL=${DATABASE_URL:-file:./data/lumen.db}
+      # The endpoint Settings → AI agents puts into generated client configs.
+      # MCP is published on 3253; set this to a proxied or public URL if agents
+      # connect from outside the host.
+      - MCP_PUBLIC_URL=${MCP_PUBLIC_URL:-http://127.0.0.1:3253/mcp}
     ports:
       - '3251:3000'
     # The app's `/healthz` is answered only after `initDatabase()` has applied

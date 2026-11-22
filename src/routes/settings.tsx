@@ -21,7 +21,7 @@ import {
   redirect,
   useRouter,
 } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   ArrowLeft,
@@ -137,6 +137,21 @@ const PROVIDERS: Array<{ value: '' | LlmProvider; label: string }> = [
 
 const PROVIDER_VALUES = new Set(PROVIDERS.map((p) => p.value))
 
+/**
+ * Endpoint shown in Settings → AI agents.
+ *
+ * Read from the server environment rather than `window.location`: the app and
+ * the MCP service do not have to be reachable at the same host or port, and a
+ * deployed app's hostname is usually not where an agent on the host connects.
+ * Accepts either the base URL or the full `/mcp` URL.
+ */
+function mcpPublicEndpoint(): string {
+  const configured = (
+    process.env.MCP_PUBLIC_URL?.trim() || 'http://127.0.0.1:3333/mcp'
+  ).replace(/\/+$/, '')
+  return configured.endsWith('/mcp') ? configured : `${configured}/mcp`
+}
+
 const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
   async (): Promise<
     | { signedIn: false }
@@ -174,6 +189,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
           createdAt: string
           lastUsedAt: string | null
         }>
+        /** Endpoint the generated agent config should point at. */
+        mcpEndpoint: string
         /** Who is signed in, and the devices holding a session for them. */
         viewer: { id: string; email: string; name: string | null }
         devices: Array<{
@@ -300,6 +317,7 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         createdAt: token.createdAt.toISOString(),
         lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
       })),
+      mcpEndpoint: mcpPublicEndpoint(),
       useGravatar: (await getPreferences(session.userId)).useGravatar,
       unreplyableSenders,
       recentSenders,
@@ -2353,7 +2371,13 @@ function CopyField({ label, value }: { label: string; value: string }) {
  * filled in. Copying a browser cookie out of developer tools was the old flow;
  * this replaces it with something a user can finish without leaving Settings.
  */
-function AgentsSection({ initialTokens }: { initialTokens: AgentToken[] }) {
+function AgentsSection({
+  initialTokens,
+  mcpEndpoint,
+}: {
+  initialTokens: AgentToken[]
+  mcpEndpoint: string
+}) {
   const router = useRouter()
   const [tokens, setTokens] = useState(initialTokens)
   const [name, setName] = useState('')
@@ -2362,17 +2386,11 @@ function AgentsSection({ initialTokens }: { initialTokens: AgentToken[] }) {
     name: string
     token: string
   } | null>(null)
-  const [endpoint, setEndpoint] = useState('http://127.0.0.1:3333/mcp')
+  // Configured by MCP_PUBLIC_URL, still editable here for a one-off client.
+  const [endpoint, setEndpoint] = useState(mcpEndpoint)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pendingRevoke, setPendingRevoke] = useState<string | null>(null)
-
-  // The MCP service normally sits on the same host as the app. Read in an
-  // effect rather than during render so server and client markup agree.
-  useEffect(() => {
-    if (!window.location.hostname) return
-    setEndpoint(`http://${window.location.hostname}:3333/mcp`)
-  }, [])
 
   async function create() {
     if (busy) return
@@ -2642,6 +2660,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     unreplyableSenders,
     recentSenders,
     mcpTokens,
+    mcpEndpoint,
     viewer,
     devices,
     useGravatar,
@@ -3671,7 +3690,7 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
 
         {activePanel === 'agents' ? (
           <div className="mt-6">
-            <AgentsSection initialTokens={mcpTokens} />
+            <AgentsSection initialTokens={mcpTokens} mcpEndpoint={mcpEndpoint} />
           </div>
         ) : null}
 

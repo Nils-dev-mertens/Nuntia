@@ -71,6 +71,9 @@ ENV MCP_PORT=3333
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
+# Bun resolves the `#/` imports while running the TypeScript directly from the
+# `paths` in this file. The app bundle does not need it; the MCP stage does.
+COPY tsconfig.json ./
 COPY src ./src
 COPY drizzle ./drizzle
 
