@@ -46,11 +46,12 @@ services:
       - ./logs:/app/data/logs
 
   # MCP endpoint for AI agents. Part of the default stack, so every deploy
-  # rebuilds and recreates it with the app. It publishes on loopback only,
-  # because the bearer credential is a session cookie and therefore access to
-  # the whole mailbox. It shares lumen-data with the app, which means two
-  # processes open the same SQLite file — fine for the light traffic of an
-  # agent, but it is the limitation the Postgres migration exists to remove.
+  # rebuilds and recreates it with the app. It publishes on loopback by default
+  # (MCP_BIND overrides the address), because the bearer credential is a session
+  # cookie and therefore access to the whole mailbox. It shares lumen-data with
+  # the app, which means two processes open the same SQLite file — fine for the
+  # light traffic of an agent, but it is the limitation the Postgres migration
+  # exists to remove.
   # See docs/mcp.md.
   mcp:
     build:
@@ -65,7 +66,12 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=3333
     ports:
-      - '127.0.0.1:3253:3333'
+      # Loopback unless MCP_BIND says otherwise. A Cloudflare Tunnel running as
+      # a container on the host connects to the host's own address (the tailnet
+      # IP, for instance), which loopback-only publishing refuses; set MCP_BIND
+      # to that address in `.env`. Keep it off the public interface: no host
+      # firewall protects the container's port, only the bind address does.
+      - '${MCP_BIND:-127.0.0.1}:3253:3333'
     volumes:
       - lumen-data:/app/data
     # Waiting for healthy, not merely started, means the app has finished
