@@ -58,7 +58,7 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=3333
     ports:
-      - '127.0.0.1:3252:3333'
+      - '127.0.0.1:3253:3333'
     volumes:
       - lumen-data:/app/data
     # Waiting for healthy, not merely started, means the app has finished

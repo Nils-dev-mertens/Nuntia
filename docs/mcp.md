@@ -62,6 +62,10 @@ whole mailbox, and this endpoint has no separate rate limiting.
 
 ## Connect a client
 
+The examples below use port `3333`, which is what `bun run mcp` listens on. The
+Compose stack publishes MCP on `3253` instead, so substitute that port when the
+service is running in Docker.
+
 Claude Code (the Settings page generates this with the real token filled in):
 
 ```bash
@@ -158,7 +162,7 @@ docker compose up -d
 
 Every deploy builds the `mcp` stage of the Dockerfile, recreates the container
 and waits for its `/healthz` before reporting success. It mounts the same
-`lumen-data` volume and publishes port 3333 on loopback only. MCP starts after
+`lumen-data` volume and publishes port 3253 on loopback only. MCP starts after
 the app is healthy, so it never races the app's migration runner.
 
 Both the app and MCP process open the same SQLite file, which is safe for the
