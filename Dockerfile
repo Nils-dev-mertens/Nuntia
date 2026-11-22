@@ -29,7 +29,9 @@ RUN bun run build
 RUN bun build scripts/set-password.ts --target bun --packages external \
     --outfile dist/set-password.js
 
-FROM oven/bun:1.4.4-slim
+# The web app. Named because `mcp` is the last stage in this file: a Compose
+# build for the app must select this target explicitly or it gets the MCP image.
+FROM oven/bun:1.4.4-slim AS app
 WORKDIR /app
 
 # NODE_ENV is load-bearing: `oauth.ts` and `session.ts` mark the session and

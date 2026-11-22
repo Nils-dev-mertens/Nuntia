@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The Dockerfile's last stage is `mcp`; without this, Compose builds that
+      # stage and the app container runs the MCP server on 3333.
+      target: app
     restart: unless-stopped
     # Secrets and URLs (TOKEN_ENCRYPTION_KEY, LUMEN_APP_URL, the Google and
     # Microsoft credentials) live in `.env` on the host. The image carries no
