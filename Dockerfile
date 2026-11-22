@@ -53,3 +53,27 @@ RUN mkdir -p /app/data
 EXPOSE 3000
 
 CMD ["bun", "dist/server/server.js"]
+
+# The MCP service, built as its own stage and run as its own container.
+# It runs the TypeScript directly rather than a bundle: the app image is
+# deliberately source-free, and a second bundle would have to duplicate the
+# whole module graph for one small entry point. It mounts the same data volume,
+# so it sees the same database; see docs/mcp.md for the SQLite caveat.
+FROM oven/bun:1.4.4-slim AS mcp
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV MCP_HOST=0.0.0.0
+ENV MCP_PORT=3333
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY src ./src
+COPY drizzle ./drizzle
+
+RUN mkdir -p /app/data
+
+EXPOSE 3333
+
+CMD ["bun", "src/mcp/server.ts"]

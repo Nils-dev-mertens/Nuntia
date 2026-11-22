@@ -51,6 +51,26 @@ export type ComposedReply = {
 export const GREETING_NAME_TOKEN = /\{(?:name|fullname)\}/i
 
 /**
+ * A readable greeting name derived from an email address.
+ *
+ * Used only when no stored display name exists. The local part is the closest
+ * thing to a name an address carries: `bob@example.com` becomes `bob`, and
+ * `bob.stevens@example.com` becomes `bob stevens`. Casing is left alone because
+ * the address is the only evidence available and inventing capitals would put
+ * words in the user's mouth.
+ */
+export function nameFromAddress(address: string): string {
+  const trimmed = address.trim()
+  const local = trimmed.split('@')[0] ?? ''
+  const words = local
+    .split(/[._-]+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 0)
+
+  return words.length > 0 ? words.join(' ') : trimmed
+}
+
+/**
  * Put the recipients' names into a greeting stored with `{name}` or
  * `{fullname}`.
  *
@@ -81,20 +101,20 @@ export function applyGreetingName(
     .map((name) => name.split(/\s+/)[0] ?? '')
     .filter((name) => name.length > 0)
 
-  let dropped = false
+  const dropped: true[] = []
   const replaced = greeting.replace(
     /\{(name|fullname)\}/gi,
     (_, token: string) => {
       const list = token.toLowerCase() === 'fullname' ? full : first
       if (list.length === 0) {
-        dropped = true
+        dropped.push(true)
         return ''
       }
       return list.join(', ')
     },
   )
 
-  if (!dropped) return replaced
+  if (dropped.length === 0) return replaced
 
   return (
     replaced

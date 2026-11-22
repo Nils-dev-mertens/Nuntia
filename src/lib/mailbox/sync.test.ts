@@ -35,9 +35,12 @@ const {
   conversations,
   decisions,
   messages,
+  replyStyles: replyStylesTable,
   senderProfiles,
   users,
 } = await import('#/db/schema.ts')
+const { deleteReplyStyle, saveReplyStyle, setDefaultReplyStyle } =
+  await import('#/lib/reply-styles.ts')
 const { FakeMailboxClient } = await import('#/lib/mailbox/fake.ts')
 const { backfill, syncIncremental, sync } =
   await import('#/lib/mailbox/sync.ts')
@@ -93,6 +96,7 @@ beforeEach(async () => {
   // Cleared here too: these rows are another form of stored user preference, and
   // a sender marked in one test would otherwise decide the next one's outcome.
   await db.delete(senderProfiles)
+  await db.delete(replyStylesTable)
   await db.delete(accounts)
   await db.delete(users)
 
@@ -445,6 +449,101 @@ describe('sender parsing profiles', () => {
       enabled: true,
       greeting: 'Hi Alice,',
       signature: 'Cheers,\nMe',
+      replyStyleId: null,
+    })
+  })
+
+  test('a named reply style assigned to a sender wins, and deleting it clears the assignment', async () => {
+    const style = await saveReplyStyle(USER, {
+      name: 'Formal',
+      greeting: 'Dear {fullname},',
+      signature: 'Kind regards,\nMe',
+    })
+
+    await saveParsingProfile(ACCOUNT, 'alice@example.com', {
+      useAccountParsingDefaults: true,
+      stripQuotedHistory: true,
+      stripGreeting: true,
+      stripSignature: true,
+      replyStyleEnabled: false,
+      replyStyleId: style.id,
+      replyGreeting: null,
+      replySignature: null,
+    })
+
+    const context = await getParsingProfileContext(ACCOUNT)
+    expect(context.replyStyles.senders['alice@example.com']).toEqual({
+      enabled: true,
+      greeting: 'Dear {fullname},',
+      signature: 'Kind regards,\nMe',
+      replyStyleId: style.id,
+    })
+
+    await deleteReplyStyle(USER, style.id)
+    const after = await getParsingProfileContext(ACCOUNT)
+    expect(after.replyStyles.senders['alice@example.com']).toEqual({
+      enabled: false,
+      greeting: null,
+      signature: null,
+      replyStyleId: null,
+    })
+  })
+
+  test('the first style is the default, and an explicit choice replaces it for unassigned senders', async () => {
+    const formal = await saveReplyStyle(USER, {
+      name: 'Formal',
+      greeting: 'Dear {name},',
+      signature: 'Yours sincerely',
+    })
+    const casual = await saveReplyStyle(USER, {
+      name: 'Casual',
+      greeting: 'Hi {name},',
+      signature: 'Cheers',
+    })
+    expect(formal.isDefault).toBe(true)
+    expect(casual.isDefault).toBe(false)
+
+    let context = await getParsingProfileContext(ACCOUNT)
+    expect(context.replyStyles.account).toEqual({
+      greeting: 'Dear {name},',
+      signature: 'Yours sincerely',
+    })
+
+    // A sender's own switched-on pair still wins over the default style.
+    await saveParsingProfile(ACCOUNT, 'bob@example.com', {
+      useAccountParsingDefaults: true,
+      stripQuotedHistory: true,
+      stripGreeting: true,
+      stripSignature: true,
+      replyStyleEnabled: true,
+      replyStyleId: null,
+      replyGreeting: 'Hello,',
+      replySignature: 'Bye',
+    })
+    context = await getParsingProfileContext(ACCOUNT)
+    expect(context.replyStyles.senders['bob@example.com']).toEqual({
+      enabled: true,
+      greeting: 'Hello,',
+      signature: 'Bye',
+      replyStyleId: null,
+    })
+
+    await setDefaultReplyStyle(USER, casual.id)
+    context = await getParsingProfileContext(ACCOUNT)
+    expect(context.replyStyles.account).toEqual({
+      greeting: 'Hi {name},',
+      signature: 'Cheers',
+    })
+
+    // Deleting the default promotes the remaining style rather than leaving
+    // everyone on the mailbox fallback.
+    const remaining = await deleteReplyStyle(USER, casual.id)
+    expect(remaining).toHaveLength(1)
+    expect(remaining[0]).toMatchObject({ id: formal.id, isDefault: true })
+    context = await getParsingProfileContext(ACCOUNT)
+    expect(context.replyStyles.account).toEqual({
+      greeting: 'Dear {name},',
+      signature: 'Yours sincerely',
     })
   })
 

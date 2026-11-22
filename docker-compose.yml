@@ -15,6 +15,18 @@ services:
       - DATABASE_URL=${DATABASE_URL:-file:./data/lumen.db}
     ports:
       - '3251:3000'
+    # The app's `/healthz` is answered only after `initDatabase()` has applied
+    # migrations and repairs, so "healthy" is also the signal MCP waits for.
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     volumes:
       # The database, its WAL sidecars, the request log and the attachment cache.
       # Losing this volume means every mailbox has to be re-authenticated.
@@ -25,6 +37,46 @@ services:
       # container. This shadowing mount is why APP_LOG_DIR must keep its default
       # (`data/logs`); pointing it elsewhere puts the files back in the volume.
       - ./logs:/app/data/logs
+
+  # MCP endpoint for AI agents. Part of the default stack, so every deploy
+  # rebuilds and recreates it with the app. It publishes on loopback only,
+  # because the bearer credential is a session cookie and therefore access to
+  # the whole mailbox. It shares lumen-data with the app, which means two
+  # processes open the same SQLite file — fine for the light traffic of an
+  # agent, but it is the limitation the Postgres migration exists to remove.
+  # See docs/mcp.md.
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-file:./data/lumen.db}
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=3333
+    ports:
+      - '127.0.0.1:3252:3333'
+    volumes:
+      - lumen-data:/app/data
+    # Waiting for healthy, not merely started, means the app has finished
+    # `initDatabase()` before MCP touches the same file. Without it both
+    # processes could run the migration runner at the same time.
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - bun
+        - -e
+        - "fetch('http://127.0.0.1:3333/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # The public page, on its own hostname. The app serves / as the inbox, so the
   # two cannot share a port. PUBLIC_APP_URL is baked into Sign in and Request

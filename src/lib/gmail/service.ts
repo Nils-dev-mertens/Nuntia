@@ -71,6 +71,7 @@ import {
   sameThreadIdentity,
   threadIdentity,
 } from '#/lib/conversation/index.ts'
+import { listReplyStyles } from '#/lib/reply-styles.ts'
 import type { MailboxClient, Provider } from '#/lib/mailbox/types.ts'
 import type {
   AccountConversation,
@@ -442,9 +443,12 @@ export type ConversationDetail = {
     defaultReplyGreeting: string
     defaultReplySignature: string
     replyStyleEnabled: boolean
+    replyStyleId: string | null
     replyGreeting: string
     replySignature: string
   } | null
+  /** Named styles assignable in the sender editor, by name. */
+  replyStyles: Array<{ id: string; name: string; isDefault: boolean }>
 }
 
 /**
@@ -520,6 +524,11 @@ export async function loadConversation(
   // The correspondent's tags, read once for the header. A tag belongs to the
   // other party's address, which is what `senderEmail` resolves to below.
   const contactTags = await listContactTags(userId)
+  const replyStyles = (await listReplyStyles(userId)).map((style) => ({
+    id: style.id,
+    name: style.name,
+    isDefault: style.isDefault,
+  }))
 
   // Ordered by the merge, not by `accounts`: the composer defaults to the first
   // entry, and that has to be the owning mailbox rather than whichever account
@@ -669,10 +678,14 @@ export async function loadConversation(
           defaultReplySignature:
             profileContext.replyStyles.account.signature ?? '',
           replyStyleEnabled: senderStyle?.enabled ?? false,
+          replyStyleId: senderStyle?.replyStyleId ?? null,
+          // The winning pair, not only the sender's hand-written one: the draft
+          // prompt must know the greeting that will actually be sent.
           replyGreeting: senderStyle?.greeting ?? '',
           replySignature: senderStyle?.signature ?? '',
         }
       : null,
+    replyStyles,
   }
 }
 

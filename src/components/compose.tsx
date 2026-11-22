@@ -101,6 +101,21 @@ export function Compose({
   loadStyleRef.current = loadStyle
 
   const recipients = useMemo(() => addressesOf(to), [to])
+  const ccRecipients = useMemo(() => addressesOf(cc), [cc])
+  const bccRecipients = useMemo(() => addressesOf(bcc), [bcc])
+  // The greeting addresses everyone who receives the message, not only the To
+  // field; otherwise a Cc'd second person is missing from "Hi Alice, Bob,".
+  const greetedRecipients = useMemo(() => {
+    const seen = new Set<string>()
+    return [...recipients, ...ccRecipients, ...bccRecipients].filter(
+      (email) => {
+        const key = email.trim().toLowerCase()
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      },
+    )
+  }, [recipients, ccRecipients, bccRecipients])
 
   useEffect(() => {
     if (!accountId) return
@@ -108,7 +123,7 @@ export function Compose({
     let cancelled = false
     const timer = setTimeout(() => {
       void loadStyleRef
-        .current({ accountId, recipients })
+        .current({ accountId, recipients: greetedRecipients })
         .then((result) => {
           if (!cancelled) setStyle(result)
         })
@@ -119,7 +134,7 @@ export function Compose({
       cancelled = true
       clearTimeout(timer)
     }
-  }, [accountId, recipients])
+  }, [accountId, greetedRecipients])
 
   const inputClass =
     'w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground'

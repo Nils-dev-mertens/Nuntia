@@ -11,6 +11,7 @@ import {
   applyGreetingName,
   composeNewMessage,
   composeReply,
+  nameFromAddress,
 } from './compose.ts'
 
 describe('composeNewMessage', () => {
@@ -120,6 +121,23 @@ describe('applyGreetingName', () => {
   test('leaves a greeting without the token alone', () => {
     expect(applyGreetingName('Hi Sarah,', 'Nils')).toBe('Hi Sarah,')
     expect(applyGreetingName(null, 'Nils')).toBeNull()
+  })
+})
+
+describe('nameFromAddress', () => {
+  test('uses the local part for a plain address', () => {
+    expect(nameFromAddress('bob@example.com')).toBe('bob')
+  })
+
+  test('turns separators in the local part into words', () => {
+    expect(nameFromAddress('bob.stevens@example.com')).toBe('bob stevens')
+    expect(nameFromAddress('bob_stevens@example.com')).toBe('bob stevens')
+    expect(nameFromAddress('bob-stevens@example.com')).toBe('bob stevens')
+  })
+
+  test('leaves casing alone and keeps an address it cannot split', () => {
+    expect(nameFromAddress('Bob.Stevens@example.com')).toBe('Bob Stevens')
+    expect(nameFromAddress('@example.com')).toBe('@example.com')
   })
 })
 

@@ -130,6 +130,34 @@ export const sessions = sqliteTable(
   ],
 )
 
+/**
+ * A credential an AI agent uses instead of a browser session.
+ *
+ * Separate from `sessions` on purpose: an agent token does not expire on the
+ * browser's 30-day clock, is not listed as a signed-in device, and revoking it
+ * does not sign anyone out. The raw value is shown once when it is created;
+ * only its SHA-256 is stored, so a database copy cannot be replayed.
+ */
+export const mcpTokens = sqliteTable(
+  'mcp_tokens',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** A label the user picks, to tell two agents apart in settings. */
+    name: text('name').notNull(),
+    /** SHA-256 hex of the random secret; the secret itself is never stored. */
+    tokenHash: text('token_hash').notNull(),
+    /** Last successful use, so an unused token can be spotted and removed. */
+    lastUsedAt: integer('last_used_at', { mode: 'timestamp_ms' }),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [index('mcp_tokens_user_idx').on(table.userId)],
+)
+
 /** A single connected mailbox. More than one is supported; they are merged. */
 export const accounts = sqliteTable(
   'accounts',
@@ -710,6 +738,46 @@ export const spamSenderSignals = sqliteTable(
   ],
 )
 
+/**
+ * A named greeting and signature the user can assign to senders.
+ *
+ * The pair is the unit, exactly like `ReplyStyle`: a greeting is how the mail
+ * opens and the signature is how it closes, and mixing halves of two styles is
+ * not a combination the user asked for. A style belongs to the person, not to a
+ * mailbox, because a client written to from two addresses should be addressed
+ * the same way from both.
+ */
+export const replyStyles = sqliteTable(
+  'reply_styles',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** Encrypted: the user's own name for the style, not a system label. */
+    name: encryptedText('name').notNull(),
+    /** Encrypted: the user's own words, read only to prefill a message. */
+    greeting: encryptedText('greeting'),
+    signature: encryptedText('signature'),
+    /**
+     * The style used when a sender has no explicit assignment.
+     *
+     * At most one per user; the store enforces that when setting it, since
+     * SQLite has no partial unique index over an encrypted name.
+     */
+    isDefault: integer('is_default', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+  },
+  (table) => [index('reply_styles_user_idx').on(table.userId)],
+)
+
 /** Per-sender parsing and reply-style preferences owned by an account. */
 export const senderProfiles = sqliteTable(
   'sender_profiles',
@@ -738,6 +806,17 @@ export const senderProfiles = sqliteTable(
     replyStyleEnabled: integer('reply_style_enabled', { mode: 'boolean' })
       .notNull()
       .default(false),
+    /**
+     * A named style assigned to this sender, or null for the custom pair below.
+     *
+     * Wins over `replyStyleEnabled` and the custom pair: assigning a style is the
+     * more specific instruction. Deleting the style clears this and the sender
+     * falls back to the account default, which is what `onDelete: 'set null'`
+     * expresses in the database.
+     */
+    replyStyleId: text('reply_style_id').references(() => replyStyles.id, {
+      onDelete: 'set null',
+    }),
     /** Encrypted: the user's own greeting and sign-off, quoted from their mail. */
     replyGreeting: encryptedText('reply_greeting'),
     replySignature: encryptedText('reply_signature'),

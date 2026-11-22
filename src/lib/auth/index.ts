@@ -20,6 +20,13 @@ export {
   listSessions,
   revokeAllSessions,
 } from './session.ts'
+export {
+  createMcpToken,
+  listMcpTokens,
+  revokeMcpToken,
+  userFromMcpToken,
+} from './mcp-tokens.ts'
+export type { CreatedMcpToken, McpTokenSummary } from './mcp-tokens.ts'
 export type { SessionData } from './session.ts'
 export {
   authenticateUser,

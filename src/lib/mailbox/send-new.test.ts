@@ -266,6 +266,63 @@ describe('the greeting and signature a new message goes out with', () => {
     )
   })
 
+  test('greets every To, Cc and Bcc recipient by name', async () => {
+    await db
+      .update(accounts)
+      .set({
+        defaultReplyGreeting: 'Hi {name},',
+        defaultReplySignature: 'Cheers',
+      })
+      .where(eq(accounts.id, OWNER))
+    await db.insert(contacts).values([
+      { accountId: OWNER, email: 'friend@example.com', name: 'Alice' },
+      { accountId: OWNER, email: 'cc@example.com', name: 'Bob' },
+      { accountId: OWNER, email: 'bcc@example.com', name: 'Carol' },
+    ])
+
+    const client = new FakeMailboxClient()
+    await send(
+      {
+        to: ['friend@example.com'],
+        cc: ['cc@example.com'],
+        bcc: ['bcc@example.com'],
+        body: 'Hello.',
+      },
+      client,
+    )
+
+    expect(client.started[0]?.text).toBe(
+      'Hi Alice, Bob, Carol,\n\nHello.\n\nCheers',
+    )
+  })
+
+  test('falls back to a name read from the address when none is stored', async () => {
+    await db
+      .update(accounts)
+      .set({ defaultReplyGreeting: 'Hi {fullname},' })
+      .where(eq(accounts.id, OWNER))
+    await db.insert(contacts).values({
+      accountId: OWNER,
+      email: 'friend@example.com',
+      name: 'Alice',
+    })
+
+    const client = new FakeMailboxClient()
+    await send(
+      {
+        to: ['friend@example.com'],
+        cc: ['bob@example.com'],
+        bcc: ['bob.stevens@example.com'],
+        body: 'Hello.',
+      },
+      client,
+    )
+
+    expect(client.started[0]?.text).toBe(
+      'Hi Alice, bob, bob stevens,\n\nHello.',
+    )
+  })
+
   test('falls back to how the user signed their own last sent mail', async () => {
     await db.insert(conversations).values({
       id: 'stored-1',

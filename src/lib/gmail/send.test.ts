@@ -128,6 +128,23 @@ describe('sendReply', () => {
     expect(sentBody).toContain('Thanks!')
   })
 
+  test('greets every recipient by name, not only the newest sender', async () => {
+    const client = new FakeMailboxClient()
+    const conv = conversation({
+      participants: [
+        { email: OWNER, name: null },
+        { email: 'alice@example.com', name: 'Alice Smith' },
+        { email: 'bob@example.com', name: 'Bob Jones' },
+      ],
+    })
+
+    await sendReply(client, OWNER, conv, 'Thanks!', {
+      replyStyle: { greeting: 'Hi {name},', signature: null },
+    })
+
+    expect(bodyOf(client.sent[0]?.raw ?? '')).toContain('Hi Alice, Bob,\r\n')
+  })
+
   test('addresses everyone except the owner', async () => {
     const client = new FakeMailboxClient()
     const conv = conversation({

@@ -12,6 +12,7 @@ import { and, between, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 
 import { db } from '#/db/index.ts'
 import { withWriteLock } from '#/lib/db/write-lock.ts'
+import { replyStylesForUser } from '#/lib/reply-styles.ts'
 import {
   attachments,
   contacts,
@@ -507,6 +508,8 @@ export async function getLastOwnMessageStyle(accountId: string): Promise<{
 export type SenderProfileSettings = ParsingPreferences & {
   useAccountParsingDefaults: boolean
   replyStyleEnabled: boolean
+  /** A named style assigned to this sender; wins over the custom pair. */
+  replyStyleId?: string | null
   replyGreeting: string | null
   replySignature: string | null
 }
@@ -519,7 +522,13 @@ export type ParsingProfileContext = {
     account: { greeting: string | null; signature: string | null }
     senders: Record<
       string,
-      { enabled: boolean; greeting: string | null; signature: string | null }
+      {
+        enabled: boolean
+        greeting: string | null
+        signature: string | null
+        /** The assigned named style, or null for the custom/account pair. */
+        replyStyleId?: string | null
+      }
     >
   }
 }
@@ -535,6 +544,11 @@ export async function getParsingProfileContext(
       .from(senderProfiles)
       .where(eq(senderProfiles.accountId, accountId)),
   ])
+  // Styles belong to the person, so every mailbox resolves against the same
+  // list. A legacy account with no owner simply has none to resolve.
+  const styles = account?.userId
+    ? await replyStylesForUser(account.userId)
+    : new Map()
 
   const parsingDefaults: ParsingPreferences = {
     stripQuotedHistory: account?.defaultStripQuotedHistory ?? true,
@@ -546,12 +560,16 @@ export async function getParsingProfileContext(
   const senders: ParsingProfileContext['replyStyles']['senders'] = {}
   for (const profile of profiles) {
     const email = profile.senderEmail.trim().toLowerCase()
+    const assignedStyle = profile.replyStyleId
+      ? styles.get(profile.replyStyleId)
+      : null
     const senderSettings: SenderProfileSettings = {
       useAccountParsingDefaults: profile.useAccountParsingDefaults,
       stripQuotedHistory: profile.stripQuotedHistory,
       stripGreeting: profile.stripGreeting,
       stripSignature: profile.stripSignature,
       replyStyleEnabled: profile.replyStyleEnabled,
+      replyStyleId: profile.replyStyleId,
       replyGreeting: profile.replyGreeting,
       replySignature: profile.replySignature,
     }
@@ -563,22 +581,46 @@ export async function getParsingProfileContext(
           stripGreeting: profile.stripGreeting,
           stripSignature: profile.stripSignature,
         }
-    senders[email] = {
-      enabled: profile.replyStyleEnabled,
-      greeting: profile.replyGreeting,
-      signature: profile.replySignature,
-    }
+    // An assigned style is the more specific instruction, so it wins over a
+    // custom pair. A dangling id (style deleted out of band) falls through to
+    // the custom pair rather than silently changing the greeting.
+    senders[email] = assignedStyle
+      ? {
+          enabled: true,
+          greeting: assignedStyle.greeting,
+          signature: assignedStyle.signature,
+          replyStyleId: assignedStyle.id,
+        }
+      : {
+          enabled: profile.replyStyleEnabled,
+          greeting: profile.replyGreeting,
+          signature: profile.replySignature,
+          replyStyleId: null,
+        }
   }
+
+  // The style marked default stands in for the old mailbox pair wherever a
+  // sender has no explicit choice, so every existing send/preview path treats
+  // it as the account fallback. It replaces that pair outright: an empty half
+  // falls through to the thread's last-used wording, not to a hidden mailbox
+  // value. The mailbox pair remains only for users who have not marked a style
+  // default yet.
+  const defaultStyle = [...styles.values()].find((style) => style.isDefault)
 
   return {
     parsingDefaults,
     parsingPreferences,
     parsingProfiles,
     replyStyles: {
-      account: {
-        greeting: account?.defaultReplyGreeting ?? null,
-        signature: account?.defaultReplySignature ?? null,
-      },
+      account: defaultStyle
+        ? {
+            greeting: defaultStyle.greeting,
+            signature: defaultStyle.signature,
+          }
+        : {
+            greeting: account?.defaultReplyGreeting ?? null,
+            signature: account?.defaultReplySignature ?? null,
+          },
       senders,
     },
   }
@@ -632,6 +674,7 @@ export async function saveParsingProfile(
           stripSignature: profile.stripSignature,
           useAccountParsingDefaults: profile.useAccountParsingDefaults,
           replyStyleEnabled: profile.replyStyleEnabled,
+          replyStyleId: profile.replyStyleId ?? null,
           replyGreeting: profile.replyGreeting,
           replySignature: profile.replySignature,
           updatedAt: new Date(),
@@ -644,6 +687,7 @@ export async function saveParsingProfile(
             stripSignature: profile.stripSignature,
             useAccountParsingDefaults: profile.useAccountParsingDefaults,
             replyStyleEnabled: profile.replyStyleEnabled,
+            replyStyleId: profile.replyStyleId ?? null,
             replyGreeting: profile.replyGreeting,
             replySignature: profile.replySignature,
             updatedAt: new Date(),

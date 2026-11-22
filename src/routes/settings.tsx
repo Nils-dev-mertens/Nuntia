@@ -21,11 +21,12 @@ import {
   redirect,
   useRouter,
 } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
   ArrowLeft,
   Ban,
+  Bot,
   ChevronDown,
   ChevronUp,
   FolderTree,
@@ -41,12 +42,15 @@ import {
 import { AppShell } from '#/components/app-shell.tsx'
 
 import {
+  createMcpToken,
   destroySession,
   getSession,
   getUser,
   listAccounts,
+  listMcpTokens,
   listSessions,
   revokeAllSessions,
+  revokeMcpToken,
 } from '#/lib/auth/index.ts'
 import { getAiSettings, saveAiSettings } from '#/lib/ai/index.ts'
 import type { AiSettingsSummary, LlmProvider } from '#/lib/ai/index.ts'
@@ -83,6 +87,14 @@ import {
   REPLY_DRAFT_MIN_IMPORTANCE_MIN,
 } from '#/lib/conversation/draft.ts'
 import { getPreferences, savePreferences } from '#/lib/settings/preferences.ts'
+import {
+  deleteReplyStyle,
+  listReplyStyles,
+  saveReplyStyle,
+  setDefaultReplyStyle,
+} from '#/lib/reply-styles.ts'
+import type { ReplyStyleProfile } from '#/lib/reply-styles.ts'
+import { REPLY_STYLE_LIMITS } from '#/lib/reply-style-limits.ts'
 import { listSpamRules, saveSpamRules } from '#/lib/spam/index.ts'
 import { SPAM_RULE_FIELDS, SPAM_RULE_LIMITS } from '#/lib/spam/fields.ts'
 import type { SpamRule, SpamRuleField } from '#/lib/spam/fields.ts'
@@ -138,6 +150,8 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         stateLabels: StateLabels
         /** Recent automatic context writes, newest first, with an Undo each. */
         contextRevisions: ContextRevisionView[]
+        /** Named greeting/signature pairs assignable to senders. */
+        replyStyles: ReplyStyleProfile[]
         /** Connected mailboxes, so they can be listed and cleared out. */
         accounts: Array<{
           id: string
@@ -153,6 +167,13 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         }>
         /** Whether avatars may be fetched from Gravatar (opt-in, off by default). */
         useGravatar: boolean
+        /** Agent tokens, without their secrets — those are shown once. */
+        mcpTokens: Array<{
+          id: string
+          name: string
+          createdAt: string
+          lastUsedAt: string | null
+        }>
         /** Who is signed in, and the devices holding a session for them. */
         viewer: { id: string; email: string; name: string | null }
         devices: Array<{
@@ -243,6 +264,7 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
       spamRules: await listSpamRules(session.userId),
       stateLabels: await listStateLabels(session.userId),
       contextRevisions: await listRecentContextRevisions(session.userId),
+      replyStyles: await listReplyStyles(session.userId),
       accounts: await Promise.all(
         accounts.map(async (account) => {
           const [profile, summary] = await Promise.all([
@@ -271,6 +293,12 @@ const fetchAiSettings = createServerFn({ method: 'GET' }).handler(
         userAgent: device.userAgent,
         lastSeenAt: device.lastSeenAt.toISOString(),
         current: device.id === session.sessionId,
+      })),
+      mcpTokens: (await listMcpTokens(session.userId)).map((token) => ({
+        id: token.id,
+        name: token.name,
+        createdAt: token.createdAt.toISOString(),
+        lastUsedAt: token.lastUsedAt?.toISOString() ?? null,
       })),
       useGravatar: (await getPreferences(session.userId)).useGravatar,
       unreplyableSenders,
@@ -363,6 +391,126 @@ const saveParsingDefaultsAction = createServerFn({ method: 'POST' })
       }
     }
   })
+
+/** Create or rename one named greeting/signature pair. */
+const saveReplyStyleAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: unknown) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{ style: ReplyStyleProfile | null; error: string | null }> => {
+      const session = await getSession()
+      if (!session) return { style: null, error: 'You are not signed in.' }
+
+      if (!data || typeof data !== 'object') {
+        return { style: null, error: 'Reply style is invalid.' }
+      }
+      const candidate = data as {
+        id?: unknown
+        name?: unknown
+        greeting?: unknown
+        signature?: unknown
+      }
+      if (
+        typeof candidate.name !== 'string' ||
+        candidate.name.length > REPLY_STYLE_LIMITS.name ||
+        (candidate.id != null && typeof candidate.id !== 'string') ||
+        (candidate.greeting != null &&
+          typeof candidate.greeting !== 'string') ||
+        (candidate.signature != null &&
+          typeof candidate.signature !== 'string') ||
+        (typeof candidate.greeting === 'string' &&
+          candidate.greeting.length > REPLY_STYLE_LIMITS.greeting) ||
+        (typeof candidate.signature === 'string' &&
+          candidate.signature.length > REPLY_STYLE_LIMITS.signature)
+      ) {
+        return { style: null, error: 'Reply style is invalid or too long.' }
+      }
+
+      try {
+        const style = await saveReplyStyle(session.userId, {
+          id: candidate.id?.trim() || null,
+          name: candidate.name,
+          greeting: candidate.greeting?.trim() || null,
+          signature: candidate.signature?.trim() || null,
+        })
+        return { style, error: null }
+      } catch (error) {
+        console.error('[settings] saving reply style failed:', error)
+        return {
+          style: null,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not save the reply style.',
+        }
+      }
+    },
+  )
+
+/** Remove a style; senders that had it assigned fall back to the default. */
+const deleteReplyStyleAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: { id: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      styles: ReplyStyleProfile[] | null
+      error: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) return { styles: null, error: 'You are not signed in.' }
+      if (typeof data.id !== 'string' || !data.id.trim()) {
+        return { styles: null, error: 'Reply style is invalid.' }
+      }
+
+      try {
+        const styles = await deleteReplyStyle(session.userId, data.id.trim())
+        return { styles, error: null }
+      } catch (error) {
+        console.error('[settings] deleting reply style failed:', error)
+        return { styles: null, error: 'Could not delete the reply style.' }
+      }
+    },
+  )
+
+/** Mark one style as the fallback used by unassigned senders. */
+const setDefaultReplyStyleAction = createServerFn({ method: 'POST' })
+  .inputValidator((data: { id: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<{
+      styles: ReplyStyleProfile[] | null
+      error: string | null
+    }> => {
+      const session = await getSession()
+      if (!session) return { styles: null, error: 'You are not signed in.' }
+      if (typeof data.id !== 'string' || !data.id.trim()) {
+        return { styles: null, error: 'Reply style is invalid.' }
+      }
+
+      try {
+        const styles = await setDefaultReplyStyle(
+          session.userId,
+          data.id.trim(),
+        )
+        return { styles, error: null }
+      } catch (error) {
+        console.error(
+          '[settings] setting the default reply style failed:',
+          error,
+        )
+        return {
+          styles: null,
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not set the default reply style.',
+        }
+      }
+    },
+  )
 
 const saveOrganizationLabelsAction = createServerFn({ method: 'POST' })
   .inputValidator((data: unknown) => data)
@@ -562,6 +710,74 @@ const signOutEverywhereAction = createServerFn({ method: 'POST' }).handler(
     }
   },
 )
+
+/**
+ * Issue an agent token.
+ *
+ * The secret is returned once, to the page, so it can be pasted into the
+ * generated config. It is not stored in plaintext anywhere.
+ */
+const createAgentTokenAction = createServerFn({ method: 'POST' })
+  .validator((data: { name: string }) => data)
+  .handler(
+    async ({
+      data,
+    }): Promise<
+      | { error: string }
+      | {
+          error: null
+          token: {
+            id: string
+            name: string
+            token: string
+            createdAt: string
+          }
+        }
+    > => {
+      const session = await getSession()
+      if (!session) return { error: 'You are not signed in.' }
+
+      try {
+        const created = await createMcpToken(session.userId, data.name)
+        return {
+          error: null,
+          token: {
+            id: created.id,
+            name: created.name,
+            token: created.token,
+            createdAt: created.createdAt.toISOString(),
+          },
+        }
+      } catch (error) {
+        return {
+          error:
+            error instanceof Error
+              ? error.message
+              : 'Could not create the token.',
+        }
+      }
+    },
+  )
+
+/** Revoke one agent token. Ownership is checked in the delete itself. */
+const revokeAgentTokenAction = createServerFn({ method: 'POST' })
+  .validator((data: { id: string }) => data)
+  .handler(
+    async ({ data }): Promise<{ error: string | null; revoked: boolean }> => {
+      const session = await getSession()
+      if (!session) return { error: 'You are not signed in.', revoked: false }
+
+      try {
+        return {
+          error: null,
+          revoked: await revokeMcpToken(session.userId, data.id),
+        }
+      } catch (error) {
+        console.error('[settings] revoking an agent token failed:', error)
+        return { error: 'Could not revoke that token.', revoked: false }
+      }
+    },
+  )
 
 /**
  * Take a sender off the can't-reply list, from the settings page.
@@ -1696,7 +1912,7 @@ const SETTINGS_GROUPS: ReadonlyArray<{
         label: 'Parsing & replies',
         icon: SlidersHorizontal,
         description:
-          'How each mailbox strips quoted history, greetings and signatures, and the reply style that starts a draft.',
+          'How each mailbox strips quoted history, and the greeting and signature styles replies use.',
       },
       {
         id: 'state-labels',
@@ -1744,6 +1960,13 @@ const SETTINGS_GROUPS: ReadonlyArray<{
         icon: MessageSquare,
         description:
           'When a reply is drafted for you, and whether a sent reply is checked against the goal.',
+      },
+      {
+        id: 'agents',
+        label: 'AI agents',
+        icon: Bot,
+        description:
+          'Tokens and ready-made config for Claude Code, Cursor or another MCP agent.',
       },
     ],
   },
@@ -1804,6 +2027,590 @@ function SettingsNav({
   )
 }
 
+/**
+ * The named greeting/signature pairs.
+ *
+ * One form serves both create and edit rather than a modal per row: the app uses
+ * no dialogs, and the fields are exactly the same either way.
+ */
+function ReplyStylesEditor({
+  initialStyles,
+}: {
+  initialStyles: ReplyStyleProfile[]
+}) {
+  const [styles, setStyles] = useState(initialStyles)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [greeting, setGreeting] = useState('')
+  const [signature, setSignature] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+
+  const inputClass =
+    'w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground'
+
+  function sortStyles(list: ReplyStyleProfile[]) {
+    return [...list].sort(
+      (a, b) =>
+        Number(b.isDefault) - Number(a.isDefault) ||
+        a.name.localeCompare(b.name),
+    )
+  }
+
+  function startNew() {
+    setEditingId(null)
+    setName('')
+    setGreeting('')
+    setSignature('')
+    setError(null)
+    setMessage(null)
+  }
+
+  function startEdit(style: ReplyStyleProfile) {
+    setEditingId(style.id)
+    setName(style.name)
+    setGreeting(style.greeting ?? '')
+    setSignature(style.signature ?? '')
+    setError(null)
+    setMessage(null)
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await saveReplyStyleAction({
+        data: {
+          id: editingId,
+          name,
+          greeting,
+          signature,
+        },
+      })
+      if (result.error || !result.style) {
+        setError(result.error ?? 'Could not save the reply style.')
+        return
+      }
+
+      const saved = result.style
+      setStyles((current) =>
+        sortStyles(
+          current.filter((style) => style.id !== saved.id).concat(saved),
+        ),
+      )
+      setEditingId(saved.id)
+      setMessage(`Saved “${saved.name}”.`)
+    } catch {
+      setError('Could not save the reply style.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function remove(id: string) {
+    if (busy) return
+
+    if (pendingDelete !== id) {
+      setPendingDelete(id)
+      return
+    }
+
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await deleteReplyStyleAction({ data: { id } })
+      if (result.error || !result.styles) {
+        setError(result.error ?? 'Could not delete the reply style.')
+        return
+      }
+
+      setStyles(result.styles)
+      if (editingId === id) startNew()
+      setPendingDelete(null)
+      setMessage('Deleted. Senders using it fall back to the default style.')
+    } catch {
+      setError('Could not delete the reply style.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function makeDefault(id: string) {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const result = await setDefaultReplyStyleAction({ data: { id } })
+      if (result.error || !result.styles) {
+        setError(result.error ?? 'Could not set the default reply style.')
+        return
+      }
+
+      setStyles(result.styles)
+      setMessage('Unassigned senders will use this style.')
+    } catch {
+      setError('Could not set the default reply style.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="divide-y divide-border">
+      <div className="space-y-3 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xs font-semibold text-foreground">Your styles</h3>
+          <button
+            type="button"
+            onClick={startNew}
+            className="rounded border border-border px-2 py-1 text-[11px] font-medium text-foreground hover:bg-muted"
+          >
+            New style
+          </button>
+        </div>
+        {styles.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            No styles yet. The first one you add becomes the default, and you
+            can assign any style from a thread&rsquo;s details.
+          </p>
+        ) : (
+          <ul className="space-y-1.5">
+            {styles.map((style) => (
+              <li
+                key={style.id}
+                className="flex items-start justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="flex items-center gap-1.5 truncate text-xs font-medium text-foreground">
+                    {style.name}
+                    {style.isDefault ? (
+                      <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                        Default
+                      </span>
+                    ) : null}
+                  </p>
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {style.greeting || 'No greeting'} ·{' '}
+                    {style.signature?.split('\n')[0] || 'No signature'}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  {!style.isDefault ? (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void makeDefault(style.id)}
+                      className="rounded border border-border px-2 py-0.5 text-[11px] font-medium text-foreground disabled:opacity-50"
+                    >
+                      Make default
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => startEdit(style)}
+                    className="rounded border border-border px-2 py-0.5 text-[11px] font-medium text-foreground"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void remove(style.id)}
+                    className="rounded border border-border px-2 py-0.5 text-[11px] font-medium text-destructive disabled:opacity-50"
+                  >
+                    {pendingDelete === style.id ? 'Confirm delete' : 'Delete'}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <form onSubmit={(event) => void submit(event)} className="space-y-3 p-4">
+        <h3 className="text-xs font-semibold text-foreground">
+          {editingId ? 'Edit style' : 'New style'}
+        </h3>
+        <Field label="Name">
+          <input
+            value={name}
+            maxLength={REPLY_STYLE_LIMITS.name}
+            disabled={busy}
+            onChange={(event) => setName(event.target.value)}
+            className={inputClass}
+          />
+        </Field>
+        <Field
+          label="Greeting"
+          hint="{name} becomes the first name and {fullname} the whole name."
+        >
+          <input
+            value={greeting}
+            maxLength={REPLY_STYLE_LIMITS.greeting}
+            disabled={busy}
+            placeholder="Hi {name},"
+            onChange={(event) => setGreeting(event.target.value)}
+            className={inputClass}
+          />
+        </Field>
+        <Field label="Signature">
+          <textarea
+            value={signature}
+            maxLength={REPLY_STYLE_LIMITS.signature}
+            rows={2}
+            disabled={busy}
+            onChange={(event) => setSignature(event.target.value)}
+            className={inputClass}
+          />
+        </Field>
+        <div className="flex items-center gap-2">
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : editingId ? 'Save style' : 'Add style'}
+          </button>
+          {editingId ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={startNew}
+              className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          ) : null}
+        </div>
+        {error ? (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
+        {message ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            {message}
+          </p>
+        ) : null}
+      </form>
+    </div>
+  )
+}
+
+type AgentToken = {
+  id: string
+  name: string
+  createdAt: string
+  lastUsedAt: string | null
+}
+
+/** A code block with its own copy button. */
+function CopyField({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false)
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard access can be denied (or unavailable on plain HTTP). The text
+      // is selectable, so the field stays usable without it.
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+        <button
+          type="button"
+          onClick={() => void copy()}
+          className="text-[11px] font-medium text-primary hover:underline"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      <pre className="mt-1 overflow-x-auto rounded-md border border-border bg-muted/40 p-3 text-[11px] leading-relaxed text-foreground">
+        <code>{value}</code>
+      </pre>
+    </div>
+  )
+}
+
+/**
+ * Connect an AI agent.
+ *
+ * The page issues a token and renders the exact command/config with it already
+ * filled in. Copying a browser cookie out of developer tools was the old flow;
+ * this replaces it with something a user can finish without leaving Settings.
+ */
+function AgentsSection({ initialTokens }: { initialTokens: AgentToken[] }) {
+  const router = useRouter()
+  const [tokens, setTokens] = useState(initialTokens)
+  const [name, setName] = useState('')
+  const [created, setCreated] = useState<{
+    id: string
+    name: string
+    token: string
+  } | null>(null)
+  const [endpoint, setEndpoint] = useState('http://127.0.0.1:3333/mcp')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [pendingRevoke, setPendingRevoke] = useState<string | null>(null)
+
+  // The MCP service normally sits on the same host as the app. Read in an
+  // effect rather than during render so server and client markup agree.
+  useEffect(() => {
+    if (!window.location.hostname) return
+    setEndpoint(`http://${window.location.hostname}:3333/mcp`)
+  }, [])
+
+  async function create() {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+
+    try {
+      const result = await createAgentTokenAction({ data: { name } })
+      if (result.error !== null) {
+        setError(result.error)
+        return
+      }
+
+      setCreated({
+        id: result.token.id,
+        name: result.token.name,
+        token: result.token.token,
+      })
+      setTokens((list) => [
+        {
+          id: result.token.id,
+          name: result.token.name,
+          createdAt: result.token.createdAt,
+          lastUsedAt: null,
+        },
+        ...list,
+      ])
+      setName('')
+      // Refresh the loader's copy too, so leaving this panel and coming back
+      // still shows the new token in the list (the secret itself is gone).
+      await router.invalidate()
+    } catch {
+      setError('Could not create the token.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revoke(id: string) {
+    if (busy) return
+
+    if (pendingRevoke !== id) {
+      setPendingRevoke(id)
+      return
+    }
+
+    setBusy(true)
+    setError(null)
+
+    try {
+      const result = await revokeAgentTokenAction({ data: { id } })
+      if (result.error) {
+        setError(result.error)
+        return
+      }
+
+      if (!result.revoked) {
+        setError('That token no longer exists.')
+        return
+      }
+
+      setTokens((list) => list.filter((token) => token.id !== id))
+      if (created?.id === id) setCreated(null)
+      setPendingRevoke(null)
+      await router.invalidate()
+    } catch {
+      setError('Could not revoke that token.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const tokenForConfig = created?.token ?? '<your token>'
+  const claudeCommand = [
+    `claude mcp add --transport http nuntia ${endpoint}`,
+    `  --header "Authorization: Bearer ${tokenForConfig}"`,
+  ].join(' \\\n')
+  const jsonConfig = JSON.stringify(
+    {
+      mcpServers: {
+        nuntia: {
+          url: endpoint,
+          headers: { Authorization: `Bearer ${tokenForConfig}` },
+        },
+      },
+    },
+    null,
+    2,
+  )
+
+  const inputClass =
+    'w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground'
+  const buttonClass =
+    'inline-flex h-8 items-center rounded-md border border-border bg-background px-3 text-xs font-medium text-foreground hover:border-foreground/25 disabled:opacity-50'
+
+  return (
+    <section className="space-y-5 rounded-lg border border-border bg-card p-4">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">AI agents</h2>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Let Claude Code, Cursor or another MCP client read this account's mail
+          and use its triage tools. Each token is a separate credential you can
+          revoke here, without signing any browser out.
+        </p>
+        <p className="mt-2 text-[11px] text-muted-foreground">
+          Start the service first:{' '}
+          <code className="rounded bg-muted px-1 py-0.5">bun run mcp</code> for
+          a local checkout; Docker Compose starts it with the app. It listens on
+          your own machine only.
+        </p>
+      </div>
+
+      <div>
+        <label
+          htmlFor="mcp-endpoint"
+          className="text-[11px] font-medium text-muted-foreground"
+        >
+          MCP endpoint
+        </label>
+        <input
+          id="mcp-endpoint"
+          value={endpoint}
+          onChange={(event) => setEndpoint(event.target.value)}
+          className={`mt-1 ${inputClass}`}
+        />
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          Change the host if the service runs somewhere other than this machine.
+        </p>
+      </div>
+
+      {created ? (
+        <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
+          <p className="text-xs font-medium text-foreground">
+            Token “{created.name}” created
+          </p>
+          <p className="mt-0.5 text-[11px] text-muted-foreground">
+            Copy it now — it will not be shown again. If it leaks, revoke it
+            below and create another.
+          </p>
+          <div className="mt-3 space-y-4">
+            <CopyField label="Token" value={created.token} />
+            <CopyField label="Claude Code" value={claudeCommand} />
+            <CopyField
+              label="JSON (Cursor, VS Code, Vibe)"
+              value={jsonConfig}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Claude Desktop needs the{' '}
+              <code className="rounded bg-muted px-1 py-0.5">mcp-remote</code>{' '}
+              bridge; the JSON version of that is in{' '}
+              <code className="rounded bg-muted px-1 py-0.5">docs/mcp.md</code>.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          void create()
+        }}
+      >
+        <label
+          htmlFor="mcp-token-name"
+          className="text-[11px] font-medium text-muted-foreground"
+        >
+          New token
+        </label>
+        <div className="mt-1 flex flex-wrap gap-2">
+          <input
+            id="mcp-token-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Which agent? e.g. Claude Code on my laptop"
+            maxLength={60}
+            className={`min-w-[12rem] flex-1 ${inputClass}`}
+          />
+          <button type="submit" disabled={busy} className={buttonClass}>
+            Create token
+          </button>
+        </div>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          The label is only for this list. The token reaches exactly what you
+          can reach when signed in.
+        </p>
+      </form>
+
+      {error ? (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {error}
+        </p>
+      ) : null}
+
+      <div>
+        <h3 className="text-xs font-medium text-foreground">
+          Your agent tokens
+        </h3>
+        {tokens.length === 0 ? (
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            None yet. Create one above and paste the generated config into your
+            agent.
+          </p>
+        ) : (
+          <ul className="mt-2 divide-y divide-border">
+            {tokens.map((token) => (
+              <li
+                key={token.id}
+                className="flex flex-wrap items-baseline justify-between gap-2 py-2 text-[11px] text-muted-foreground"
+              >
+                <span className="min-w-0 text-foreground">
+                  {token.name}
+                  <span className="ml-2 text-muted-foreground">
+                    created {token.createdAt.slice(0, 10)}
+                    {token.lastUsedAt
+                      ? ` — last used ${token.lastUsedAt.slice(0, 10)}`
+                      : ' — never used'}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void revoke(token.id)}
+                  className="font-medium text-destructive hover:underline disabled:opacity-50"
+                >
+                  {pendingRevoke === token.id ? 'Confirm revoke' : 'Revoke'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function Settings() {
   return <SettingsForm result={Route.useLoaderData()} />
 }
@@ -1830,9 +2637,11 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
     spamRules: initialSpamRules,
     stateLabels: initialStateLabels,
     contextRevisions,
+    replyStyles,
     accounts,
     unreplyableSenders,
     recentSenders,
+    mcpTokens,
     viewer,
     devices,
     useGravatar,
@@ -2379,13 +3188,15 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
           {activePanel === 'parsing' ? (
             <section className="space-y-4 rounded-lg border border-border bg-card p-4">
               <h2 className="text-sm font-semibold text-foreground">
-                Parsing defaults
+                Parsing &amp; replies
               </h2>
               <p className="text-xs text-muted-foreground">
                 These defaults apply to new messages in each mailbox. Saving
                 also re-parses stored messages locally, including their original
                 text and HTML where available. Sender-specific overrides remain
-                in each conversation.
+                in each conversation. Reply greetings and signatures are managed
+                under Reply styles below, so there is one default pair rather
+                than one per mailbox.
               </p>
               {accounts.map((account) => {
                 const draft = parsingDrafts[account.id] ?? {
@@ -2428,41 +3239,6 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                       {toggle('stripQuotedHistory', 'quoted history')}
                       {toggle('stripGreeting', 'greetings')}
                       {toggle('stripSignature', 'signatures')}
-                      <Field label="Default reply greeting">
-                        <input
-                          value={draft.greeting}
-                          maxLength={200}
-                          disabled={parsingBusy !== null}
-                          onChange={(event) =>
-                            setParsingDrafts((current) => ({
-                              ...current,
-                              [account.id]: {
-                                ...(current[account.id] ?? draft),
-                                greeting: event.target.value,
-                              },
-                            }))
-                          }
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Default reply signature">
-                        <textarea
-                          value={draft.signature}
-                          maxLength={1000}
-                          rows={2}
-                          disabled={parsingBusy !== null}
-                          onChange={(event) =>
-                            setParsingDrafts((current) => ({
-                              ...current,
-                              [account.id]: {
-                                ...(current[account.id] ?? draft),
-                                signature: event.target.value,
-                              },
-                            }))
-                          }
-                          className={inputClass}
-                        />
-                      </Field>
                       <button
                         type="button"
                         disabled={parsingBusy !== null}
@@ -2492,6 +3268,24 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
                   {parsingMessage}
                 </p>
               ) : null}
+
+              <div className="border-t border-border pt-4">
+                <h3 className="text-sm font-semibold text-foreground">
+                  Reply styles
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  This is where the default reply greeting and signature live,
+                  and where you keep named alternatives. Assign a style to a
+                  sender from that conversation&rsquo;s thread details, and
+                  every reply to them opens and closes the same way. The{' '}
+                  <code>{'{name}'}</code> and <code>{'{fullname}'}</code> tokens
+                  still fill in the recipient. Senders with no assignment use
+                  the style marked Default.
+                </p>
+                <div className="mt-3 overflow-hidden rounded-md border border-border">
+                  <ReplyStylesEditor initialStyles={replyStyles} />
+                </div>
+              </div>
             </section>
           ) : null}
 
@@ -2873,6 +3667,12 @@ function SettingsForm({ result }: { result: SignedInSettings }) {
               </div>
             </form>
           </section>
+        ) : null}
+
+        {activePanel === 'agents' ? (
+          <div className="mt-6">
+            <AgentsSection initialTokens={mcpTokens} />
+          </div>
         ) : null}
 
         {/* Same rule below: two unrelated topics, so neither gets a half-width slot. */}

@@ -21,6 +21,7 @@ import {
   buildMimeMessage,
   composeReply,
   GREETING_NAME_TOKEN,
+  nameFromAddress,
 } from '#/lib/mail/index.ts'
 import {
   getConversation,
@@ -106,9 +107,10 @@ function recipientsOf(
  *
  * The thread's own headers are tried first; the address book fills anyone the
  * thread only ever carried as a bare address. Order follows the recipients so a
- * multi-person greeting reads in the order the mail was addressed, and unknown
- * people are null rather than dropped, because `applyGreetingName` does the
- * dropping after it can see whether any name is left.
+ * multi-person greeting reads in the order the mail was addressed. An address
+ * with no stored name falls back to its local part (`bob.stevens@example.com`
+ * becomes `bob stevens`), so a multi-person greeting never silently drops
+ * someone.
  */
 async function recipientNamesFor(
   accountId: string,
@@ -131,7 +133,7 @@ async function recipientNamesFor(
 
   return emails.map((email) => {
     const key = email.trim().toLowerCase()
-    return fromThread.get(key) ?? stored.get(key) ?? null
+    return fromThread.get(key) ?? stored.get(key) ?? nameFromAddress(email)
   })
 }
 

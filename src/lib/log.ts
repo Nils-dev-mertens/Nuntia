@@ -90,14 +90,17 @@ export function redactPath(pathname: string): string {
   return path
 }
 
-/** Requests that are noise: assets, dev-tooling internals, the favicon. */
+/** Requests that are noise: assets, dev-tooling internals, favicon, health. */
 export function isQuietPath(pathname: string): boolean {
   return (
     pathname.startsWith('/assets/') ||
     pathname.startsWith('/@') ||
     pathname.startsWith('/_build/') ||
     pathname === '/favicon.ico' ||
-    pathname === '/robots.txt'
+    pathname === '/robots.txt' ||
+    // Compose probes this every 30 seconds; logging each one would bury the
+    // request lines the log exists to show.
+    pathname === '/healthz'
   )
 }
 

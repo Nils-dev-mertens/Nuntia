@@ -32,6 +32,7 @@ import {
   applyGreetingName,
   composeNewMessage,
   GREETING_NAME_TOKEN,
+  nameFromAddress,
 } from '#/lib/mail/index.ts'
 
 import { decodeAttachmentUploads } from './attachment-uploads.ts'
@@ -142,6 +143,8 @@ export async function resolveNewMessageStyle(
 
   // `{name}` and `{fullname}` are filled for every recipient from the mailbox's
   // contact records, so the preview and the send resolve them from the same rows.
+  // A recipient with no stored name falls back to a name read from the address,
+  // never to an empty slot: the greeting must list everyone it is addressed to.
   const names =
     recipients.length > 0 && GREETING_NAME_TOKEN.test(style.greeting ?? '')
       ? await contactNamesForEmails(accountId, recipients)
@@ -151,7 +154,10 @@ export async function resolveNewMessageStyle(
     ...style,
     greeting: applyGreetingName(
       style.greeting,
-      recipients.map((email) => names.get(email.trim().toLowerCase())),
+      recipients.map(
+        (email) =>
+          names.get(email.trim().toLowerCase()) ?? nameFromAddress(email),
+      ),
     ),
   }
 }
@@ -218,9 +224,10 @@ export async function sendNewMessage(
   }
 
   // The first To recipient decides the style, which is what "who is this going
-  // to" means when there is more than one; every To recipient fills the names in
-  // the greeting.
-  const style = await resolveNewMessageStyle(accountId, to)
+  // to" means when there is more than one. Every addressed recipient — To, Cc
+  // and Bcc — fills the names in the greeting, because all of them read it.
+  const addressed = [...to, ...cc, ...bcc]
+  const style = await resolveNewMessageStyle(accountId, addressed)
   const composed = composeNewMessage({
     body,
     greeting: style.greeting,

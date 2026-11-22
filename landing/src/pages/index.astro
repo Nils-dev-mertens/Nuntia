@@ -5,8 +5,8 @@
  * The hero and its interactive demo are kept from the Stitch layout. Everything
  * below it is written as information rather than as a pitch: what Nuntia is and
  * what it needs, how a thread is read, what it knows about the people you write
- * to, what the optional AI helpers do, where the mail lives, what is not built
- * yet, and what you need to start.
+ * to, what the optional AI helpers and connected agents do, where the mail lives,
+ * what is not built yet, and what you need to start.
  *
  * Style follows `stitch/DESIGN.md`: obsidian canvas, hairline rules, flat
  * blocks, one cadmium accent, Space Grotesk headings and JetBrains Mono labels.
@@ -26,7 +26,7 @@ const appUrl = (import.meta.env.PUBLIC_APP_URL ?? 'http://localhost:3000').repla
 )
 
 const pageDescription =
-  'Nuntia is a private-beta mail client for Gmail and Outlook: one inbox, threads read as conversations, four states that say what needs you, a directory of the people you write to, and optional AI drafts you review. Nothing is sent without you.'
+  'Nuntia is a private-beta mail client for Gmail and Outlook: one inbox, threads read as conversations, four states that say what needs you, a directory of the people you write to, optional AI drafts you review, and your own MCP agent that can read and triage the same mail with your approval. Nothing is sent without you.'
 
 const specs = [
   { label: 'Works with', value: 'Gmail and Outlook (Microsoft 365 or outlook.com). One or more addresses, in one inbox.' },
@@ -34,6 +34,7 @@ const specs = [
   { label: 'Status', value: 'Private beta. You request access, a person reviews it, and the invite link works once.' },
   { label: 'Price', value: 'None set. There is no payment step anywhere in the app.' },
   { label: 'AI', value: 'Optional. You connect your own account with Anthropic, OpenAI or Google.' },
+  { label: 'Agents', value: 'Optional. Claude Code, Cursor, VS Code, Vibe and other MCP clients connect over a loopback-only service, using a token you can revoke. They read only mail Nuntia has already synced.' },
   { label: 'Storage', value: 'One file on the machine where Nuntia runs, plus the original in Gmail or Outlook.' },
   { label: 'Permissions', value: 'Read mail, send mail, mark it read. Nuntia cannot delete anything.' },
 ]
@@ -151,6 +152,78 @@ const aiCards = [
   },
 ]
 
+const agentSteps = [
+  'The MCP service runs beside Nuntia: Docker Compose starts it with the app; from a source checkout, run bun run mcp.',
+  'Create a token in Settings → AI agents. It is shown once and can be revoked at any time.',
+  'Paste the generated command or JSON into your client, restart it, and ask about a thread.',
+]
+
+const agentClients = ['Claude Code', 'Cursor', 'VS Code', 'Vibe', 'Claude Desktop']
+
+const agentTools = [
+  { name: 'list_threads', detail: 'state: needs action · query: Northwind', result: '2 threads' },
+  { name: 'get_thread', detail: 'thread: NDA — signed copy', result: '5 messages · 1 attachment' },
+  { name: 'get_person', detail: 'priya@northwind.com', result: 'client · importance 8 / 10' },
+  { name: 'draft_reply', detail: 'thread: NDA — signed copy', result: 'draft returned · not stored' },
+]
+
+const agentConfig = `{
+  "mcpServers": {
+    "nuntia": {
+      "url": "http://127.0.0.1:3333/mcp",
+      "headers": {
+        "Authorization": "Bearer mcp_<id>.<secret>"
+      }
+    }
+  }
+}`
+
+const agentCards = [
+  {
+    label: 'Read',
+    tools: 'list_threads · get_thread · search_mail',
+    title: 'Search and open mail',
+    body: 'List threads by state, folder, correspondent, tag or words; open one with its messages, attachment details and your notes. Search every folder.',
+  },
+  {
+    label: 'Context',
+    tools: 'get_person · list_tags · list_states',
+    title: 'See the people behind it',
+    body: 'A correspondent’s notes, tags and recent threads, the tag vocabulary, your four states in your own wording, and the rules that file mail.',
+  },
+  {
+    label: 'Triage',
+    tools: 'move_thread',
+    title: 'Move and sort',
+    body: 'Set a thread’s state, move it between inbox, archive, trash and spam, or both. The same override you can make, and it survives the next sync.',
+  },
+  {
+    label: 'People',
+    tools: 'update_person_tags · update_person_notes',
+    title: 'Keep notes current',
+    body: 'Add or remove a person’s tags, or update their role, relationship, topics, current work and importance. Only the fields the agent supplies change.',
+  },
+  {
+    label: 'Draft',
+    tools: 'draft_reply',
+    title: 'Draft, never send',
+    body: 'Ask for a reply and the agent gets text to show you. Nothing is stored in Nuntia and nothing leaves the mailbox.',
+  },
+  {
+    label: 'Send',
+    tools: 'send_reply · confirm: true',
+    title: 'One approval, then send',
+    body: 'A reply goes out from the mailbox that owns the thread only after you approve the exact body and the agent confirms. A single accidental call is refused.',
+  },
+]
+
+const agentFacts = [
+  ['Endpoint', '127.0.0.1:3333/mcp · Streamable HTTP'],
+  ['Credential', 'One token per agent, revocable in Settings'],
+  ['Scope', 'Stored mail, people and triage — no sync, no attachments'],
+  ['Sending', 'Only after you approve the exact body'],
+]
+
 const privacyCards = [
   {
     title: 'Your provider stays the source of truth',
@@ -182,6 +255,8 @@ const limited = [
   'AI needs your own key. There is no included model.',
   'Tags show on threads but do not change a suggested reply yet; only the topic and your goal do.',
   'Mail is not instant unless Gmail’s extra setup is done.',
+  'Agents read only the mail Nuntia has already synced. They do not fetch from Gmail or Outlook, and they cannot read attachment contents.',
+  'The agent service listens on the local machine only, and every client needs a token created in Settings.',
 ]
 
 const betaSteps = [
@@ -196,6 +271,7 @@ const needs = [
   'An invitation from whoever runs the Nuntia you are joining, or a computer of your own to run it on.',
   'To run your own: a small app registration with Google or Microsoft, once, so they know Nuntia may connect. The setup guides walk through it and it takes a few minutes per provider.',
   'The first connection brings in the last thirty days of mail. New mail is checked on a timer; with extra setup, Gmail can say the moment something arrives.',
+  'For an agent: the MCP service runs with Docker Compose, or you start it from a source checkout. Create a token in Settings → AI agents and paste the generated config into your client.'
 ]
 
 const faqs = [
@@ -230,6 +306,11 @@ const faqs = [
       'No. Without one, Nuntia still sorts mail by its built-in rules and reply composition works fully. With a key from Anthropic, OpenAI or Google, it can also score importance, name topics, keep notes on people, suggest tags, draft tag descriptions and propose replies.',
   },
   {
+    question: 'Can I connect my own AI agent?',
+    answer:
+      'Yes. Nuntia includes an MCP service, and Docker Compose starts it with the app. Claude Code, Cursor, VS Code, Vibe and other MCP clients can read the mail Nuntia has already synced, look up people, tags and states, move threads, update notes and tags, and draft replies. You create a token in Settings → AI agents and can revoke it there. An agent cannot send without your approval: the send tool refuses unless it is called again with explicit confirmation after you have seen the exact body. The service listens on the local machine only and does not fetch new mail.'
+  },
+  {
     question: 'Can I run it myself?',
     answer:
       'Yes. The project ships as a Docker image and needs a small app registration with Google or Microsoft so those services accept the connection. The first sync brings in the last thirty days. New mail is checked on a timer, or pushed the moment it arrives once Gmail’s extra setup is done.',
@@ -237,7 +318,7 @@ const faqs = [
   {
     question: 'What does it not do yet?',
     answer:
-      'No other mail providers, no spam handling or deleted-mail view, no phone or desktop app, and no shared workspace for a team. There is no calendar, no contact import from Google or Microsoft, no scheduled sending and no automatic replies.',
+      'No other mail providers, no spam handling or deleted-mail view, no phone or desktop app, and no shared workspace for a team. There is no calendar, no contact import from Google or Microsoft, no scheduled sending and no automatic replies. An agent reads only stored mail, cannot open attachments, and needs a token created in Settings.',
   },
 ]
 ---
@@ -245,7 +326,7 @@ const faqs = [
 <SiteLayout
   title="Nuntia — read email like chat"
   description={pageDescription}
-  shareDescription="One inbox for Gmail and Outlook. Threads as conversations, four states, notes on the people you write to, and AI drafts you approve."
+  shareDescription="One inbox for Gmail and Outlook. Threads as conversations, four states, notes on the people you write to, AI drafts you approve, and your own agent over MCP."
   path="/"
 >
     <main>
@@ -274,7 +355,8 @@ const faqs = [
           >
             Nuntia puts Gmail and Outlook in one inbox, shows each thread as a
             conversation, and sorts it into what needs you. AI is optional, runs on
-            your own key, and never sends anything.
+            your own key, and never sends anything. Your own agent can now read and
+            triage the same mail over MCP.
           </p>
 
           <div class="mt-8 flex flex-col items-center gap-3 sm:flex-row">
@@ -1053,6 +1135,232 @@ const faqs = [
         </div>
       </section>
 
+      <!-- Agents -->
+      <section
+        id="agents"
+        data-reveal
+        class="relative overflow-hidden border-b border-border px-5 py-16 md:px-12 md:py-24"
+      >
+        <div class="relative mx-auto max-w-7xl">
+          <div class="grid gap-10 md:grid-cols-12 md:gap-14">
+            <div class="md:col-span-5">
+              <div class="flex flex-col gap-4">
+                <h2
+                  class="font-display text-[30px] leading-[1.1] font-medium tracking-[-0.03em] text-balance md:text-[40px] md:leading-[1.05]"
+                >
+                  Your inbox, in the agent you already use.
+                </h2>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  Nuntia runs an MCP server beside the app. Connect Claude Code, Cursor,
+                  VS Code, Vibe or another MCP client and ask in your own words: it
+                  searches the same threads, reads the same notes and makes the same
+                  triage changes you would.
+                </p>
+                <p class="max-w-xl text-[15px] leading-7 text-muted-foreground md:text-base">
+                  It works from the mail Nuntia has already synced — the agent has no
+                  provider login, runs no second sync, and cannot read attachment contents.
+                  Every write appears in Nuntia and can be undone. Sending is the exception:
+                  the agent can prepare the reply, but it leaves only after you approve the
+                  exact body.
+                </p>
+              </div>
+
+              <ol class="mt-6 flex flex-col border-t border-border">
+                {
+                  agentSteps.map((step, index) => (
+                    <li class="flex gap-4 border-b border-border py-3">
+                      <span class="font-mono text-[11px] text-muted-foreground">
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <span class="text-[14px] leading-6 text-foreground/90">{step}</span>
+                    </li>
+                  ))
+                }
+              </ol>
+
+              <div class="mt-5">
+                <p class="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                  Works with
+                </p>
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  {
+                    agentClients.map((client) => (
+                      <span class="rounded-[3px] border border-border bg-card px-2 py-1 font-mono text-[10px] text-foreground/80">
+                        {client}
+                      </span>
+                    ))
+                  }
+                </div>
+                <p class="mt-2 text-[12px] leading-5 text-muted-foreground">
+                  Any client that speaks Streamable HTTP. Claude Desktop connects
+                  through the mcp-remote bridge.
+                </p>
+              </div>
+
+            </div>
+
+            <div class="md:col-span-7">
+              <div class="overflow-hidden rounded-[6px] border border-border bg-card">
+                <div
+                  class="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 md:px-6"
+                >
+                  <span
+                    class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase"
+                  >
+                    Agent session · Claude Code
+                  </span>
+                  <span
+                    class="flex items-center gap-1.5 rounded-[3px] border border-border px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground"
+                  >
+                    <span aria-hidden="true" class="size-1.5 rounded-full bg-success"></span>
+                    connected · loopback
+                  </span>
+                </div>
+
+                <div class="p-4 md:px-6 md:py-5">
+                  <div class="rounded-[4px] border border-border bg-background/60 p-3">
+                    <p class="font-mono text-[11px] tracking-[0.1em] text-muted-foreground uppercase">
+                      You
+                    </p>
+                    <p class="mt-2 text-[13px] leading-6 text-foreground/90">
+                      Find anything from Northwind that still needs an answer, and draft a
+                      reply for each.
+                    </p>
+                  </div>
+
+                  <div class="mt-3 flex flex-col gap-2">
+                    {
+                      agentTools.map((tool) => (
+                        <div class="rounded-[4px] border border-border bg-background/40 px-3 py-2">
+                          <div class="flex items-center justify-between gap-3">
+                            <span class="flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-foreground/80">
+                              <span
+                                aria-hidden="true"
+                                class="size-1.5 shrink-0 rounded-full bg-primary"
+                              >
+                              </span>
+                              <span class="truncate">{tool.name}</span>
+                            </span>
+                            <span class="shrink-0 font-mono text-[11px] text-muted-foreground">
+                              {tool.result}
+                            </span>
+                          </div>
+                          <p class="mt-1 truncate font-mono text-[11px] leading-5 text-muted-foreground">
+                            {tool.detail}
+                          </p>
+                        </div>
+                      ))
+                    }
+                  </div>
+
+                  <div class="mt-3 rounded-[4px] border border-primary/25 bg-primary/[0.04] p-3">
+                    <p class="text-[13px] leading-6 text-foreground/90">
+                      Two threads still need an answer — the NDA from Priya Raman and the
+                      Q1 retainer. I have drafts for both; nothing has been sent.
+                    </p>
+                  </div>
+
+                  <div class="mt-3 rounded-[4px] border border-warning/25 bg-warning/[0.05] p-3">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <span
+                        class="flex items-center gap-1.5 font-mono text-[11px] tracking-[0.08em] text-warning uppercase"
+                      >
+                        <span aria-hidden="true" class="size-1.5 rounded-full bg-warning"></span>
+                        Send gate
+                      </span>
+                      <span class="font-mono text-[10px] text-muted-foreground">
+                        send_reply · confirm: true
+                      </span>
+                    </div>
+                    <p class="mt-2 text-[13px] leading-6 text-foreground/90">
+                      A draft is only text. The reply leaves after you approve the exact
+                      body and the agent calls the send tool a second time.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="border-t border-border bg-background/50 px-4 py-4 md:px-6">
+                  <div class="flex flex-wrap items-baseline justify-between gap-2">
+                    <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                      Connect
+                    </p>
+                    <p class="font-mono text-[10px] text-muted-foreground">
+                      JSON · Cursor, VS Code, Vibe
+                    </p>
+                  </div>
+                  <pre
+                    class="mt-3 overflow-x-auto rounded-[4px] border border-border bg-background/70 p-3 font-mono text-[11px] leading-5 text-foreground/80"
+                  ><code>{agentConfig}</code></pre>
+                  <p class="mt-2 font-mono text-[10px] leading-5 text-muted-foreground">
+                    The token is filled in for you; the Claude Code command and Claude
+                    Desktop bridge are in the same panel.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-14 border-t border-border pt-8">
+            <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <p class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                  What an agent can do
+                </p>
+                <h3
+                  class="mt-2 font-display text-2xl font-medium tracking-[-0.02em] text-balance md:text-[28px]"
+                >
+                  Twelve tools, one boundary.
+                </h3>
+              </div>
+              <p class="max-w-sm text-[13px] leading-6 text-muted-foreground">
+                The same ownership checks, state rules and reply composition the browser
+                uses. The agent gets no separate database and no wider access.
+              </p>
+            </div>
+
+            <div class="mt-7 grid gap-x-8 gap-y-6 sm:grid-cols-2 lg:grid-cols-3">
+              {
+                agentCards.map((card) => (
+                  <div
+                    class={`flex flex-col gap-1.5 border-t pt-4 ${
+                      card.label === 'Send' ? 'border-primary/40' : 'border-border'
+                    }`}
+                  >
+                    <span
+                      class={`font-mono text-[11px] tracking-[0.12em] uppercase ${
+                        card.label === 'Send' ? 'text-primary' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {card.label}
+                    </span>
+                    <p class="font-mono text-[10px] leading-4 text-muted-foreground/80">
+                      {card.tools}
+                    </p>
+                    <h4 class="mt-1 font-display text-lg font-medium tracking-tight">
+                      {card.title}
+                    </h4>
+                    <p class="text-[14px] leading-6 text-muted-foreground">{card.body}</p>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
+
+          <div class="mt-10 grid gap-4 border-t border-border pt-6 sm:grid-cols-2 lg:grid-cols-4">
+            {
+              agentFacts.map(([label, value]) => (
+                <div class="flex flex-col gap-1">
+                  <span class="font-mono text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+                    {label}
+                  </span>
+                  <span class="text-[13px] leading-5 text-foreground/90">{value}</span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
       <!-- Privacy -->
       <section
         id="privacy"
@@ -1304,7 +1612,7 @@ const faqs = [
           </div>
 
           <p class="relative z-10 font-mono text-[11px] tracking-[0.1em] text-white/80 uppercase">
-            Invite only · Gmail + Outlook · AI optional
+            Invite only · Gmail + Outlook · AI optional · Agents over MCP
           </p>
         </div>
       </section>

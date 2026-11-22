@@ -1133,9 +1133,12 @@ function ContactContextEditor({
 
 function ParsingProfileEditor({
   profile,
+  styles,
   onSave,
 }: {
   profile: NonNullable<ConversationDetail['parsingProfile']>
+  /** Named styles the user has created; the value is the assigned style id. */
+  styles: Array<{ id: string; name: string; isDefault: boolean }>
   onSave: (profile: SenderProfileSettings) => Promise<{ error: string | null }>
 }) {
   const [editing, setEditing] = useState(false)
@@ -1152,8 +1155,11 @@ function ParsingProfileEditor({
   const [replyStyleEnabled, setReplyStyleEnabled] = useState(
     profile.replyStyleEnabled,
   )
+  const [replyStyleId, setReplyStyleId] = useState(profile.replyStyleId)
   const [replyGreeting, setReplyGreeting] = useState(profile.replyGreeting)
   const [replySignature, setReplySignature] = useState(profile.replySignature)
+  const selectedStyle = replyStyleId ?? (replyStyleEnabled ? 'custom' : '')
+  const defaultStyle = styles.find((style) => style.isDefault)
 
   useEffect(() => {
     setUseAccountParsingDefaults(profile.useAccountParsingDefaults)
@@ -1161,9 +1167,20 @@ function ParsingProfileEditor({
     setStripGreeting(profile.stripGreeting)
     setStripSignature(profile.stripSignature)
     setReplyStyleEnabled(profile.replyStyleEnabled)
+    setReplyStyleId(profile.replyStyleId)
     setReplyGreeting(profile.replyGreeting)
     setReplySignature(profile.replySignature)
   }, [profile])
+
+  function chooseStyle(value: string) {
+    if (value === 'custom') {
+      setReplyStyleId(null)
+      setReplyStyleEnabled(true)
+      return
+    }
+    setReplyStyleId(value || null)
+    setReplyStyleEnabled(false)
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -1177,6 +1194,7 @@ function ParsingProfileEditor({
         stripGreeting,
         stripSignature,
         replyStyleEnabled,
+        replyStyleId,
         replyGreeting: replyStyleEnabled ? replyGreeting : null,
         replySignature: replyStyleEnabled ? replySignature : null,
       })
@@ -1244,15 +1262,59 @@ function ParsingProfileEditor({
         </div>
       ) : null}
       <div className="border-t border-border pt-3">
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            checked={replyStyleEnabled}
-            onChange={(event) => setReplyStyleEnabled(event.target.checked)}
-          />
-          Use a different greeting and signature for this sender
+        <label className="block text-xs text-muted-foreground">
+          Greeting and signature for this sender
+          <select
+            value={selectedStyle}
+            onChange={(event) => chooseStyle(event.target.value)}
+            className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+          >
+            <option value="">
+              {defaultStyle
+                ? `Default — ${defaultStyle.name}`
+                : 'Account default'}
+            </option>
+            {styles.map((style) => (
+              <option key={style.id} value={style.id}>
+                {style.name}
+              </option>
+            ))}
+            <option value="custom">Custom for this sender</option>
+          </select>
         </label>
-        {replyStyleEnabled ? (
+        {selectedStyle === '' ? (
+          profile.defaultReplyGreeting || profile.defaultReplySignature ? (
+            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+              <p>
+                {defaultStyle
+                  ? `Uses the default style “${defaultStyle.name}”:`
+                  : "Uses your mailbox's saved default:"}
+              </p>
+              <p className="whitespace-pre-wrap rounded bg-background/60 px-2 py-1 text-foreground">
+                {profile.defaultReplyGreeting
+                  ? `${profile.defaultReplyGreeting}\n`
+                  : ''}
+                {profile.defaultReplySignature}
+              </p>
+              <p>
+                Anything left empty falls back to the greeting and signature you
+                last used in this thread.
+              </p>
+            </div>
+          ) : (
+            <p className="mt-2 text-xs text-muted-foreground">
+              No default style is set, so replies use the greeting and signature
+              you last used in this thread. Mark one under Settings → Reply
+              styles.
+            </p>
+          )
+        ) : null}
+        {selectedStyle !== '' && selectedStyle !== 'custom' ? (
+          <p className="mt-2 text-xs text-muted-foreground">
+            The assigned style&rsquo;s greeting and signature are used.
+          </p>
+        ) : null}
+        {selectedStyle === 'custom' ? (
           <>
             <label className="mt-2 block text-xs text-muted-foreground">
               Greeting for this sender
@@ -2472,6 +2534,7 @@ export function ConversationView({
             <ParsingProfileEditor
               key={detail.parsingProfile.senderEmail}
               profile={detail.parsingProfile}
+              styles={detail.replyStyles}
               onSave={onSaveParsingProfile}
             />
           ) : null}

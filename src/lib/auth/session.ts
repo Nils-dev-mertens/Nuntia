@@ -110,17 +110,20 @@ export async function createSession(userId: string): Promise<SessionData> {
 }
 
 /**
- * Read and validate the current device's session.
+ * Validate a raw `<session id>.<token>` credential.
  *
- * Also makes sure the environment's bootstrap user exists first, so every entry
- * point sees the same state without each one remembering to do it.
+ * Separated from `getSession` because not every caller is a browser request:
+ * the MCP service has no cookie jar, and it must apply exactly the same checks
+ * a cookie does — the row exists, is not revoked, has not expired, and the
+ * token hash matches. Sharing this one function is what keeps a second entry
+ * point from quietly accepting a credential the app would reject.
+ *
+ * Returns the row's timestamps too, because `getSession` slides expiry and must
+ * know when it was last touched.
  */
-export async function getSession(): Promise<SessionData | null> {
-  await ensureBootstrapUser()
-
-  const raw = getCookie(COOKIE_NAME)
-  if (!raw) return null
-
+async function validateCredential(
+  raw: string,
+): Promise<(SessionData & { lastSeenAt: Date }) | null> {
   const dot = raw.indexOf('.')
   if (dot <= 0) return null
 
@@ -134,14 +137,56 @@ export async function getSession(): Promise<SessionData | null> {
 
   if (!row || row.revokedAt) return null
 
-  const now = Date.now()
-  if (row.expiresAt.getTime() <= now) return null
+  if (row.expiresAt.getTime() <= Date.now()) return null
   if (!hashesMatch(row.tokenHash, hashToken(token))) return null
+
+  return {
+    sessionId,
+    userId: row.userId,
+    lastSeenAt: row.lastSeenAt,
+  }
+}
+
+/**
+ * Resolve a session credential outside a request context.
+ *
+ * This is the MCP service's authentication: it receives the same
+ * `lumen_session` value a browser sends, and gets the user that session
+ * belongs to — or null. Revocation is immediate because the check reads the
+ * row on every call, and no sliding expiry is written here: a background
+ * service should not keep a human's session alive.
+ */
+export async function sessionFromCredential(
+  raw: string,
+): Promise<SessionData | null> {
+  await ensureBootstrapUser()
+
+  const valid = await validateCredential(raw)
+  return valid ? { sessionId: valid.sessionId, userId: valid.userId } : null
+}
+
+/**
+ * Read and validate the current device's session.
+ *
+ * Also makes sure the environment's bootstrap user exists first, so every entry
+ * point sees the same state without each one remembering to do it.
+ */
+export async function getSession(): Promise<SessionData | null> {
+  await ensureBootstrapUser()
+
+  const raw = getCookie(COOKIE_NAME)
+  if (!raw) return null
+
+  const valid = await validateCredential(raw)
+  if (!valid) return null
+
+  const { sessionId, userId, lastSeenAt } = valid
+  const now = Date.now()
 
   // Sliding expiry, written at most hourly so a busy tab is not a write per
   // request. The session row is the authority; the cookie is refreshed at the
   // same time so the browser keeps sending it.
-  if (now - row.lastSeenAt.getTime() > TOUCH_INTERVAL_MS) {
+  if (now - lastSeenAt.getTime() > TOUCH_INTERVAL_MS) {
     await db
       .update(sessions)
       .set({ lastSeenAt: new Date(now), expiresAt: expiryFrom(now) })
@@ -153,9 +198,9 @@ export async function getSession(): Promise<SessionData | null> {
   // The only funnel step the session table cannot answer: `last_seen_at` keeps
   // the latest touch, not a history, so "came back on another day" is written
   // here. At most one row per session per day, and it never fails the request.
-  await recordActiveDay(sessionId, row.userId)
+  await recordActiveDay(sessionId, userId)
 
-  return { sessionId, userId: row.userId }
+  return { sessionId, userId }
 }
 
 /** End this device's session. Other devices stay signed in. */

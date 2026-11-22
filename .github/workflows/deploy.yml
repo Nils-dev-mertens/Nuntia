@@ -55,8 +55,12 @@ jobs:
             # The tested commit, not whatever master points at now: pulling
             # could land a later push that has not been through CI.
             git reset --hard ${{ github.event.workflow_run.head_sha }}
+            # No profile flags: app, mcp and landing are all in the default
+            # stack, so each deploy rebuilds and recreates MCP with the app.
             docker compose build
             docker compose down
-            docker compose up -d --remove-orphans
+            # --wait holds the job until every healthcheck passes, so a broken
+            # MCP image fails the deploy instead of reporting success.
+            docker compose up -d --remove-orphans --wait --wait-timeout 180
             docker image prune -f
           '

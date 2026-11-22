@@ -78,6 +78,7 @@ const CONTENT_COLUMNS: ReadonlyArray<{ table: string; columns: string[] }> = [
   { table: 'contact_tag_events', columns: ['email'] },
   { table: 'contact_organizations', columns: ['focus', 'suggested_focus'] },
   { table: 'sender_profiles', columns: ['reply_greeting', 'reply_signature'] },
+  { table: 'reply_styles', columns: ['name', 'greeting', 'signature'] },
   {
     table: 'accounts',
     columns: ['default_reply_greeting', 'default_reply_signature'],

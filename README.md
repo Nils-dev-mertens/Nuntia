@@ -8,7 +8,8 @@ Nuntia is currently a **private beta**: sign-in is replaced by an invite, and th
 operator approves people from `/admin`. The design decisions behind that (and
 everything else) are in [PLAN.md](./PLAN.md); provider setup guides are in
 [docs/](./docs), and the direction for shared workspaces is in
-[docs/organizations.md](./docs/organizations.md).
+[docs/organizations.md](./docs/organizations.md). Running the parts as separate
+containers is covered in [docs/services.md](./docs/services.md).
 
 ## What it does
 
@@ -101,6 +102,7 @@ bun run scripts/set-password.ts you@example.com 'a long enough password' --admin
 
 ```bash
 bun run dev              # dev server on :3000
+bun run mcp              # MCP service on :3333 (Compose starts it too)
 bun run build            # client + server bundles in dist/
 # production entry (deployment config is still manual):
 #   bun dist/server/server.js
@@ -117,6 +119,20 @@ bun run scripts/set-password.ts <email>   # set a password, creating the account
 bun run scripts/backup-db.ts              # consistent database snapshot
 bun run scripts/diagnose-sync.ts          # why mail is missing from the inbox
 ```
+
+## MCP service
+
+A separate process exposes the stored mail, contacts and triage actions to
+MCP-compatible agents (Claude Code, Cursor, Vibe). Create a token in
+**Settings → AI agents** and copy the generated client config; it reads the same
+database. Start it on demand in a local checkout, or let the Compose stack start
+it with the app.
+
+```bash
+bun run mcp     # http://127.0.0.1:3333/mcp, loopback only
+```
+
+Setup, client configuration and the tool list are in [docs/mcp.md](./docs/mcp.md).
 
 ## Backups
 

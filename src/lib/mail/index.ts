@@ -50,6 +50,7 @@ export {
   composeReply,
   encodeQuotedPrintable,
   GREETING_NAME_TOKEN,
+  nameFromAddress,
 } from './compose.ts'
 
 export type { ComposeInput, MimeAttachment } from './compose.ts'

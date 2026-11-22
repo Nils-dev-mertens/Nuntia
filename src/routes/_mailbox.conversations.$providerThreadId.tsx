@@ -70,6 +70,7 @@ import type {
   ContactContextTextFields,
 } from '#/lib/contacts/context.ts'
 import { normaliseContactEmail } from '#/lib/contacts/matching.ts'
+import { getReplyStyle } from '#/lib/reply-styles.ts'
 
 /**
  * How long a draft instruction may be.
@@ -105,6 +106,8 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
       typeof data.profile.stripSignature !== 'boolean' ||
       typeof data.profile.useAccountParsingDefaults !== 'boolean' ||
       typeof data.profile.replyStyleEnabled !== 'boolean' ||
+      (data.profile.replyStyleId != null &&
+        typeof data.profile.replyStyleId !== 'string') ||
       (data.profile.replyGreeting !== null &&
         typeof data.profile.replyGreeting !== 'string') ||
       (data.profile.replySignature !== null &&
@@ -121,10 +124,26 @@ const saveParsingProfileAction = createServerFn({ method: 'POST' })
         return { error: `${label} must be ${limit} characters or fewer.` }
       }
     }
+
+    // The id arrives from the browser, so it is checked against the signed-in
+    // person's own styles rather than trusted as a reference.
+    const replyStyleId = data.profile.replyStyleId?.trim() || null
+    if (replyStyleId && !(await getReplyStyle(session.userId, replyStyleId))) {
+      return { error: 'That reply style no longer exists.' }
+    }
+
     await saveParsingProfile(accountId, senderEmail, {
       ...data.profile,
-      replyGreeting: data.profile.replyGreeting?.trim() || null,
-      replySignature: data.profile.replySignature?.trim() || null,
+      replyStyleId,
+      // One source at a time: assigning a named style retires the hand-written
+      // pair, exactly as switching the custom pair off already did.
+      replyStyleEnabled: replyStyleId ? false : data.profile.replyStyleEnabled,
+      replyGreeting: replyStyleId
+        ? null
+        : (data.profile.replyGreeting?.trim() ?? null),
+      replySignature: replyStyleId
+        ? null
+        : (data.profile.replySignature?.trim() ?? null),
     })
 
     try {
